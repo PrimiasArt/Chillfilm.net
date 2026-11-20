@@ -1,0 +1,3 @@
+-keep class com.phyll.filmhub.model.** { *; }
+-dontwarn okhttp3.**
+-dontwarn okio.**

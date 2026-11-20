@@ -1,0 +1,1503 @@
+package com.phyll.filmhub.ui
+
+import android.app.Application
+import android.os.Build
+import android.view.Window
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.phyll.filmhub.companion.CompanionEvent
+import com.phyll.filmhub.companion.CompanionHttpServer
+import com.phyll.filmhub.companion.CompanionPlayerTelemetry
+import com.phyll.filmhub.companion.PlayerRemoteCommand
+import com.phyll.filmhub.companion.TvScreenStreamController
+import com.phyll.filmhub.data.CatalogSection
+import com.phyll.filmhub.data.MovieRepository
+import com.phyll.filmhub.data.PreferencesManager
+import com.phyll.filmhub.model.AdbTaskProgress
+import com.phyll.filmhub.model.ControlTargetMode
+import com.phyll.filmhub.model.CountryCategory
+import com.phyll.filmhub.model.DeviceUiMode
+import com.phyll.filmhub.model.Episode
+import com.phyll.filmhub.model.ExternalSubtitleRef
+import com.phyll.filmhub.model.ManagedTvDevice
+import com.phyll.filmhub.model.MovieItem
+import com.phyll.filmhub.model.RemoteTvLiveState
+import com.phyll.filmhub.model.ServerGroup
+import com.phyll.filmhub.model.SubtitleColorChoice
+import com.phyll.filmhub.model.SubtitleEdgeStyle
+import com.phyll.filmhub.model.SubtitleStyleConfig
+import com.phyll.filmhub.model.VodProviderConfig
+import com.phyll.filmhub.model.VodProviderType
+import com.phyll.filmhub.model.WatchProgress
+import com.phyll.filmhub.subtitle.GeminiAudioSubtitleGenerator
+import com.phyll.filmhub.tvmanager.AdbTcpClient
+import com.phyll.filmhub.tvmanager.RemoteTvControllerClient
+import com.phyll.filmhub.updater.AppUpdateUiState
+import com.phyll.filmhub.updater.AppUpdater
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.util.UUID
+
+sealed class AppScreen {
+    data object Home : AppScreen()
+    data class Detail(val movie: MovieItem, val isResolving: Boolean = false) : AppScreen()
+    data class Player(
+        val movie: MovieItem,
+        val episode: Episode,
+        val startPositionMs: Long = 0L
+    ) : AppScreen()
+    data object SettingsSources : AppScreen()
+    data object TvManager : AppScreen()
+}
+
+class MainViewModel(application: Application) : AndroidViewModel(application) {
+
+    val prefs = PreferencesManager(application.applicationContext)
+    private val repository = MovieRepository()
+    private val geminiInspector = GeminiAudioSubtitleGenerator()
+    private val screenStreamController = TvScreenStreamController()
+    private val adbClient = AdbTcpClient(File(application.filesDir, "adb_keys"))
+    val remoteTvClient = RemoteTvControllerClient(adbClient)
+    val appUpdater = AppUpdater()
+
+    val isTvHardware: Boolean = prefs.isTvHardware
+
+    @Volatile
+    private var externalPickerLaunchTimestampMs: Long = 0L
+
+    @Volatile
+    private var lastRemoteSubStyleEditMs: Long = 0L
+
+    private val _currentScreen = MutableStateFlow<AppScreen>(AppScreen.Home)
+    val currentScreen: StateFlow<AppScreen> = _currentScreen.asStateFlow()
+
+    private val screenBackStack = ArrayDeque<AppScreen>()
+
+    private val _selectedCountry = MutableStateFlow(CountryCategory.ALL)
+    val selectedCountry: StateFlow<CountryCategory> = _selectedCountry.asStateFlow()
+
+    private val _sections = MutableStateFlow<List<CatalogSection>>(emptyList())
+    val sections: StateFlow<List<CatalogSection>> = _sections.asStateFlow()
+
+    private val _isLoadingCatalog = MutableStateFlow(false)
+    val isLoadingCatalog: StateFlow<Boolean> = _isLoadingCatalog.asStateFlow()
+
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    private val _searchResults = MutableStateFlow<List<MovieItem>>(emptyList())
+    val searchResults: StateFlow<List<MovieItem>> = _searchResults.asStateFlow()
+
+    private val _isSearching = MutableStateFlow(false)
+    val isSearching: StateFlow<Boolean> = _isSearching.asStateFlow()
+
+    private val _showQrCompanionDialog = MutableStateFlow(false)
+    val showQrCompanionDialog: StateFlow<Boolean> = _showQrCompanionDialog.asStateFlow()
+
+    private val _companionLanUrl = MutableStateFlow<String?>(null)
+    val companionLanUrl: StateFlow<String?> = _companionLanUrl.asStateFlow()
+
+    private val _bannerMessage = MutableStateFlow<String?>(null)
+    val bannerMessage: StateFlow<String?> = _bannerMessage.asStateFlow()
+
+    private val _incomingCompanionSubtitle = MutableStateFlow<ExternalSubtitleRef?>(null)
+    val incomingCompanionSubtitle: StateFlow<ExternalSubtitleRef?> = _incomingCompanionSubtitle.asStateFlow()
+
+    private val _playerTelemetry = MutableStateFlow(CompanionPlayerTelemetry())
+    val playerTelemetry: StateFlow<CompanionPlayerTelemetry> = _playerTelemetry.asStateFlow()
+
+    private val _remotePlayerCommand = MutableStateFlow<PlayerRemoteCommand?>(null)
+    val remotePlayerCommand: StateFlow<PlayerRemoteCommand?> = _remotePlayerCommand.asStateFlow()
+
+    private val _isScanningTvs = MutableStateFlow(false)
+    val isScanningTvs: StateFlow<Boolean> = _isScanningTvs.asStateFlow()
+
+    private val _adbTaskProgress = MutableStateFlow(AdbTaskProgress())
+    val adbTaskProgress: StateFlow<AdbTaskProgress> = _adbTaskProgress.asStateFlow()
+
+    private val _remoteTvState = MutableStateFlow(RemoteTvLiveState())
+    val remoteTvState: StateFlow<RemoteTvLiveState> = _remoteTvState.asStateFlow()
+
+    private val _tvScreenFrameBytes = MutableStateFlow<ByteArray?>(null)
+    val tvScreenFrameBytes: StateFlow<ByteArray?> = _tvScreenFrameBytes.asStateFlow()
+
+    private val _appUpdateState = MutableStateFlow(
+        AppUpdateUiState(currentVersion = appUpdater.getInstalledVersion(application.applicationContext))
+    )
+    val appUpdateState: StateFlow<AppUpdateUiState> = _appUpdateState.asStateFlow()
+
+    private var catalogJob: Job? = null
+    private var searchJob: Job? = null
+    private var tvPollJob: Job? = null
+    private var tvScreenStreamJob: Job? = null
+
+    private val companionServer = CompanionHttpServer(
+        port = 8899,
+        screenStreamController = screenStreamController,
+        stateSnapshotProvider = { buildCompanionStateJson() },
+        catalogJsonProvider = { countryCode, query -> buildCompanionCatalogJson(countryCode, query) },
+        movieDetailProvider = { movieId -> resolveMovieJsonForCompanion(movieId) },
+        deviceInfoProvider = { buildDeviceInfoJson() },
+        apkSourcePathProvider = { getApplication<Application>().applicationInfo.sourceDir },
+        onEvent = { event ->
+            viewModelScope.launch {
+                handleCompanionEvent(event)
+            }
+        }
+    )
+
+    init {
+        _companionLanUrl.value = companionServer.start()
+        if (prefs.isTvHardware && prefs.promptQrOnStartup.value && prefs.geminiApiKey.value.isBlank()) {
+            _showQrCompanionDialog.value = true
+        }
+        if (!prefs.isTvHardware) {
+            startPollingSelectedTv()
+            if (prefs.managedTvDevices.value.isEmpty()) {
+                scanLanForTvs(silent = true)
+            }
+        }
+        refreshCatalog()
+    }
+
+    fun attachWindowForStream(window: Window?) {
+        screenStreamController.attachWindow(window)
+    }
+
+    fun detachWindowForStream(window: Window?) {
+        screenStreamController.detachWindow(window)
+    }
+
+    fun updatePlayerTelemetry(telemetry: CompanionPlayerTelemetry) {
+        _playerTelemetry.value = telemetry
+    }
+
+    fun consumeRemotePlayerCommand(commandId: Long) {
+        if (_remotePlayerCommand.value?.id == commandId) {
+            _remotePlayerCommand.value = null
+        }
+    }
+
+    fun markExternalOverlayLaunching() {
+        externalPickerLaunchTimestampMs = System.currentTimeMillis()
+    }
+
+    fun clearExternalOverlayLaunching() {
+        externalPickerLaunchTimestampMs = 0L
+    }
+
+    fun isWithinExternalOverlayGraceWindow(): Boolean {
+        val elapsed = System.currentTimeMillis() - externalPickerLaunchTimestampMs
+        return externalPickerLaunchTimestampMs > 0L && elapsed in 0L..60_000L
+    }
+
+    fun setSessionGeminiCredentials(
+        apiKey: String,
+        modelId: String? = null,
+        silent: Boolean = false
+    ) {
+        prefs.setSessionGeminiCredentials(apiKey, modelId)
+        val activeModel = prefs.subtitleConfig.value.geminiModelId
+        if (apiKey.trim().isNotEmpty()) {
+            refreshGeminiModelsFromApi(apiKey.trim(), silent = true)
+            if (!silent) {
+                val msg = if (isTvHardware) {
+                    "🔐 Đã nạp Gemini Key tạm vào RAM (Model: $activeModel) • Thoát App tự xóa!"
+                } else {
+                    "💾 Đã lưu cố định Gemini Key trên ĐT ($activeModel) & tự đồng bộ sang TV!"
+                }
+                showBanner(msg)
+            }
+        } else if (!modelId.isNullOrBlank() && !silent) {
+            showBanner("✨ Đã chọn Model Gemini: $activeModel")
+        }
+        if (!isTvHardware) {
+            syncCredentialsToSelectedTvIfOnline(silent = true)
+        }
+    }
+
+    fun wipeGeminiKeyFromRam(silent: Boolean = false, clearPhoneVault: Boolean = false) {
+        val hadKey = prefs.geminiApiKey.value.isNotBlank()
+        prefs.wipeSessionGeminiKeyFromRam(clearPhoneVault = clearPhoneVault)
+        if (!silent && hadKey) {
+            showBanner(
+                if (clearPhoneVault) "🗑 Đã xóa API Key khỏi bộ nhớ Android!"
+                else "🧹 Đã xóa sạch Gemini API Key khỏi RAM!"
+            )
+        }
+        if (clearPhoneVault && !isTvHardware) {
+            val tvIp = prefs.selectedTvIp.value ?: return
+            viewModelScope.launch {
+                remoteTvClient.sendAction(tvIp, JSONObject().put("type", "wipe_gemini"))
+            }
+        }
+    }
+
+    fun refreshGeminiModelsFromApi(
+        apiKeyOverride: String = prefs.geminiApiKey.value,
+        silent: Boolean = false
+    ) {
+        val cleanKey = apiKeyOverride.trim()
+        if (cleanKey.isEmpty()) {
+            if (!silent) {
+                showBanner("🔐 Hãy quét QR nạp Gemini Key vào RAM trước để tải danh sách Model!")
+            }
+            return
+        }
+        viewModelScope.launch {
+            val live = geminiInspector.fetchAvailableGeminiModels(cleanKey)
+            if (live.isNotEmpty()) {
+                prefs.registerDiscoveredModels(live)
+                if (!silent) {
+                    showBanner("✅ Đã tải ${live.size} Model Gemini thực tế từ Key của bạn!")
+                }
+            } else if (!silent) {
+                showBanner("⚠️ Không tải được danh sách Model — hãy kiểm tra lại API Key!")
+            }
+        }
+    }
+
+    fun selectCountry(country: CountryCategory) {
+        if (_selectedCountry.value == country && _sections.value.isNotEmpty()) return
+        _selectedCountry.value = country
+        _searchQuery.value = ""
+        _searchResults.value = emptyList()
+        refreshCatalog()
+    }
+
+    fun refreshCatalog() {
+        catalogJob?.cancel()
+        catalogJob = viewModelScope.launch {
+            _isLoadingCatalog.value = true
+            val loaded = repository.loadHomeSections(
+                selectedCountry = _selectedCountry.value,
+                customProviders = prefs.customProviders.value
+            )
+            _sections.value = loaded
+            _isLoadingCatalog.value = false
+        }
+    }
+
+    fun updateSearchQuery(query: String) {
+        _searchQuery.value = query
+        if (query.isBlank()) {
+            _searchResults.value = emptyList()
+            _isSearching.value = false
+            return
+        }
+    }
+
+    fun executeSearch(query: String = _searchQuery.value) {
+        val trimmed = query.trim()
+        _searchQuery.value = trimmed
+        if (trimmed.isEmpty()) {
+            _searchResults.value = emptyList()
+            return
+        }
+        searchJob?.cancel()
+        searchJob = viewModelScope.launch {
+            _isSearching.value = true
+            val results = repository.searchAll(trimmed, prefs.customProviders.value)
+            _searchResults.value = results
+            _isSearching.value = false
+        }
+    }
+
+    fun openMovieDetail(movie: MovieItem) {
+        navigateTo(AppScreen.Detail(movie = movie, isResolving = movie.servers.isEmpty()))
+        if (movie.servers.isEmpty()) {
+            viewModelScope.launch {
+                val resolved = repository.resolveMovieDetail(movie, prefs.customProviders.value)
+                if (_currentScreen.value is AppScreen.Detail) {
+                    _currentScreen.value = AppScreen.Detail(movie = resolved, isResolving = false)
+                }
+            }
+        }
+    }
+
+    fun quickPlayMovie(movie: MovieItem) {
+        val readyEp = movie.firstPlayableEpisode
+        if (readyEp != null) {
+            startTargetAwarePlayback(movie, readyEp)
+            return
+        }
+        showBanner("⏳ Đang kết nối máy chủ phim & chuẩn bị Sub ไทย...")
+        viewModelScope.launch {
+            val resolved = repository.resolveMovieDetail(movie, prefs.customProviders.value)
+            val ep = resolved.firstPlayableEpisode
+            if (ep != null) {
+                startTargetAwarePlayback(resolved, ep)
+            } else {
+                navigateTo(AppScreen.Detail(movie = resolved, isResolving = false))
+            }
+        }
+    }
+
+    fun resumeFromWatchHistory(progress: WatchProgress) {
+        if (progress.movieId.startsWith("yt_")) {
+            val ytId = progress.movieId.removePrefix("yt_")
+            showBanner("⏳ Đang kết nối lại luồng YouTube 1080p...")
+            viewModelScope.launch {
+                val freshYt = repository.resolveDirectOrYouTubeStream(progress.title, "yt:$ytId")
+                val ep = freshYt.firstPlayableEpisode
+                if (ep != null) {
+                    startTargetAwarePlayback(freshYt, ep, progress.positionMs)
+                }
+            }
+            return
+        }
+        val cached = repository.getCachedMovie(progress.movieId)
+        if (cached != null) {
+            val ep = cached.servers.flatMap { it.episodes }
+                .firstOrNull { it.id == progress.episodeId }
+                ?: cached.firstPlayableEpisode
+            if (ep != null) {
+                startTargetAwarePlayback(cached, ep, progress.positionMs)
+                return
+            }
+        }
+        val adHoc = repository.registerAdHocStream(progress.title, progress.streamUrl)
+        adHoc.firstPlayableEpisode?.let { ep ->
+            startTargetAwarePlayback(adHoc, ep, progress.positionMs)
+        }
+    }
+
+    fun startPlayback(movie: MovieItem, episode: Episode, startPositionMs: Long = 0L) {
+        navigateTo(AppScreen.Player(movie = movie, episode = episode, startPositionMs = startPositionMs))
+    }
+
+    fun startTargetAwarePlayback(movie: MovieItem, episode: Episode, startPositionMs: Long = 0L) {
+        val selectedIp = prefs.selectedTvIp.value
+        if (!isTvHardware &&
+            prefs.controlTargetMode.value == ControlTargetMode.REMOTE_TV &&
+            selectedIp != null
+        ) {
+            playMovieOnSelectedTv(movie, episode, startPositionMs)
+        } else {
+            startPlayback(movie, episode, startPositionMs)
+        }
+    }
+
+    fun openTvManager() {
+        navigateTo(AppScreen.TvManager)
+        if (prefs.managedTvDevices.value.isEmpty() && !_isScanningTvs.value) {
+            scanLanForTvs(silent = false)
+        }
+    }
+
+    fun setControlTargetMode(mode: ControlTargetMode) {
+        prefs.setControlTargetMode(mode)
+        if (mode == ControlTargetMode.REMOTE_TV && prefs.selectedTvIp.value == null) {
+            showBanner("📡 Hãy chọn hoặc quét tìm TV trong Wi-Fi để điều khiển!")
+            openTvManager()
+        } else {
+            showBanner("Đã chuyển chế độ: ${mode.displayName}")
+            if (mode == ControlTargetMode.REMOTE_TV) {
+                syncCredentialsToSelectedTvIfOnline(silent = true)
+            }
+        }
+    }
+
+    fun toggleControlTargetMode() {
+        val next = if (prefs.controlTargetMode.value == ControlTargetMode.LOCAL_DEVICE) {
+            ControlTargetMode.REMOTE_TV
+        } else {
+            ControlTargetMode.LOCAL_DEVICE
+        }
+        setControlTargetMode(next)
+    }
+
+    fun playDirectStreamUrl(title: String, streamUrl: String, externalSubUrl: String = "") {
+        val trimmedUrl = streamUrl.trim()
+        if (trimmedUrl.isEmpty()) return
+        viewModelScope.launch {
+            if (trimmedUrl.contains("youtube.com", ignoreCase = true) ||
+                trimmedUrl.contains("youtu.be", ignoreCase = true) ||
+                trimmedUrl.startsWith("yt:", ignoreCase = true)
+            ) {
+                showBanner("⏳ Đang trích xuất luồng YouTube 1080p & Phụ đề...")
+            }
+            val baseMovie = repository.resolveDirectOrYouTubeStream(title, trimmedUrl)
+            val firstEp = baseMovie.firstPlayableEpisode ?: return@launch
+            val epWithSub = if (externalSubUrl.isNotBlank()) {
+                val customRef = ExternalSubtitleRef(
+                    id = "direct_sub_${System.currentTimeMillis()}",
+                    label = "Sub ngoài (URL)",
+                    languageCode = if (externalSubUrl.contains("th", ignoreCase = true)) "th" else "vi",
+                    urlOrContent = externalSubUrl.trim(),
+                    isRawContent = false,
+                    sourcePlatform = "Direct URL"
+                )
+                firstEp.copy(subtitles = listOf(customRef) + firstEp.subtitles)
+            } else {
+                firstEp
+            }
+            startTargetAwarePlayback(baseMovie, epWithSub, 0L)
+        }
+    }
+
+    fun openSettingsSources() {
+        navigateTo(AppScreen.SettingsSources)
+    }
+
+    fun navigateHome() {
+        screenBackStack.clear()
+        _currentScreen.value = AppScreen.Home
+    }
+
+    fun toggleDeviceUiMode() {
+        val next = if (prefs.deviceUiMode.value == DeviceUiMode.MOBILE) {
+            DeviceUiMode.TV_BOX
+        } else {
+            DeviceUiMode.MOBILE
+        }
+        prefs.setDeviceUiMode(next)
+        val label = if (next == DeviceUiMode.MOBILE) "📱 Giao diện Điện Thoại" else "📺 Giao diện TV"
+        showBanner("Đã chuyển sang: $label")
+    }
+
+    fun setQrDialogVisible(visible: Boolean) {
+        if (visible && _companionLanUrl.value == null) {
+            _companionLanUrl.value = companionServer.start()
+        } else if (visible) {
+            _companionLanUrl.value = companionServer.getLanUrl()
+        }
+        _showQrCompanionDialog.value = visible
+    }
+
+    fun navigateBack(): Boolean {
+        if (_showQrCompanionDialog.value) {
+            _showQrCompanionDialog.value = false
+            return true
+        }
+        if (screenBackStack.isEmpty()) return false
+        _currentScreen.value = screenBackStack.removeLast()
+        return true
+    }
+
+    private fun navigateTo(next: AppScreen) {
+        val current = _currentScreen.value
+        if (current != next) {
+            // Avoid stacking duplicate Player -> Player when switching episodes
+            if (!(current is AppScreen.Player && next is AppScreen.Player)) {
+                screenBackStack.addLast(current)
+            }
+            _currentScreen.value = next
+        }
+    }
+
+    fun updateSubtitleStyle(transform: (SubtitleStyleConfig) -> SubtitleStyleConfig) {
+        prefs.updateSubtitleConfig(transform)
+        if (!isTvHardware) {
+            val ip = prefs.selectedTvIp.value
+            if (ip != null && prefs.controlTargetMode.value == ControlTargetMode.REMOTE_TV) {
+                lastRemoteSubStyleEditMs = System.currentTimeMillis()
+                viewModelScope.launch {
+                    remoteTvClient.syncCredentialsAndConfigToTv(
+                        tvIp = ip,
+                        apiKey = prefs.geminiApiKey.value,
+                        styleConfig = prefs.subtitleConfig.value,
+                        silent = true
+                    )
+                }
+            }
+        }
+    }
+
+    fun setDeviceUiMode(mode: DeviceUiMode) {
+        prefs.setDeviceUiMode(mode)
+    }
+
+    fun saveWatchProgress(
+        movie: MovieItem,
+        episode: Episode,
+        positionMs: Long,
+        durationMs: Long
+    ) {
+        if (positionMs < 2_000L) return
+        prefs.saveWatchProgress(
+            WatchProgress(
+                movieId = movie.id,
+                title = movie.title,
+                posterUrl = movie.posterUrl,
+                countryCode = movie.country.code,
+                streamUrl = episode.streamUrl,
+                episodeId = episode.id,
+                episodeName = episode.name,
+                positionMs = positionMs,
+                durationMs = durationMs
+            )
+        )
+    }
+
+    fun addCustomVodProvider(
+        name: String,
+        url: String,
+        type: VodProviderType,
+        country: CountryCategory = CountryCategory.GLOBAL
+    ) {
+        val cleanUrl = url.trim()
+        if (cleanUrl.isEmpty()) return
+        val provider = VodProviderConfig(
+            id = "prov_${UUID.randomUUID().toString().take(8)}",
+            name = name.trim().ifBlank { "Nguồn VOD Mới" },
+            baseUrl = cleanUrl,
+            type = type,
+            defaultCountry = country,
+            enabled = true
+        )
+        prefs.addCustomProvider(provider)
+        showBanner("Đã thêm nguồn phim: ${provider.name}")
+        refreshCatalog()
+    }
+
+    fun consumeIncomingCompanionSubtitle() {
+        _incomingCompanionSubtitle.value = null
+    }
+
+    fun clearCacheForTvBox() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val cacheDir = getApplication<Application>().cacheDir
+            val freedBytes = calculateDirSize(cacheDir)
+            cacheDir.listFiles()?.forEach { it.deleteRecursively() }
+            val freedMb = "%.1f".format(freedBytes / (1024f * 1024f))
+            withContext(Dispatchers.Main) {
+                showBanner("Đã dọn sạch $freedMb MB bộ nhớ đệm trên thiết bị!")
+            }
+        }
+    }
+
+    fun dismissBanner() {
+        _bannerMessage.value = null
+    }
+
+    fun showBanner(message: String) {
+        _bannerMessage.value = message
+    }
+
+    private fun buildCompanionStateJson(): JSONObject {
+        val screenName = when (_currentScreen.value) {
+            is AppScreen.Home -> "HOME"
+            is AppScreen.Detail -> "DETAIL"
+            is AppScreen.Player -> "PLAYER"
+            is AppScreen.SettingsSources -> "SETTINGS"
+            is AppScreen.TvManager -> "TV_MANAGER"
+        }
+        val subCfg = prefs.subtitleConfig.value
+        val subStyleJson = JSONObject()
+            .put("fontSizeSp", subCfg.fontSizeSp.toDouble())
+            .put("secondaryFontSizeSp", subCfg.secondaryFontSizeSp.toDouble())
+            .put("primaryColor", subCfg.primaryColor.name)
+            .put("primaryColorHex", subCfg.primaryColor.hexCss)
+            .put("secondaryColor", subCfg.secondaryColor.name)
+            .put("secondaryColorHex", subCfg.secondaryColor.hexCss)
+            .put("linkPrimarySecondaryStyle", subCfg.linkPrimarySecondaryStyle)
+            .put("edgeStyle", subCfg.edgeStyle.name)
+            .put("boxOpacity", subCfg.boxOpacity.toDouble())
+            .put("bottomOffsetDp", subCfg.bottomOffsetDp.toDouble())
+            .put("hardsubMaskEnabled", subCfg.hardsubMaskEnabled)
+            .put("dualSubEnabled", subCfg.dualSubEnabled)
+
+        return JSONObject()
+            .put("ok", true)
+            .put("screen", screenName)
+            .put("selectedCountry", _selectedCountry.value.code)
+            .put("deviceUiMode", prefs.deviceUiMode.value.name)
+            .put("hasGeminiKey", prefs.geminiApiKey.value.isNotBlank())
+            .put("geminiModel", subCfg.geminiModelId)
+            .put("showQrDialog", _showQrCompanionDialog.value)
+            .put("banner", _bannerMessage.value.orEmpty())
+            .put("subtitleStyle", subStyleJson)
+            .put("player", _playerTelemetry.value.toJson())
+    }
+
+    private fun buildDeviceInfoJson(): JSONObject {
+        val pkgInfo = runCatching {
+            val ctx = getApplication<Application>()
+            ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+        }.getOrNull()
+        return JSONObject()
+            .put("ok", true)
+            .put("app", "PhyllFilmHub")
+            .put("version", pkgInfo?.versionName ?: "2.8.0")
+            .put("hardwareModel", Build.MODEL.orEmpty())
+            .put("deviceName", "${Build.MANUFACTURER} ${Build.MODEL}".trim())
+            .put("isTvHardware", isTvHardware)
+    }
+
+    private fun buildCompanionCatalogJson(countryCode: String?, searchQuery: String?): JSONObject {
+        val secArray = JSONArray()
+        for (sec in _sections.value) {
+            val moviesArr = JSONArray()
+            for (m in sec.movies) {
+                moviesArr.put(movieItemToJson(m, includeEpisodes = false))
+            }
+            secArray.put(
+                JSONObject()
+                    .put("id", sec.id)
+                    .put("title", sec.title)
+                    .put("subtitle", sec.subtitle)
+                    .put("movies", moviesArr)
+            )
+        }
+        val searchArr = JSONArray()
+        for (m in _searchResults.value) {
+            searchArr.put(movieItemToJson(m, includeEpisodes = false))
+        }
+        return JSONObject()
+            .put("ok", true)
+            .put("selectedCountry", _selectedCountry.value.code)
+            .put("requestedCountry", countryCode.orEmpty())
+            .put("searchQuery", searchQuery ?: _searchQuery.value)
+            .put("isLoading", _isLoadingCatalog.value || _isSearching.value)
+            .put("sections", secArray)
+            .put("searchResults", searchArr)
+    }
+
+    private suspend fun resolveMovieJsonForCompanion(movieId: String): JSONObject? {
+        val existing = findMovieInMemory(movieId) ?: repository.getCachedMovie(movieId) ?: return null
+        val resolved = if (existing.servers.isEmpty()) {
+            repository.resolveMovieDetail(existing, prefs.customProviders.value)
+        } else {
+            existing
+        }
+        return movieItemToJson(resolved, includeEpisodes = true)
+    }
+
+    private fun findMovieInMemory(movieId: String): MovieItem? {
+        val cur = _currentScreen.value
+        if (cur is AppScreen.Detail && cur.movie.id == movieId) return cur.movie
+        if (cur is AppScreen.Player && cur.movie.id == movieId) return cur.movie
+        _searchResults.value.firstOrNull { it.id == movieId }?.let { return it }
+        for (sec in _sections.value) {
+            sec.movies.firstOrNull { it.id == movieId }?.let { return it }
+        }
+        return repository.getCachedMovie(movieId)
+    }
+
+    private fun movieItemToJson(m: MovieItem, includeEpisodes: Boolean): JSONObject {
+        val obj = JSONObject()
+            .put("id", m.id)
+            .put("title", m.title)
+            .put("originalTitle", m.originalTitle)
+            .put("year", m.year)
+            .put("countryCode", m.country.code)
+            .put("countryName", m.country.displayName)
+            .put("countryFlag", m.country.flagEmoji)
+            .put("genre", m.genre)
+            .put("quality", m.quality)
+            .put("posterUrl", m.posterUrl)
+            .put("backdropUrl", m.backdropUrl)
+            .put("description", m.description)
+            .put("providerName", m.providerName)
+            .put("hasNativeThaiSub", m.hasNativeThaiSub)
+
+        if (includeEpisodes) {
+            val epsArr = JSONArray()
+            m.servers.flatMap { it.episodes }.forEach { ep ->
+                epsArr.put(
+                    JSONObject()
+                        .put("id", ep.id)
+                        .put("name", ep.name)
+                        .put("streamUrl", ep.streamUrl)
+                )
+            }
+            obj.put("episodes", epsArr)
+        }
+        return obj
+    }
+
+    private fun handleCompanionEvent(event: CompanionEvent) {
+        when (event) {
+            is CompanionEvent.RemoteSearch -> {
+                _showQrCompanionDialog.value = false
+                screenBackStack.clear()
+                _currentScreen.value = AppScreen.Home
+                executeSearch(event.query)
+                showBanner("📱 Đã nhận tìm kiếm từ điện thoại: \"${event.query}\"")
+            }
+            is CompanionEvent.SelectCountry -> {
+                _showQrCompanionDialog.value = false
+                val target = CountryCategory.entries.firstOrNull {
+                    it.code.equals(event.countryCode, ignoreCase = true)
+                } ?: CountryCategory.ALL
+                if (_currentScreen.value !is AppScreen.Home && _currentScreen.value !is AppScreen.Player) {
+                    navigateHome()
+                }
+                selectCountry(target)
+                if (_currentScreen.value !is AppScreen.Player) {
+                    showBanner("📱 Đã chuyển danh mục từ ĐT: ${target.flagEmoji} ${target.displayName}")
+                }
+            }
+            is CompanionEvent.OpenMovieOnTv -> {
+                _showQrCompanionDialog.value = false
+                val movie = findMovieInMemory(event.movieId) ?: return
+                if (event.quickPlay) {
+                    quickPlayMovie(movie)
+                    showBanner("📱 Đang mở phát phim từ ĐT: ${movie.title}")
+                } else {
+                    openMovieDetail(movie)
+                    showBanner("📱 Đã mở chi tiết phim từ ĐT: ${movie.title}")
+                }
+            }
+            is CompanionEvent.PlayEpisodeOnTv -> {
+                _showQrCompanionDialog.value = false
+                val baseMovie = findMovieInMemory(event.movieId) ?: return
+                viewModelScope.launch {
+                    val resolved = if (baseMovie.servers.isEmpty()) {
+                        repository.resolveMovieDetail(baseMovie, prefs.customProviders.value)
+                    } else {
+                        baseMovie
+                    }
+                    val allEps = resolved.servers.flatMap { it.episodes }
+                    val chosenEp = allEps.firstOrNull { it.id == event.episodeId } ?: resolved.firstPlayableEpisode
+                    if (chosenEp != null) {
+                        startPlayback(resolved, chosenEp, 0L)
+                        showBanner("📱 Đang phát ${resolved.title} (${chosenEp.name}) từ ĐT")
+                    }
+                }
+            }
+            is CompanionEvent.PlayerCommand -> {
+                _showQrCompanionDialog.value = false
+                _remotePlayerCommand.value = event.command
+            }
+            is CompanionEvent.NavigateAction -> {
+                when (event.target.lowercase()) {
+                    "back" -> navigateBack()
+                    "home" -> {
+                        _showQrCompanionDialog.value = false
+                        navigateHome()
+                    }
+                    "settings" -> {
+                        _showQrCompanionDialog.value = false
+                        openSettingsSources()
+                    }
+                    "toggle_ui_mode" -> toggleDeviceUiMode()
+                    "close_qr" -> _showQrCompanionDialog.value = false
+                }
+            }
+            is CompanionEvent.PushDirectStream -> {
+                _showQrCompanionDialog.value = false
+                playDirectStreamUrl(event.title, event.streamUrl)
+                showBanner("📱 Đang phát luồng gửi từ điện thoại: ${event.title}")
+            }
+            is CompanionEvent.PushSubtitleContent -> {
+                _showQrCompanionDialog.value = false
+                val ref = ExternalSubtitleRef(
+                    id = "phone_${System.currentTimeMillis()}",
+                    label = "📱 ${event.fileName}",
+                    languageCode = event.languageCode,
+                    urlOrContent = event.decodedContent,
+                    isRawContent = true
+                )
+                _incomingCompanionSubtitle.value = ref
+                showBanner("📱 Đã nhận file phụ đề từ điện thoại: ${event.fileName}")
+            }
+            is CompanionEvent.AddVodProvider -> {
+                val pType = runCatching { VodProviderType.valueOf(event.providerType) }
+                    .getOrDefault(VodProviderType.STANDARD_CMS_JSON)
+                addCustomVodProvider(event.name, event.url, pType)
+            }
+            is CompanionEvent.SetGeminiKey -> {
+                _showQrCompanionDialog.value = false
+                val prevKey = prefs.geminiApiKey.value
+                setSessionGeminiCredentials(
+                    apiKey = event.apiKey,
+                    modelId = event.modelId,
+                    silent = event.silent && prevKey == event.apiKey
+                )
+            }
+            is CompanionEvent.PlayMoviePayload -> {
+                _showQrCompanionDialog.value = false
+                val country = CountryCategory.fromSlugOrName(event.countryCode)
+                val episode = Episode(
+                    id = event.episodeId,
+                    name = event.episodeName,
+                    streamUrl = event.streamUrl,
+                    audioStreamUrl = event.audioStreamUrl,
+                    fallbackStreamUrl = event.fallbackStreamUrl,
+                    subtitles = event.subtitles
+                )
+                val cachedMovie = findMovieInMemory(event.movieId)
+                val resolvedMovie = if (cachedMovie != null && cachedMovie.servers.isNotEmpty()) {
+                    cachedMovie
+                } else {
+                    MovieItem(
+                        id = event.movieId,
+                        title = event.movieTitle,
+                        originalTitle = event.originalTitle,
+                        year = event.year,
+                        country = country,
+                        genre = event.genre,
+                        posterUrl = event.posterUrl,
+                        backdropUrl = event.backdropUrl,
+                        description = event.description,
+                        providerName = event.providerName,
+                        servers = listOf(ServerGroup("Phát từ ĐT", listOf(episode)))
+                    )
+                }
+                startPlayback(resolvedMovie, episode, event.startPositionMs)
+                showBanner("📱 Đang phát trên TV: ${resolvedMovie.title} (${episode.name})")
+            }
+            is CompanionEvent.WipeGeminiKey -> {
+                wipeGeminiKeyFromRam(silent = false)
+            }
+            is CompanionEvent.UpdateSubtitleStyle -> {
+                if (event.resetDefault) {
+                    prefs.resetSubtitleConfigToThaiDefault()
+                    showBanner("📱 Đã khôi phục cỡ chữ, màu chữ & khung Sub gọn chuẩn!")
+                    return
+                }
+                prefs.updateSubtitleConfig { cfg ->
+                    val targetMode = event.target.uppercase()
+                    var next = cfg
+                    event.linkPrimarySecondary?.let { next = next.copy(linkPrimarySecondaryStyle = it) }
+                    if (event.linkPrimarySecondary == null) {
+                        when (targetMode) {
+                            "ALL" -> next = next.copy(linkPrimarySecondaryStyle = true)
+                            "PRIMARY", "SECONDARY" -> next = next.copy(linkPrimarySecondaryStyle = false)
+                        }
+                    }
+
+                    event.fontSizeSp?.let { sz ->
+                        next = when (targetMode) {
+                            "SECONDARY" -> next.copy(secondaryFontSizeSp = sz.coerceIn(10f, 48f))
+                            "ALL" -> next.copy(
+                                fontSizeSp = sz.coerceIn(12f, 52f),
+                                secondaryFontSizeSp = (event.secondaryFontSizeSp ?: (sz * 0.80f)).coerceIn(10f, 48f)
+                            )
+                            else -> next.copy(fontSizeSp = sz.coerceIn(12f, 52f))
+                        }
+                    }
+                    if (event.secondaryFontSizeSp != null && event.fontSizeSp == null) {
+                        next = next.copy(secondaryFontSizeSp = event.secondaryFontSizeSp.coerceIn(10f, 48f))
+                    }
+                    event.sizeDeltaSp?.let { delta ->
+                        next = when (targetMode) {
+                            "SECONDARY" -> next.copy(
+                                secondaryFontSizeSp = (next.secondaryFontSizeSp + delta).coerceIn(10f, 48f)
+                            )
+                            "ALL" -> next.copy(
+                                fontSizeSp = (next.fontSizeSp + delta).coerceIn(12f, 52f),
+                                secondaryFontSizeSp = (next.secondaryFontSizeSp + delta).coerceIn(10f, 48f)
+                            )
+                            else -> next.copy(
+                                fontSizeSp = (next.fontSizeSp + delta).coerceIn(12f, 52f)
+                            )
+                        }
+                    }
+                    event.colorName?.let { cName ->
+                        val chosen = SubtitleColorChoice.entries.firstOrNull {
+                            it.name.equals(cName, ignoreCase = true)
+                        }
+                        if (chosen != null) {
+                            next = when (targetMode) {
+                                "SECONDARY" -> next.copy(secondaryColor = chosen)
+                                "ALL" -> next.copy(primaryColor = chosen, secondaryColor = chosen)
+                                else -> next.copy(primaryColor = chosen)
+                            }
+                        }
+                    }
+                    event.primaryColorName?.let { cName ->
+                        SubtitleColorChoice.entries.firstOrNull { it.name.equals(cName, ignoreCase = true) }
+                            ?.let { next = next.copy(primaryColor = it) }
+                    }
+                    event.secondaryColorName?.let { cName ->
+                        SubtitleColorChoice.entries.firstOrNull { it.name.equals(cName, ignoreCase = true) }
+                            ?.let { next = next.copy(secondaryColor = it) }
+                    }
+                    event.edgeStyleName?.let { eName ->
+                        SubtitleEdgeStyle.entries.firstOrNull { it.name.equals(eName, ignoreCase = true) }
+                            ?.let { next = next.copy(edgeStyle = it) }
+                    }
+                    event.boxOpacity?.let { op ->
+                        next = next.copy(boxOpacity = op.coerceIn(0.25f, 0.96f))
+                    }
+                    event.bottomOffsetDp?.let { off ->
+                        next = next.copy(bottomOffsetDp = off.coerceIn(4f, 180f))
+                    }
+                    event.hardsubMaskEnabled?.let { m ->
+                        next = next.copy(hardsubMaskEnabled = m)
+                    }
+                    event.dualSubEnabled?.let { d ->
+                        next = next.copy(dualSubEnabled = d)
+                    }
+                    next
+                }
+            }
+        }
+    }
+
+    // ============================================================================================
+    // STANDALONE ANDROID PHONE CONTROLLER: Multi-TV Manager, ADB Install/Uninstall & Remote Sync
+    // ============================================================================================
+
+    fun scanLanForTvs(silent: Boolean = false) {
+        if (_isScanningTvs.value) return
+        viewModelScope.launch {
+            _isScanningTvs.value = true
+            val found = remoteTvClient.discoverLanTvs(prefs.managedTvDevices.value)
+            prefs.mergeDiscoveredTvDevices(found)
+            if (prefs.selectedTvIp.value == null) {
+                val firstOnline = found.firstOrNull { it.companionOnline } ?: found.firstOrNull()
+                if (firstOnline != null) {
+                    prefs.selectManagedTvIp(firstOnline.ip)
+                }
+            }
+            _isScanningTvs.value = false
+            startPollingSelectedTv()
+            if (!silent) {
+                showBanner(
+                    if (found.isNotEmpty()) "✅ Đã tìm thấy ${found.size} TV trên mạng Wi-Fi!"
+                    else "⚠️ Chưa thấy TV nào mở cổng 5555 (ADB) hoặc 8899. Hãy thêm IP thủ công hoặc bật Gỡ lỗi ADB trên TV."
+                )
+            }
+        }
+    }
+
+    fun addOrProbeTvByIp(rawIp: String, nickname: String = "") {
+        val ip = rawIp.trim()
+        if (ip.isEmpty()) return
+        viewModelScope.launch {
+            showBanner("🔍 Đang kết nối thử tới TV $ip...")
+            val probed = remoteTvClient.probeSingleTv(ip)
+            val withName = if (nickname.isNotBlank()) probed.copy(name = nickname.trim()) else probed
+            prefs.upsertManagedTvDevice(withName)
+            selectManagedTv(withName.ip)
+            val status = when {
+                withName.companionOnline -> "Đang mở Phyll Cinema (${withName.appVersion})"
+                withName.adbOnline -> "Đã kết nối ADB (:5555) — sẵn sàng Cài/Mở App!"
+                else -> "Đã lưu IP (TV đang tắt hoặc chưa mở cổng 5555/8899)"
+            }
+            showBanner("📺 ${withName.displayTitle}: $status")
+        }
+    }
+
+    fun selectManagedTv(ip: String) {
+        prefs.selectManagedTvIp(ip)
+        startPollingSelectedTv()
+        syncCredentialsToSelectedTvIfOnline(silent = false)
+    }
+
+    fun renameManagedTv(ip: String, newName: String) {
+        prefs.renameManagedTvDevice(ip, newName)
+    }
+
+    fun removeManagedTv(ip: String) {
+        prefs.removeManagedTvDevice(ip)
+        if (prefs.selectedTvIp.value == null) {
+            _remoteTvState.value = RemoteTvLiveState()
+        } else {
+            startPollingSelectedTv()
+        }
+    }
+
+    fun syncCredentialsToSelectedTvIfOnline(silent: Boolean = false) {
+        val ip = prefs.selectedTvIp.value ?: return
+        viewModelScope.launch {
+            val ok = remoteTvClient.syncCredentialsAndConfigToTv(
+                tvIp = ip,
+                apiKey = prefs.geminiApiKey.value,
+                styleConfig = prefs.subtitleConfig.value,
+                silent = true
+            )
+            if (ok) {
+                if (!silent) showBanner("🔐 Đã đồng bộ API Key & Cấu hình sang TV $ip!")
+                val refreshed = remoteTvClient.probeSingleTv(ip)
+                prefs.upsertManagedTvDevice(refreshed)
+            } else if (!silent) {
+                showBanner("⚠️ Chưa kết nối được cổng 8899 trên TV $ip (hãy bấm Mở App TV trước).")
+            }
+        }
+    }
+
+    fun installAppOnTv(ip: String) {
+        if (_adbTaskProgress.value.isRunning) {
+            showBanner("⏳ Đang có tác vụ cài/gỡ khác đang chạy...")
+            return
+        }
+        val apkPath = getApplication<Application>().applicationInfo.sourceDir
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                adbClient.pushAndInstallApk(
+                    host = ip,
+                    apkFile = File(apkPath),
+                    onProgress = { pct, msg ->
+                        _adbTaskProgress.value = AdbTaskProgress(
+                            isRunning = true,
+                            targetIp = ip,
+                            operationName = "Cài đặt APK lên TV",
+                            progressPercent = pct,
+                            statusMessage = msg
+                        )
+                    }
+                )
+                delay(2_400L)
+                val refreshed = remoteTvClient.probeSingleTv(ip)
+                prefs.upsertManagedTvDevice(refreshed)
+                prefs.selectManagedTvIp(ip)
+                startPollingSelectedTv()
+                remoteTvClient.syncCredentialsAndConfigToTv(
+                    tvIp = ip,
+                    apiKey = prefs.geminiApiKey.value,
+                    styleConfig = prefs.subtitleConfig.value,
+                    silent = true
+                )
+                _adbTaskProgress.value = AdbTaskProgress(
+                    isRunning = false,
+                    targetIp = ip,
+                    operationName = "Hoàn tất",
+                    progressPercent = 100,
+                    statusMessage = "✅ Đã cài đặt xong Phyll Cinema lên TV & tự nạp API Key!"
+                )
+                withContext(Dispatchers.Main) {
+                    showBanner("✅ Đã cài & kết nối xong TV $ip!")
+                }
+            } catch (e: Exception) {
+                _adbTaskProgress.value = AdbTaskProgress(
+                    isRunning = false,
+                    targetIp = ip,
+                    operationName = "Lỗi cài đặt",
+                    progressPercent = 0,
+                    statusMessage = e.message ?: "Lỗi kết nối ADB",
+                    isError = true
+                )
+                withContext(Dispatchers.Main) {
+                    showBanner("❌ Cài App TV thất bại: ${e.message}")
+                }
+            }
+        }
+    }
+
+    fun uninstallAppFromTv(ip: String) {
+        if (_adbTaskProgress.value.isRunning) {
+            showBanner("⏳ Đang có tác vụ cài/gỡ khác đang chạy...")
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                adbClient.uninstallPackage(
+                    host = ip,
+                    onProgress = { pct, msg ->
+                        _adbTaskProgress.value = AdbTaskProgress(
+                            isRunning = true,
+                            targetIp = ip,
+                            operationName = "Gỡ App khỏi TV",
+                            progressPercent = pct,
+                            statusMessage = msg
+                        )
+                    }
+                )
+                val prev = prefs.managedTvDevices.value.firstOrNull { it.ip == ip }
+                if (prev != null) {
+                    prefs.upsertManagedTvDevice(
+                        prev.copy(
+                            companionOnline = false,
+                            appInstalled = false,
+                            appVersion = "",
+                            nowPlayingTitle = "",
+                            hasGeminiKeyOnTv = false
+                        )
+                    )
+                }
+                if (prefs.selectedTvIp.value == ip) {
+                    _remoteTvState.value = RemoteTvLiveState(tvIp = ip, online = false)
+                }
+                _adbTaskProgress.value = AdbTaskProgress(
+                    isRunning = false,
+                    targetIp = ip,
+                    operationName = "Đã gỡ cài đặt",
+                    progressPercent = 100,
+                    statusMessage = "🗑 Đã gỡ ứng dụng khỏi TV $ip!"
+                )
+                withContext(Dispatchers.Main) {
+                    showBanner("🗑 Đã gỡ Phyll Cinema khỏi TV $ip!")
+                }
+            } catch (e: Exception) {
+                _adbTaskProgress.value = AdbTaskProgress(
+                    isRunning = false,
+                    targetIp = ip,
+                    operationName = "Lỗi gỡ App",
+                    progressPercent = 0,
+                    statusMessage = e.message ?: "Không gỡ được App",
+                    isError = true
+                )
+                withContext(Dispatchers.Main) {
+                    showBanner("❌ Gỡ App thất bại: ${e.message}")
+                }
+            }
+        }
+    }
+
+    fun launchAppOnTv(ip: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                withContext(Dispatchers.Main) {
+                    showBanner("🚀 Đang đánh thức & mở Phyll Cinema trên TV $ip...")
+                }
+                adbClient.launchAppOnTv(ip)
+                delay(2_200L)
+                val refreshed = remoteTvClient.probeSingleTv(ip)
+                prefs.upsertManagedTvDevice(refreshed)
+                selectManagedTv(ip)
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    showBanner("⚠️ Không mở được App qua ADB: ${e.message}")
+                }
+            }
+        }
+    }
+
+    fun dismissAdbProgress() {
+        if (!_adbTaskProgress.value.isRunning) {
+            _adbTaskProgress.value = AdbTaskProgress()
+        }
+    }
+
+    fun playMovieOnSelectedTv(movie: MovieItem, episode: Episode, startPositionMs: Long = 0L) {
+        val ip = prefs.selectedTvIp.value
+        if (ip == null) {
+            showBanner("📡 Chưa chọn TV. Hãy chọn hoặc quét TV trước!")
+            openTvManager()
+            return
+        }
+        viewModelScope.launch {
+            showBanner("📺 Đang gửi \"${movie.title}\" (${episode.name}) sang TV...")
+            var ok = remoteTvClient.pushMovieAndPlayOnTv(ip, movie, episode, startPositionMs)
+            if (!ok) {
+                // Auto-wake TV app via ADB if it was closed on the TV box!
+                val woke = runCatching {
+                    withContext(Dispatchers.IO) { adbClient.launchAppOnTv(ip) }
+                    delay(2_300L)
+                    true
+                }.getOrDefault(false)
+                if (woke) {
+                    remoteTvClient.syncCredentialsAndConfigToTv(
+                        ip, prefs.geminiApiKey.value, prefs.subtitleConfig.value, silent = true
+                    )
+                    ok = remoteTvClient.pushMovieAndPlayOnTv(ip, movie, episode, startPositionMs)
+                }
+            } else {
+                syncCredentialsToSelectedTvIfOnline(silent = true)
+            }
+            if (ok) {
+                showBanner("▶ Đã phát trên TV: ${movie.title} (${episode.name})")
+            } else {
+                showBanner("⚠️ Không gửi được lệnh sang TV $ip. Hãy kiểm tra kết nối Wi-Fi TV!")
+            }
+        }
+    }
+
+    fun sendRemoteTouchKey(key: String) {
+        val ip = prefs.selectedTvIp.value ?: return
+        viewModelScope.launch { remoteTvClient.sendTouchKey(ip, key) }
+    }
+
+    fun sendRemoteTap(nx: Float, ny: Float) {
+        val ip = prefs.selectedTvIp.value ?: return
+        viewModelScope.launch { remoteTvClient.sendTap(ip, nx, ny) }
+    }
+
+    fun sendRemoteSwipe(x1: Float, y1: Float, x2: Float, y2: Float) {
+        val ip = prefs.selectedTvIp.value ?: return
+        viewModelScope.launch { remoteTvClient.sendSwipe(ip, x1, y1, x2, y2) }
+    }
+
+    fun sendRemotePlayerCommand(cmd: String, value: Long = 0L, second: Long = 0L) {
+        val ip = prefs.selectedTvIp.value ?: return
+        viewModelScope.launch { remoteTvClient.sendPlayerCommand(ip, cmd, value, second) }
+    }
+
+    fun sendRemoteAction(payload: JSONObject) {
+        val ip = prefs.selectedTvIp.value ?: return
+        viewModelScope.launch { remoteTvClient.sendAction(ip, payload) }
+    }
+
+    fun pushDirectStreamToTv(title: String, url: String) {
+        val ip = prefs.selectedTvIp.value ?: return
+        if (url.isBlank()) return
+        viewModelScope.launch {
+            val ok = remoteTvClient.pushDirectStream(ip, title.ifBlank { "Phim từ ĐT" }, url.trim())
+            if (ok) showBanner("📺 Đã gửi luồng phát sang TV!")
+            else showBanner("⚠️ Không kết nối được với TV $ip")
+        }
+    }
+
+    fun pushSubtitleBytesToTv(fileName: String, rawBytes: ByteArray, lang: String = "th") {
+        val ip = prefs.selectedTvIp.value ?: return
+        viewModelScope.launch {
+            val ok = remoteTvClient.pushSubtitleFileBytes(ip, fileName, rawBytes, lang)
+            if (ok) showBanner("💬 Đã nạp file phụ đề \"$fileName\" lên TV!")
+            else showBanner("⚠️ Không gửi được file sub lên TV $ip")
+        }
+    }
+
+    fun updateRemoteTvSubtitleStyle(
+        stylePayload: JSONObject,
+        localTransform: ((SubtitleStyleConfig) -> SubtitleStyleConfig)? = null
+    ) {
+        lastRemoteSubStyleEditMs = System.currentTimeMillis()
+        if (localTransform != null) {
+            prefs.updateSubtitleConfig(localTransform)
+        }
+        val ip = prefs.selectedTvIp.value ?: return
+        viewModelScope.launch {
+            remoteTvClient.sendAction(ip, stylePayload.put("type", "sub_style"))
+        }
+    }
+
+    fun resetRemoteTvSubtitleStyleDefault() {
+        lastRemoteSubStyleEditMs = System.currentTimeMillis()
+        prefs.resetSubtitleConfigToThaiDefault()
+        val ip = prefs.selectedTvIp.value ?: return
+        viewModelScope.launch {
+            remoteTvClient.sendAction(ip, JSONObject().put("type", "sub_style").put("resetDefault", true))
+            showBanner("↺ Đã khôi phục phụ đề chuẩn trên TV & ĐT!")
+        }
+    }
+
+    fun startTvScreenStream(width: Int = 960, quality: Int = 68) {
+        tvScreenStreamJob?.cancel()
+        if (prefs.selectedTvIp.value.isNullOrBlank()) return
+        tvScreenStreamJob = viewModelScope.launch {
+            while (isActive) {
+                val curIp = prefs.selectedTvIp.value ?: break
+                val bytes = remoteTvClient.fetchScreenFrame(curIp, width = width, quality = quality)
+                if (bytes != null && bytes.isNotEmpty()) {
+                    _tvScreenFrameBytes.value = bytes
+                }
+                delay(110L)
+            }
+        }
+    }
+
+    fun stopTvScreenStream() {
+        tvScreenStreamJob?.cancel()
+        tvScreenStreamJob = null
+    }
+
+    private fun startPollingSelectedTv() {
+        tvPollJob?.cancel()
+        if (isTvHardware) return
+        if (prefs.selectedTvIp.value.isNullOrBlank()) return
+        tvPollJob = viewModelScope.launch {
+            while (isActive) {
+                val curIp = prefs.selectedTvIp.value ?: break
+                val st = remoteTvClient.fetchLiveState(curIp)
+                if (st != null) {
+                    _remoteTvState.value = st
+                    // Auto-sync saved phone Gemini API key whenever TV connects without a key!
+                    val phoneKey = prefs.geminiApiKey.value
+                    if (!st.hasGeminiKey && phoneKey.isNotBlank()) {
+                        remoteTvClient.syncCredentialsAndConfigToTv(
+                            tvIp = curIp,
+                            apiKey = phoneKey,
+                            styleConfig = prefs.subtitleConfig.value,
+                            silent = true
+                        )
+                    }
+                    // Mirror TV's live subtitle style when Phone user isn't actively dragging sliders
+                    if (System.currentTimeMillis() - lastRemoteSubStyleEditMs > 2_500L) {
+                        val existing = prefs.managedTvDevices.value.firstOrNull { it.ip == curIp }
+                        if (existing != null) {
+                            prefs.upsertManagedTvDevice(
+                                existing.copy(
+                                    companionOnline = true,
+                                    appInstalled = true,
+                                    activeScreen = st.screen,
+                                    nowPlayingTitle = if (st.playerActive) st.movieTitle else "",
+                                    hasGeminiKeyOnTv = st.hasGeminiKey,
+                                    lastSeenMs = System.currentTimeMillis()
+                                )
+                            )
+                        }
+                    }
+                } else {
+                    _remoteTvState.value = _remoteTvState.value.copy(tvIp = curIp, online = false)
+                }
+                delay(1_200L)
+            }
+        }
+    }
+
+    // ============================================================================================
+    // IN-APP GITHUB AUTO-UPDATER (Settings -> Kiểm tra cập nhật & Push sang TV)
+    // ============================================================================================
+
+    fun checkForAppUpdates() {
+        val current = appUpdater.getInstalledVersion(getApplication())
+        _appUpdateState.value = _appUpdateState.value.copy(
+            currentVersion = current,
+            isChecking = true,
+            statusMessage = null,
+            errorMessage = null
+        )
+        viewModelScope.launch {
+            val res = appUpdater.checkForUpdates()
+            res.onSuccess { remote ->
+                val hasNew = AppUpdater.isUpdateAvailable(current, remote)
+                _appUpdateState.value = _appUpdateState.value.copy(
+                    currentVersion = current,
+                    latestRelease = remote,
+                    hasUpdate = hasNew,
+                    isChecking = false,
+                    statusMessage = if (hasNew) {
+                        "🚀 Có bản mới v${remote.versionName} (Build ${remote.versionCode}) — Cài đè giữ nguyên mọi dữ liệu!"
+                    } else {
+                        "✅ Bạn đang dùng phiên bản mới nhất (${current.versionName} • Build ${current.versionCode})!"
+                    },
+                    errorMessage = null
+                )
+            }.onFailure { err ->
+                _appUpdateState.value = _appUpdateState.value.copy(
+                    isChecking = false,
+                    errorMessage = err.message ?: "Không thể kết nối GitHub Releases để kiểm tra cập nhật."
+                )
+            }
+        }
+    }
+
+    fun downloadAndInstallAppUpdate() {
+        val release = _appUpdateState.value.latestRelease
+        val url = release?.downloadUrl ?: AppUpdater.FALLBACK_APK_URL
+        val ctx = getApplication<Application>()
+
+        if (_appUpdateState.value.isDownloading) return
+        _appUpdateState.value = _appUpdateState.value.copy(
+            isDownloading = true,
+            downloadPercent = 0,
+            errorMessage = null,
+            needsInstallPermission = false,
+            statusMessage = "Đang tải bản cập nhật ChillFilm APK..."
+        )
+
+        viewModelScope.launch {
+            val result = appUpdater.downloadApkToCache(ctx, url) { received, total, pct ->
+                _appUpdateState.value = _appUpdateState.value.copy(
+                    isDownloading = true,
+                    downloadedBytes = received,
+                    totalBytes = total,
+                    downloadPercent = pct,
+                    statusMessage = "Đang tải APK cập nhật: $pct%"
+                )
+            }
+            result.onSuccess { apkFile ->
+                _appUpdateState.value = _appUpdateState.value.copy(
+                    isDownloading = false,
+                    downloadPercent = 100,
+                    downloadedApkPath = apkFile.absolutePath,
+                    needsInstallPermission = !appUpdater.canRequestPackageInstalls(ctx),
+                    statusMessage = if (appUpdater.canRequestPackageInstalls(ctx)) {
+                        "Đã tải xong! Đang mở trình cài đặt cập nhật (giữ nguyên toàn bộ dữ liệu)..."
+                    } else {
+                        "Đã tải xong! Vui lòng cấp quyền Cài đặt ứng dụng để cập nhật ngay."
+                    }
+                )
+                if (appUpdater.canRequestPackageInstalls(ctx)) {
+                    markExternalOverlayLaunching()
+                    runCatching { appUpdater.launchApkInstaller(ctx, apkFile) }
+                        .onFailure { err ->
+                            clearExternalOverlayLaunching()
+                            _appUpdateState.value = _appUpdateState.value.copy(
+                                errorMessage = "Không mở được trình cài đặt: ${err.message}"
+                            )
+                        }
+                }
+            }.onFailure { err ->
+                _appUpdateState.value = _appUpdateState.value.copy(
+                    isDownloading = false,
+                    errorMessage = err.message ?: "Tải APK thất bại."
+                )
+            }
+        }
+    }
+
+    fun openInstallPermissionAndRetry() {
+        val ctx = getApplication<Application>()
+        val path = _appUpdateState.value.downloadedApkPath
+        if (appUpdater.canRequestPackageInstalls(ctx) && path != null && File(path).exists()) {
+            markExternalOverlayLaunching()
+            _appUpdateState.value = _appUpdateState.value.copy(needsInstallPermission = false)
+            runCatching { appUpdater.launchApkInstaller(ctx, File(path)) }
+        } else {
+            markExternalOverlayLaunching()
+            runCatching { appUpdater.launchUnknownSourcesPermissionSettings(ctx) }
+        }
+    }
+
+    fun pushDownloadedUpdateToSelectedTv() {
+        val tvIp = prefs.selectedTvIp.value ?: run {
+            showBanner("📡 Chưa chọn TV. Hãy chọn TV tại mục Quản Lý TV trước!")
+            return
+        }
+        val path = _appUpdateState.value.downloadedApkPath
+        val apkFile = if (path != null && File(path).exists()) File(path)
+        else File(getApplication<Application>().applicationInfo.sourceDir)
+
+        if (_adbTaskProgress.value.isRunning) return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                adbClient.pushAndInstallApk(
+                    host = tvIp,
+                    apkFile = apkFile,
+                    onProgress = { pct, msg ->
+                        _adbTaskProgress.value = AdbTaskProgress(
+                            isRunning = true,
+                            targetIp = tvIp,
+                            operationName = "Cập nhật APK cho TV",
+                            progressPercent = pct,
+                            statusMessage = msg
+                        )
+                    }
+                )
+                delay(2_200L)
+                val refreshed = remoteTvClient.probeSingleTv(tvIp)
+                prefs.upsertManagedTvDevice(refreshed)
+                syncCredentialsToSelectedTvIfOnline(silent = true)
+                _adbTaskProgress.value = AdbTaskProgress(
+                    isRunning = false,
+                    targetIp = tvIp,
+                    operationName = "Cập nhật TV xong",
+                    progressPercent = 100,
+                    statusMessage = "✅ TV $tvIp đã lên phiên bản mới & giữ nguyên mọi dữ liệu!"
+                )
+                withContext(Dispatchers.Main) {
+                    showBanner("✅ Đã cập nhật TV $tvIp lên bản mới!")
+                }
+            } catch (e: Exception) {
+                _adbTaskProgress.value = AdbTaskProgress(
+                    isRunning = false,
+                    targetIp = tvIp,
+                    operationName = "Lỗi cập nhật TV",
+                    progressPercent = 0,
+                    statusMessage = e.message ?: "Không kết nối được ADB TV",
+                    isError = true
+                )
+            }
+        }
+    }
+
+    private fun calculateDirSize(dir: File?): Long {
+        if (dir == null || !dir.exists()) return 0L
+        if (dir.isFile) return dir.length()
+        return dir.listFiles()?.sumOf { calculateDirSize(it) } ?: 0L
+    }
+
+    override fun onCleared() {
+        tvPollJob?.cancel()
+        tvScreenStreamJob?.cancel()
+        prefs.wipeSessionGeminiKeyFromRam(clearPhoneVault = false)
+        companionServer.stop()
+        super.onCleared()
+    }
+}

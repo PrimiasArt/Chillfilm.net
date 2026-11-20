@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+    <!-- 2026 Spatial Void TV Banner (Emerald x Violet) -->
+    <path
+        android:fillColor="#080A14"
+        android:pathData="M0,0h320v180h-320z" />
+    <path
+        android:fillColor="#131629"
+        android:pathData="M0,126h320v54h-320z" />
+    <path
+        android:fillColor="#8B5CF6"
+        android:pathData="M0,123h160v3h-160z" />
+    <path
+        android:fillColor="#10B981"
+        android:pathData="M160,123h160v3h-160z" />
+    <!-- Emerald Play Emblem -->
+    <path
+        android:fillColor="#10B981"
+        android:pathData="M48,38L108,74L48,110Z" />
+    <!-- Violet + Emerald Cinema Glass Bars -->
+    <path
+        android:fillColor="#F8FAFC"
+        android:pathData="M132,48h140v12h-140z" />
+    <path
+        android:fillColor="#A855F7"
+        android:pathData="M132,70h108v9h-108z" />
+    <path
+        android:fillColor="#34D399"
+        android:pathData="M132,88h76v8h-76z" />
+    <!-- Subtitle Accent Bar -->
+    <path
+        android:fillColor="#34D399"
+        android:pathData="M48,144h110v10h-110z" />
+    <path
+        android:fillColor="#8B5CF6"
+        android:pathData="M168,144h104v10h-104z" />
+</vector>

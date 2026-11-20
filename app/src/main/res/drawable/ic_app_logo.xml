@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 2026 Midnight Glass Rounded Base -->
+    <path
+        android:fillColor="#080A14"
+        android:pathData="M20,4h68c8.8,0 16,7.2 16,16v68c0,8.8 -7.2,16 -16,16H20c-8.8,0 -16,-7.2 -16,-16V20c0,-8.8 7.2,-16 16,-16z" />
+    <!-- Outer Violet Halo Ring -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#8B5CF6"
+        android:strokeWidth="3"
+        android:pathData="M22,8h64c7.7,0 14,6.3 14,14v64c0,7.7 -6.3,14 -14,14H22c-7.7,0 -14,-6.3 -14,-14V22c0,-7.7 6.3,-14 14,-14z" />
+    <!-- Emerald Inner Ambient Glow Arc -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#10B981"
+        android:strokeWidth="2.5"
+        android:pathData="M24,14h42c6,0 10,4 10,10v16" />
+    <!-- Emerald Cinema Play Triangle -->
+    <path
+        android:fillColor="#10B981"
+        android:pathData="M41,28L76,50L41,72Z" />
+    <!-- Dual-Tone Emerald & Violet Subtitle Bars -->
+    <path
+        android:fillColor="#A855F7"
+        android:pathData="M24,82h38v5H24z" />
+    <path
+        android:fillColor="#34D399"
+        android:pathData="M66,82h18v5H66z" />
+</vector>

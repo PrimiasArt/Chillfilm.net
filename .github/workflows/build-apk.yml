@@ -1,0 +1,119 @@
+name: Build ChillFilm Android APKs
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Release ChillFilm APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Generate build version.json
+        id: ver
+        run: |
+          RUN_NUM="${{ github.run_number }}"
+          VERSION_CODE=$((100 + RUN_NUM))
+          VERSION_NAME="3.0.${RUN_NUM}"
+          BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          echo "version_code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
+          echo "version_name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+          cat << EOF > version.json
+          {
+            "versionName": "${VERSION_NAME}",
+            "versionCode": ${VERSION_CODE},
+            "buildTime": "${BUILD_TIME}",
+            "downloadUrl": "https://github.com/PrimiasArt/Chillfilm.net/releases/download/android-apk-latest/ChillFilm-latest.apk",
+            "commit": "${{ github.sha }}",
+            "releaseNotes": "ChillFilm v${VERSION_NAME} (Build ${VERSION_CODE}) • 2026 Emerald x Violet UI & Chill-Player Core"
+          }
+          EOF
+          cat version.json
+
+      - name: Run Unit Tests & Build Release APKs
+        env:
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+        run: ./gradlew testDebugUnitTest assembleRelease --no-daemon
+
+      - name: Prepare APK outputs
+        run: |
+          UNI_APK="app/build/outputs/apk/release/app-universal-release.apk"
+          TV32_APK="app/build/outputs/apk/release/app-armeabi-v7a-release.apk"
+          cp "$UNI_APK" ChillFilm-latest.apk
+          cp "$UNI_APK" "ChillFilm-v${{ steps.ver.outputs.version_name }}.apk"
+          if [ -f "$TV32_APK" ]; then
+            cp "$TV32_APK" ChillFilm-tv360-32bit.apk
+          fi
+
+      - name: Upload APKs as Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChillFilm-v${{ steps.ver.outputs.version_name }}-APKs
+          path: |
+            ChillFilm-latest.apk
+            ChillFilm-v${{ steps.ver.outputs.version_name }}.apk
+            ChillFilm-tv360-32bit.apk
+            version.json
+          retention-days: 30
+
+      - name: Create Versioned GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main'
+        with:
+          tag_name: v${{ steps.ver.outputs.version_name }}
+          name: ChillFilm v${{ steps.ver.outputs.version_name }} (Build ${{ steps.ver.outputs.version_code }})
+          make_latest: true
+          body: |
+            ## 🎬 ChillFilm Android & TV APK — v${{ steps.ver.outputs.version_name }}
+            - **Phiên bản:** `v${{ steps.ver.outputs.version_name }}` (`versionCode: ${{ steps.ver.outputs.version_code }}`)
+            - **Chữ ký cố định (`chillfilm.keystore`):** Cài đè bản mới trực tiếp **không mất API Key, danh sách TV hay lịch sử xem phim**.
+            - **Điểm nổi bật:**
+              - ✨ Giao diện **2026 Spatial Glassmorphism** phối **Xanh Lục (Emerald) × Tím (Violet)**.
+              - 🎮 Tích hợp trình phát **Chill-Player Engine**: Vuốt tăng/giảm sáng, âm lượng **Audio Boost 200%**, Equalizer (Flat / Bass / Vocal / Movie), khóa cảm ứng, PiP, tốc độ phát, tỉ lệ khung hình, hẹn giờ tắt.
+              - 📡 **App Android Độc Lập**: Quét Wi-Fi, cài/gỡ App lên nhiều TV (`:5555`), lưu API Key cố định trên ĐT & tự đồng bộ sang TV.
+              - 🔄 **Kiểm tra & Cập nhật tự động ngay trong Cài Đặt**.
+
+            👉 Tải **`ChillFilm-latest.apk`** (dùng chung cho cả Điện thoại Android & Smart TV/TV360 Box) bên dưới!
+          files: |
+            ChillFilm-latest.apk
+            ChillFilm-v${{ steps.ver.outputs.version_name }}.apk
+            ChillFilm-tv360-32bit.apk
+            version.json
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Rolling Latest Tag Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main'
+        with:
+          tag_name: android-apk-latest
+          name: ChillFilm Latest APK (v${{ steps.ver.outputs.version_name }})
+          make_latest: false
+          body: "Bản dựng tự động mới nhất (versionCode: ${{ steps.ver.outputs.version_code }}). Cài đè trực tiếp không mất dữ liệu cũ."
+          files: |
+            ChillFilm-latest.apk
+            ChillFilm-v${{ steps.ver.outputs.version_name }}.apk
+            ChillFilm-tv360-32bit.apk
+            version.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

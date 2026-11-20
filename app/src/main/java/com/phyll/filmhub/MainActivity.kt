@@ -1,0 +1,401 @@
+package com.phyll.filmhub
+
+import android.content.Intent
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.setContent
+import androidx.activity.viewModels
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import com.phyll.filmhub.ui.AppScreen
+import com.phyll.filmhub.ui.MainViewModel
+import com.phyll.filmhub.ui.screens.CompanionQrDialog
+import com.phyll.filmhub.ui.screens.DetailScreen
+import com.phyll.filmhub.ui.screens.HomeScreen
+import com.phyll.filmhub.ui.screens.PlayerScreen
+import com.phyll.filmhub.ui.screens.SettingsSourcesScreen
+import com.phyll.filmhub.ui.screens.TvManagerScreen
+import com.phyll.filmhub.ui.theme.CinemaObsidian
+import com.phyll.filmhub.ui.theme.PhyllFilmHubTheme
+import com.phyll.filmhub.ui.theme.ThaiGold
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+
+class MainActivity : ComponentActivity() {
+
+    private val viewModel: MainViewModel by viewModels()
+    private var delayedStopWipeJob: Job? = null
+
+    override fun onStart() {
+        super.onStart()
+        delayedStopWipeJob?.cancel()
+        delayedStopWipeJob = null
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        viewModel.attachWindowForStream(window)
+        handleExternalVideoIntent(intent)
+
+        setContent {
+            val currentScreen by viewModel.currentScreen.collectAsState()
+            val selectedCountry by viewModel.selectedCountry.collectAsState()
+            val sections by viewModel.sections.collectAsState()
+            val isLoadingCatalog by viewModel.isLoadingCatalog.collectAsState()
+            val searchQuery by viewModel.searchQuery.collectAsState()
+            val searchResults by viewModel.searchResults.collectAsState()
+            val isSearching by viewModel.isSearching.collectAsState()
+
+            val subtitleConfig by viewModel.prefs.subtitleConfig.collectAsState()
+            val geminiApiKey by viewModel.prefs.geminiApiKey.collectAsState()
+            val discoveredGeminiModels by viewModel.prefs.discoveredGeminiModels.collectAsState()
+            val promptQrOnStartup by viewModel.prefs.promptQrOnStartup.collectAsState()
+            val deviceUiMode by viewModel.prefs.deviceUiMode.collectAsState()
+            val watchHistory by viewModel.prefs.watchHistory.collectAsState()
+            val favoriteIds by viewModel.prefs.favoriteIds.collectAsState()
+            val customProviders by viewModel.prefs.customProviders.collectAsState()
+            val seriesProfiles by viewModel.prefs.seriesProfiles.collectAsState()
+
+            val showQrDialog by viewModel.showQrCompanionDialog.collectAsState()
+            val companionLanUrl by viewModel.companionLanUrl.collectAsState()
+            val bannerMessage by viewModel.bannerMessage.collectAsState()
+            val incomingCompanionSub by viewModel.incomingCompanionSubtitle.collectAsState()
+            val remotePlayerCommand by viewModel.remotePlayerCommand.collectAsState()
+
+            val managedTvDevices by viewModel.prefs.managedTvDevices.collectAsState()
+            val selectedTvIp by viewModel.prefs.selectedTvIp.collectAsState()
+            val controlTargetMode by viewModel.prefs.controlTargetMode.collectAsState()
+            val isScanningTvs by viewModel.isScanningTvs.collectAsState()
+            val adbTaskProgress by viewModel.adbTaskProgress.collectAsState()
+            val remoteTvState by viewModel.remoteTvState.collectAsState()
+            val tvScreenFrameBytes by viewModel.tvScreenFrameBytes.collectAsState()
+            val appUpdateState by viewModel.appUpdateState.collectAsState()
+            val isTvHardware = viewModel.isTvHardware
+            val selectedTvDevice = managedTvDevices.firstOrNull { it.ip == selectedTvIp }
+
+            LaunchedEffect(bannerMessage) {
+                if (bannerMessage != null) {
+                    delay(3_500L)
+                    viewModel.dismissBanner()
+                }
+            }
+
+            BackHandler(enabled = showQrDialog) {
+                viewModel.setQrDialogVisible(false)
+            }
+
+            BackHandler(enabled = currentScreen !is AppScreen.Home && !showQrDialog) {
+                viewModel.navigateBack()
+            }
+
+            // SECURITY GUARANTEE: On physical TVs, pressing Back on Home wipes the ephemeral Gemini Key from RAM and exits
+            BackHandler(enabled = currentScreen is AppScreen.Home && !showQrDialog) {
+                if (searchQuery.isNotBlank()) {
+                    viewModel.updateSearchQuery("")
+                } else {
+                    if (isTvHardware) {
+                        viewModel.wipeGeminiKeyFromRam(silent = true)
+                    }
+                    finish()
+                }
+            }
+
+            PhyllFilmHubTheme(deviceUiMode = deviceUiMode) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(CinemaObsidian)
+                ) {
+                    when (val screen = currentScreen) {
+                        is AppScreen.Home -> {
+                            HomeScreen(
+                                selectedCountry = selectedCountry,
+                                sections = sections,
+                                watchHistory = watchHistory,
+                                isLoading = isLoadingCatalog,
+                                searchQuery = searchQuery,
+                                searchResults = searchResults,
+                                isSearching = isSearching,
+                                hasSessionGeminiKey = geminiApiKey.isNotBlank(),
+                                activeGeminiModel = subtitleConfig.geminiModelId,
+                                companionLanUrl = companionLanUrl,
+                                isTvHardware = isTvHardware,
+                                controlTargetMode = controlTargetMode,
+                                selectedTvDevice = selectedTvDevice,
+                                isRemoteTvOnline = remoteTvState.online,
+                                onSelectCountry = viewModel::selectCountry,
+                                onSearchQueryChange = viewModel::updateSearchQuery,
+                                onExecuteSearch = viewModel::executeSearch,
+                                onMovieClick = viewModel::openMovieDetail,
+                                onQuickPlayMovie = viewModel::quickPlayMovie,
+                                onResumeHistory = viewModel::resumeFromWatchHistory,
+                                onToggleControlTargetMode = viewModel::toggleControlTargetMode,
+                                onOpenTvManager = viewModel::openTvManager,
+                                onOpenQrCompanion = { viewModel.setQrDialogVisible(true) },
+                                onOpenSettingsSources = viewModel::openSettingsSources,
+                                onToggleUiMode = viewModel::toggleDeviceUiMode,
+                                onRefresh = viewModel::refreshCatalog,
+                                onBeforeLaunchSystemOverlay = viewModel::markExternalOverlayLaunching,
+                                onAfterSystemOverlayResult = viewModel::clearExternalOverlayLaunching,
+                                onVoiceError = {
+                                    viewModel.showBanner("Thiết bị chưa cài dịch vụ nhận diện giọng nói. Bạn có thể dùng QR Điện Thoại để tìm nhanh!")
+                                }
+                            )
+                        }
+
+                        is AppScreen.Detail -> {
+                            DetailScreen(
+                                movie = screen.movie,
+                                isResolving = screen.isResolving,
+                                isFavorite = favoriteIds.contains(screen.movie.id),
+                                isTvHardware = isTvHardware,
+                                controlTargetMode = controlTargetMode,
+                                selectedTvName = selectedTvDevice?.displayTitle.orEmpty(),
+                                onPlayEpisode = { ep -> viewModel.startTargetAwarePlayback(screen.movie, ep) },
+                                onPlayOnPhone = { ep -> viewModel.startPlayback(screen.movie, ep) },
+                                onPlayOnTv = { ep -> viewModel.playMovieOnSelectedTv(screen.movie, ep) },
+                                onToggleFavorite = { viewModel.prefs.toggleFavorite(screen.movie.id) },
+                                onOpenQrCompanion = { viewModel.setQrDialogVisible(true) },
+                                onBack = { viewModel.navigateBack() }
+                            )
+                        }
+
+                        is AppScreen.Player -> {
+                            PlayerScreen(
+                                movie = screen.movie,
+                                episode = screen.episode,
+                                startPositionMs = screen.startPositionMs,
+                                subtitleConfig = subtitleConfig,
+                                geminiApiKey = geminiApiKey,
+                                discoveredGeminiModels = discoveredGeminiModels,
+                                incomingCompanionSub = incomingCompanionSub,
+                                seriesProfile = seriesProfiles[screen.movie.id],
+                                remoteCommand = remotePlayerCommand,
+                                onConsumeRemoteCommand = viewModel::consumeRemotePlayerCommand,
+                                onReportTelemetry = viewModel::updatePlayerTelemetry,
+                                onSaveSeriesProfile = { transform ->
+                                    viewModel.prefs.saveSeriesSubtitleProfile(screen.movie.id, transform)
+                                },
+                                onConsumeCompanionSub = viewModel::consumeIncomingCompanionSubtitle,
+                                onSelectGeminiModel = { modelId ->
+                                    viewModel.prefs.setSelectedGeminiModel(modelId)
+                                    viewModel.showBanner("✨ Đã chọn Model Gemini: $modelId")
+                                },
+                                onRefreshGeminiModels = {
+                                    viewModel.refreshGeminiModelsFromApi(silent = false)
+                                },
+                                onUpdateSubtitleConfig = viewModel::updateSubtitleStyle,
+                                onResetSubtitleConfig = viewModel.prefs::resetSubtitleConfigToThaiDefault,
+                                onSaveProgress = { pos, dur ->
+                                    viewModel.saveWatchProgress(screen.movie, screen.episode, pos, dur)
+                                },
+                                onSwitchEpisode = { nextEp ->
+                                    viewModel.startPlayback(screen.movie, nextEp, 0L)
+                                },
+                                onOpenQrCompanion = { viewModel.setQrDialogVisible(true) },
+                                onBeforeLaunchSystemOverlay = viewModel::markExternalOverlayLaunching,
+                                onAfterSystemOverlayResult = viewModel::clearExternalOverlayLaunching,
+                                onExitPlayer = { viewModel.navigateBack() }
+                            )
+                        }
+
+                        is AppScreen.SettingsSources -> {
+                            SettingsSourcesScreen(
+                                customProviders = customProviders,
+                                subtitleConfig = subtitleConfig,
+                                geminiApiKey = geminiApiKey,
+                                discoveredGeminiModels = discoveredGeminiModels,
+                                promptQrOnStartup = promptQrOnStartup,
+                                deviceUiMode = deviceUiMode,
+                                appUpdateState = appUpdateState,
+                                hasSelectedTv = !isTvHardware && selectedTvIp != null,
+                                onCheckForUpdates = viewModel::checkForAppUpdates,
+                                onDownloadAndInstallUpdate = viewModel::downloadAndInstallAppUpdate,
+                                onOpenInstallPermission = viewModel::openInstallPermissionAndRetry,
+                                onPushUpdateToTv = viewModel::pushDownloadedUpdateToSelectedTv,
+                                onAddProvider = { name, url, type ->
+                                    viewModel.addCustomVodProvider(name, url, type)
+                                },
+                                onToggleProvider = viewModel.prefs::toggleCustomProvider,
+                                onRemoveProvider = viewModel.prefs::removeCustomProvider,
+                                onPlayDirectUrl = viewModel::playDirectStreamUrl,
+                                onSaveSessionGeminiKey = { key, modelId ->
+                                    viewModel.setSessionGeminiCredentials(key, modelId)
+                                },
+                                onWipeSessionGeminiKey = {
+                                    viewModel.wipeGeminiKeyFromRam(silent = false, clearPhoneVault = !isTvHardware)
+                                },
+                                onSelectGeminiModel = { modelId ->
+                                    viewModel.prefs.setSelectedGeminiModel(modelId)
+                                    viewModel.showBanner("✨ Đã chọn Model Gemini: $modelId")
+                                },
+                                onRefreshGeminiModels = {
+                                    viewModel.refreshGeminiModelsFromApi(silent = false)
+                                },
+                                onTogglePromptQrOnStartup = viewModel.prefs::setPromptQrOnStartup,
+                                onUpdateSubtitleConfig = viewModel::updateSubtitleStyle,
+                                onSetDeviceUiMode = viewModel::setDeviceUiMode,
+                                onClearCache = viewModel::clearCacheForTvBox,
+                                onClearWatchHistory = {
+                                    viewModel.prefs.clearWatchHistory()
+                                    viewModel.showBanner("Đã xóa lịch sử xem phim!")
+                                },
+                                onOpenQrCompanion = { viewModel.setQrDialogVisible(true) },
+                                onBeforeLaunchSystemOverlay = viewModel::markExternalOverlayLaunching,
+                                onAfterSystemOverlayResult = viewModel::clearExternalOverlayLaunching,
+                                onBack = { viewModel.navigateBack() }
+                            )
+                        }
+
+                        is AppScreen.TvManager -> {
+                            TvManagerScreen(
+                                managedTvs = managedTvDevices,
+                                selectedTvIp = selectedTvIp,
+                                controlTargetMode = controlTargetMode,
+                                isScanningTvs = isScanningTvs,
+                                adbProgress = adbTaskProgress,
+                                remoteState = remoteTvState,
+                                tvScreenFrameBytes = tvScreenFrameBytes,
+                                savedGeminiKey = geminiApiKey,
+                                discoveredGeminiModels = discoveredGeminiModels,
+                                localSubtitleConfig = subtitleConfig,
+                                onScanLan = { viewModel.scanLanForTvs(silent = false) },
+                                onAddManualTvIp = viewModel::addOrProbeTvByIp,
+                                onSelectTv = viewModel::selectManagedTv,
+                                onRenameTv = viewModel::renameManagedTv,
+                                onRemoveTv = viewModel::removeManagedTv,
+                                onInstallAppToTv = viewModel::installAppOnTv,
+                                onUninstallAppFromTv = viewModel::uninstallAppFromTv,
+                                onLaunchAppOnTv = viewModel::launchAppOnTv,
+                                onDismissAdbProgress = viewModel::dismissAdbProgress,
+                                onSetControlTargetMode = viewModel::setControlTargetMode,
+                                onSaveGeminiKey = { k, m -> viewModel.setSessionGeminiCredentials(k, m) },
+                                onSyncKeyToTvNow = { viewModel.syncCredentialsToSelectedTvIfOnline(silent = false) },
+                                onWipeGeminiKey = { viewModel.wipeGeminiKeyFromRam(silent = false, clearPhoneVault = true) },
+                                onRefreshGeminiModels = { viewModel.refreshGeminiModelsFromApi(silent = false) },
+                                onSendTouchKey = viewModel::sendRemoteTouchKey,
+                                onSendTap = viewModel::sendRemoteTap,
+                                onSendSwipe = viewModel::sendRemoteSwipe,
+                                onSendPlayerCmd = { cmd, value -> viewModel.sendRemotePlayerCommand(cmd, value) },
+                                onSendSearchToTv = { q ->
+                                    viewModel.sendRemoteAction(org.json.JSONObject().put("type", "search").put("query", q))
+                                },
+                                onPushDirectStreamToTv = viewModel::pushDirectStreamToTv,
+                                onPushSubtitleFileToTv = viewModel::pushSubtitleBytesToTv,
+                                onUpdateRemoteSubStyle = viewModel::updateRemoteTvSubtitleStyle,
+                                onResetRemoteSubStyleDefault = viewModel::resetRemoteTvSubtitleStyleDefault,
+                                onStartScreenStream = { w, q -> viewModel.startTvScreenStream(w, q) },
+                                onStopScreenStream = viewModel::stopTvScreenStream,
+                                onBeforeLaunchSystemOverlay = viewModel::markExternalOverlayLaunching,
+                                onAfterSystemOverlayResult = viewModel::clearExternalOverlayLaunching,
+                                onGoPickMoviesForTv = {
+                                    viewModel.setControlTargetMode(com.phyll.filmhub.model.ControlTargetMode.REMOTE_TV)
+                                    viewModel.navigateHome()
+                                },
+                                onBack = { viewModel.navigateBack() }
+                            )
+                        }
+                    }
+
+                    if (showQrDialog) {
+                        CompanionQrDialog(
+                            lanUrl = companionLanUrl,
+                            hasSessionGeminiKey = geminiApiKey.isNotBlank(),
+                            activeGeminiModel = subtitleConfig.geminiModelId,
+                            promptQrOnStartup = promptQrOnStartup,
+                            onTogglePromptOnStartup = viewModel.prefs::setPromptQrOnStartup,
+                            onWipeSessionKey = { viewModel.wipeGeminiKeyFromRam(silent = false) },
+                            onDismiss = { viewModel.setQrDialogVisible(false) }
+                        )
+                    }
+
+                    // High-contrast Cinema Toast Banner (TV & Mobile readable)
+                    AnimatedVisibility(
+                        visible = bannerMessage != null,
+                        enter = fadeIn(),
+                        exit = fadeOut(),
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = 18.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(ThaiGold)
+                                .padding(horizontal = 18.dp, vertical = 10.dp)
+                        ) {
+                            Text(
+                                text = bannerMessage.orEmpty(),
+                                color = CinemaObsidian,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // SECURITY GUARANTEE: On physical TV Boxes, pressing Home or turning off TV wipes Gemini Key from RAM
+        // (while tolerating brief <2.5s HDMI HPD/HDCP display handshakes). Phone app keeps its saved key vault.
+        if (viewModel.isTvHardware && !isChangingConfigurations && !viewModel.isWithinExternalOverlayGraceWindow()) {
+            if (isFinishing) {
+                viewModel.wipeGeminiKeyFromRam(silent = true)
+            } else {
+                delayedStopWipeJob?.cancel()
+                delayedStopWipeJob = lifecycleScope.launch {
+                    delay(2_500L)
+                    if (!lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) &&
+                        !viewModel.isWithinExternalOverlayGraceWindow()
+                    ) {
+                        viewModel.wipeGeminiKeyFromRam(silent = true)
+                    }
+                }
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        viewModel.detachWindowForStream(window)
+        if (viewModel.isTvHardware && !isChangingConfigurations) {
+            viewModel.wipeGeminiKeyFromRam(silent = true)
+        }
+        super.onDestroy()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleExternalVideoIntent(intent)
+    }
+
+    private fun handleExternalVideoIntent(intent: Intent?) {
+        if (intent?.action == Intent.ACTION_VIEW) {
+            val dataUri = intent.data ?: return
+            val name = dataUri.lastPathSegment?.substringAfterLast('/') ?: "Video từ USB"
+            viewModel.playDirectStreamUrl(name, dataUri.toString())
+        }
+    }
+}
