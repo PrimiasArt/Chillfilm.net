@@ -3,6 +3,9 @@ name: Build ChillFilm Android APKs
 on:
   push:
     branches: [ "main", "master" ]
+    paths-ignore:
+      - "web/**"
+      - ".github/workflows/deploy-web.yml"
   workflow_dispatch:
 
 permissions:
