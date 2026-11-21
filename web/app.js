@@ -85,6 +85,7 @@ const state = {
   sleepMinutes: null,
   isLocked: false,
   isMinimized: false,
+  minimizedAt: 0,
   controlsVisible: true,
   controlsTimer: null,
   // Subtitles & Resume
@@ -1283,12 +1284,16 @@ function openPlayer(movie, episode, startSec = 0) {
   autoLoadSubtitlesForMovie(movie, episode);
 }
 
-function minimizePlayer() {
+function minimizePlayer(e) {
+  if (e && typeof e.stopPropagation === 'function') {
+    e.stopPropagation();
+    e.preventDefault();
+  }
   const modal = $('playerModal');
   if (!modal.classList.contains('open')) return;
   persistCurrentPlaybackProgress({ immediate: true });
   renderHistorySection();
-  if ($('detailView').classList.contains('active') && state.currentMovie) {
+  if ($('detailView').classList.contains('active') && state.currentMovie && Array.isArray(state.currentMovie.servers) && state.currentMovie.servers.length) {
     renderDetailView(state.currentMovie);
   }
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
@@ -1296,6 +1301,7 @@ function minimizePlayer() {
   try { screen.orientation?.unlock?.(); } catch { /* ignore */ }
   state.isLocked = false;
   state.isMinimized = true;
+  state.minimizedAt = Date.now();
   $('lockFab').classList.remove('visible');
   modal.classList.add('minimized');
   document.body.style.overflow = '';
@@ -1303,7 +1309,10 @@ function minimizePlayer() {
   if ($('miniPlayBtn')) $('miniPlayBtn').textContent = video.paused ? '▶' : '⏸';
 }
 
-function restorePlayer() {
+function restorePlayer(e) {
+  if (e && typeof e.stopPropagation === 'function') {
+    e.stopPropagation();
+  }
   const modal = $('playerModal');
   if (!modal.classList.contains('open')) return;
   state.isMinimized = false;
@@ -1312,11 +1321,14 @@ function restorePlayer() {
   setControlsVisible(true);
 }
 
-function closePlayer() {
+function closePlayer(e) {
+  if (e && typeof e.stopPropagation === 'function') {
+    e.stopPropagation();
+  }
   const video = $('videoEl');
   persistCurrentPlaybackProgress({ immediate: true });
   renderHistorySection();
-  if ($('detailView').classList.contains('active') && state.currentMovie) {
+  if ($('detailView').classList.contains('active') && state.currentMovie && Array.isArray(state.currentMovie.servers) && state.currentMovie.servers.length) {
     renderDetailView(state.currentMovie);
   }
   video.pause();
@@ -2262,15 +2274,9 @@ function init() {
 
   // Video & Player Controls (Back arrow -> Minimizes to Bottom-Right Pop-out; Explicit ✕ -> Closes!)
   const video = $('videoEl');
-  $('hudBackBtn').onclick = minimizePlayer;
-  $('miniCloseBtn').onclick = (e) => {
-    e.stopPropagation();
-    closePlayer();
-  };
-  $('miniExpandBtn').onclick = (e) => {
-    e.stopPropagation();
-    restorePlayer();
-  };
+  $('hudBackBtn').onclick = (e) => minimizePlayer(e);
+  $('miniCloseBtn').onclick = (e) => closePlayer(e);
+  $('miniExpandBtn').onclick = (e) => restorePlayer(e);
   $('miniPlayBtn').onclick = (e) => {
     e.stopPropagation();
     ensureWebAudioDsp(video);
@@ -2379,11 +2385,15 @@ function init() {
   let lastTap = 0;
   let touchStart = null;
   stage.addEventListener('click', (e) => {
+    if (e.target.closest?.('.mini-close-btn, .mini-ctrl-btn')) return;
     if (state.isMinimized) {
-      restorePlayer();
+      // Prevent the same click that just clicked ← (#hudBackBtn) from immediately re-expanding!
+      if (Date.now() - state.minimizedAt < 350) return;
+      restorePlayer(e);
       return;
     }
-    if (e.target !== stage && e.target !== video) return;
+    const hud = $('playerHud');
+    if (e.target !== stage && e.target !== video && e.target !== hud) return;
     if (state.isLocked) {
       showGestureToast(tr('tapLockHint'));
       return;
