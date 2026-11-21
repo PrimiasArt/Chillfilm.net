@@ -202,6 +202,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         refreshCloudHealth()
         if (prefs.cloudSession.value != null) {
             pullCloudState(silent = true, force = true)
+            refreshGeminiModelsFromApi(silent = true)
         }
     }
 
@@ -239,6 +240,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     prefs.saveCloudSession(session)
                     showBanner("☁️ Signed in as @${session.username} • Auto-Sync Active!")
                     pullCloudState(silent = true, force = true)
+                    refreshGeminiModelsFromApi(silent = true)
                     if (session.role == "ADMIN") {
                         loadAdminVault()
                     }
@@ -263,6 +265,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val roleTag = if (session.role == "ADMIN") "👑 ADMIN" else "☁️ Member"
                     showBanner("$roleTag @${session.username} created & synced!")
                     pullCloudState(silent = true, force = true)
+                    refreshGeminiModelsFromApi(silent = true)
                     if (session.role == "ADMIN") {
                         loadAdminVault()
                     }
@@ -339,6 +342,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     showBanner("🔐 Server Gemini API Key encrypted & updated!")
                     loadAdminVault()
                     refreshCloudHealth()
+                    refreshGeminiModelsFromApi(silent = true)
                 }
                 .onFailure { err -> showBanner("Failed: ${err.message.orEmpty()}") }
             _cloudSyncBusy.value = false
@@ -475,21 +479,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         silent: Boolean = false
     ) {
         val cleanKey = apiKeyOverride.trim()
-        if (cleanKey.isEmpty()) {
+        val hasCloud = CloudSyncClient.isSignedIn()
+        if (!hasCloud && cleanKey.isEmpty()) {
             if (!silent) {
-                showBanner("🔐 Hãy quét QR nạp Gemini Key vào RAM trước để tải danh sách Model!")
+                showBanner("☁️ Sign in to NKI Cloud (or paste a Gemini Key) to load live models!")
             }
             return
         }
         viewModelScope.launch {
-            val live = geminiInspector.fetchAvailableGeminiModels(cleanKey)
+            var live: List<String> = emptyList()
+            if (hasCloud) {
+                live = CloudSyncClient.fetchLiveModels().getOrDefault(emptyList())
+            }
+            if (live.isEmpty() && cleanKey.isNotEmpty()) {
+                live = geminiInspector.fetchAvailableGeminiModels(cleanKey)
+            }
             if (live.isNotEmpty()) {
-                prefs.registerDiscoveredModels(live)
+                prefs.registerDiscoveredModels(live, replaceWithLive = true)
                 if (!silent) {
-                    showBanner("✅ Đã tải ${live.size} Model Gemini thực tế từ Key của bạn!")
+                    showBanner("✅ Loaded ${live.size} live Gemini models from API!")
                 }
             } else if (!silent) {
-                showBanner("⚠️ Không tải được danh sách Model — hãy kiểm tra lại API Key!")
+                showBanner("⚠️ Could not load live models — check NKI Cloud / API Key!")
             }
         }
     }

@@ -73,7 +73,7 @@ class PreferencesManager(context: Context) {
     )
     val promptQrOnStartup: StateFlow<Boolean> = _promptQrOnStartup.asStateFlow()
 
-    private val _discoveredGeminiModels = MutableStateFlow(PRESET_GEMINI_MODELS)
+    private val _discoveredGeminiModels = MutableStateFlow(loadDiscoveredGeminiModels())
     val discoveredGeminiModels: StateFlow<List<String>> = _discoveredGeminiModels.asStateFlow()
 
     private val _deviceUiMode = MutableStateFlow(loadDeviceUiMode())
@@ -407,14 +407,18 @@ class PreferencesManager(context: Context) {
         updateSubtitleConfig { it.copy(geminiModelId = clean) }
     }
 
-    fun registerDiscoveredModels(models: List<String>) {
+    fun registerDiscoveredModels(models: List<String>, replaceWithLive: Boolean = false) {
         if (models.isEmpty()) return
         val merged = LinkedHashSet<String>()
         models.map { it.trim().removePrefix("models/") }
             .filter { it.isNotEmpty() }
             .forEach { merged.add(it) }
-        PRESET_GEMINI_MODELS.forEach { merged.add(it) }
-        _discoveredGeminiModels.value = merged.toList()
+        if (!replaceWithLive) {
+            _discoveredGeminiModels.value.forEach { merged.add(it) }
+        }
+        val finalList = merged.toList()
+        _discoveredGeminiModels.value = finalList
+        prefs.edit().putString(KEY_DISCOVERED_MODELS_V1, gson.toJson(finalList)).apply()
     }
 
     fun setPromptQrOnStartup(enabled: Boolean) {
@@ -652,6 +656,15 @@ class PreferencesManager(context: Context) {
         return AppLanguage.fromCode(prefs.getString(KEY_APP_UI_LANGUAGE, AppLanguage.EN.code))
     }
 
+    private fun loadDiscoveredGeminiModels(): List<String> {
+        val raw = prefs.getString(KEY_DISCOVERED_MODELS_V1, null) ?: return PRESET_GEMINI_MODELS
+        val type = object : TypeToken<List<String>>() {}.type
+        val saved = runCatching { gson.fromJson<List<String>>(raw, type) }
+            .getOrNull()
+            ?.filter { it.isNotBlank() }
+        return if (!saved.isNullOrEmpty()) saved else PRESET_GEMINI_MODELS
+    }
+
     private fun loadCloudSession(): CloudSession? {
         val raw = prefs.getString(KEY_CLOUD_SESSION_V1, null) ?: return null
         return runCatching { gson.fromJson(raw, CloudSession::class.java) }
@@ -696,6 +709,7 @@ class PreferencesManager(context: Context) {
         private const val KEY_UI_MODE_V25 = "device_ui_mode_v25"
         private const val KEY_APP_UI_LANGUAGE = "app_ui_language_v1"
         private const val KEY_CLOUD_SESSION_V1 = "nki_cloud_session_v1"
+        private const val KEY_DISCOVERED_MODELS_V1 = "discovered_gemini_models_v1"
         private const val KEY_WATCH_HISTORY = "watch_history_v1"
         private const val KEY_EPISODE_RESUME_MAP = "episode_resume_map_v1"
         private const val KEY_FAVORITES = "favorite_movie_ids"

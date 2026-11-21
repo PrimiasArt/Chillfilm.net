@@ -1,5 +1,6 @@
 package com.phyll.filmhub.data
 
+import com.phyll.filmhub.cloud.CloudSyncClient
 import com.phyll.filmhub.data.source.CustomVodApiSource
 import com.phyll.filmhub.data.source.ModernVodSource
 import com.phyll.filmhub.data.source.YouTubeSource
@@ -62,24 +63,39 @@ class MovieRepository {
 
         when (selectedCountry) {
             CountryCategory.ALL -> {
-                sections.add(
-                    CatalogSection(
-                        id = "verified_blockbusters",
-                        title = "🔥 Bom Tấn Chọn Lọc — Đã Xác Thực 100% Có Sub Thái Thật",
-                        subtitle = "Tự động tải full phụ đề .SRT thực trước khi phát • Khung nền đen chống đè Sub gốc",
-                        movies = blockbusters
-                    )
-                )
-
                 val asyncSections = listOf(
+                    async {
+                        // Auto-updating live multi-source Trending & Newest feed (KKPhim v3 + NguonC + enriched Hero)
+                        val liveHot = CloudSyncClient.fetchLiveHeroAndTrending()
+                            .getOrNull()
+                            ?.takeIf { it.isNotEmpty() }
+                            ?: modernSource.fetchLatestUpdatedFeed(24).ifEmpty { blockbusters }
+                        cacheAll(liveHot)
+                        CatalogSection(
+                            id = "live_hot_trending",
+                            title = "🔥 Trending & Newly Updated (Live)",
+                            subtitle = "Auto-updated from live VOD crawlers • Multi-language AI Subtitles ready",
+                            movies = liveHot
+                        )
+                    },
                     async {
                         val movies = modernSource.fetchNewMoviesList("phim-le", 18)
                         cacheAll(movies)
                         CatalogSection(
                             id = "new_feature_films",
-                            title = "🎬 Phim Lẻ Chiếu Rạp Mới Cập Nhật (2025–2026)",
-                            subtitle = "Phim điện ảnh mới nhất đa quốc gia • Quét Sub Thái gốc trên OpenSubtitles/YIFY trước khi dịch AI",
+                            title = "🎬 New Movies (Latest Updates)",
+                            subtitle = "Newest global cinema releases • Auto-synced AI Subtitles",
                             movies = movies
+                        )
+                    },
+                    async {
+                        val series = modernSource.fetchNewMoviesList("phim-bo", 18)
+                        cacheAll(series)
+                        CatalogSection(
+                            id = "new_tv_series",
+                            title = "📺 New TV Series (Latest Episodes)",
+                            subtitle = "Ongoing & newly completed series updated daily",
+                            movies = series
                         )
                     },
                     async {

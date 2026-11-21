@@ -59,6 +59,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -146,11 +147,24 @@ fun HomeScreen(
     var showSearchBar by remember { mutableStateOf(searchQuery.isNotBlank() || isTv) }
     var showLanguagePicker by remember { mutableStateOf(false) }
 
-    var spotlightMovie by remember(sections) {
-        mutableStateOf(sections.firstOrNull()?.movies?.firstOrNull())
+    val heroCandidates = remember(sections) {
+        sections.firstOrNull()?.movies?.take(6).orEmpty()
     }
-    if (spotlightMovie == null && sections.isNotEmpty()) {
-        spotlightMovie = sections.firstOrNull()?.movies?.firstOrNull()
+    var spotlightMovie by remember(selectedCountry, heroCandidates) {
+        mutableStateOf(heroCandidates.firstOrNull())
+    }
+    if (spotlightMovie == null && heroCandidates.isNotEmpty()) {
+        spotlightMovie = heroCandidates.firstOrNull()
+    }
+    LaunchedEffect(heroCandidates, isTv, searchQuery) {
+        if (!isTv && heroCandidates.size > 1 && searchQuery.isBlank()) {
+            var idx = 0
+            while (true) {
+                kotlinx.coroutines.delay(8_000L)
+                idx = (idx + 1) % heroCandidates.size
+                spotlightMovie = heroCandidates[idx]
+            }
+        }
     }
 
     val voiceLauncher = rememberLauncherForActivityResult(

@@ -1,5 +1,8 @@
 package com.phyll.filmhub.cloud
 
+import com.phyll.filmhub.model.ContentType
+import com.phyll.filmhub.model.CountryCategory
+import com.phyll.filmhub.model.MovieItem
 import com.phyll.filmhub.model.SubtitleCue
 import com.phyll.filmhub.model.WatchProgress
 import kotlinx.coroutines.Dispatchers
@@ -345,6 +348,101 @@ object CloudSyncClient {
                 .put("status", nextStatus)
             postJson("/api/admin/config", body, requireAuth = true)
             Unit
+        }
+    }
+
+    /**
+     * Fetches LIVE generative models from Google Gemini API via /api/ai/models
+     * using the centralized server GEMINI_API_KEY (no local API key needed on phone/TV!).
+     */
+    suspend fun fetchLiveModels(personalApiKey: String = ""): Result<List<String>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanKey = personalApiKey.trim()
+            val obj = if (cleanKey.length >= 15) {
+                postJson("/api/ai/models", JSONObject().put("apiKey", cleanKey), requireAuth = isSignedIn())
+            } else {
+                if (!isSignedIn()) error("Sign in to NKI Cloud to load live models")
+                getJson("/api/ai/models")
+            }
+            val arr = obj.optJSONArray("models") ?: JSONArray()
+            val list = ArrayList<String>(arr.length())
+            for (i in 0 until arr.length()) {
+                val m = arr.optJSONObject(i) ?: continue
+                val id = m.optString("id").trim()
+                if (id.isNotEmpty()) list.add(id)
+            }
+            val serverDef = obj.optString("defaultModel", "").trim()
+            if (serverDef.isNotEmpty()) defaultModel = serverDef
+            list
+        }
+    }
+
+    /**
+     * Fetches the auto-updating multi-source live movie feed (KKPhim v3 + NguonC hot signal + enriched Hero).
+     */
+    suspend fun fetchLiveHeroAndTrending(): Result<List<MovieItem>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val req = Request.Builder().url("$baseUrl/api/catalog/feed").get().build()
+            client.newCall(req).execute().use { resp ->
+                val raw = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) error("Catalog feed HTTP ${resp.code}")
+                val root = JSONObject(raw)
+                val out = LinkedHashMap<String, MovieItem>()
+                fun ingest(arr: JSONArray?) {
+                    if (arr == null) return
+                    for (i in 0 until arr.length()) {
+                        val m = arr.optJSONObject(i) ?: continue
+                        val slug = m.optString("slug").trim()
+                        val name = m.optString("name").trim()
+                        if (slug.isEmpty() || name.isEmpty() || out.containsKey(slug)) continue
+                        val genresArr = m.optJSONArray("genres")
+                        val genres = buildList {
+                            if (genresArr != null) {
+                                for (g in 0 until genresArr.length()) {
+                                    genresArr.optString(g).takeIf { it.isNotBlank() }?.let { add(it) }
+                                }
+                            }
+                        }.joinToString(" • ").ifBlank { "New & Hot" }
+                        val countriesArr = m.optJSONArray("countries")
+                        val firstCountry = countriesArr?.optString(0).orEmpty()
+                        val countryCat = CountryCategory.fromSlugOrName(firstCountry)
+                        val epCur = m.optString("episode_current").trim()
+                        val quality = listOfNotNull(
+                            m.optString("quality", "FHD").trim().takeIf { it.isNotBlank() },
+                            epCur.takeIf { it.isNotBlank() && !it.equals("Full", true) }
+                        ).joinToString(" • ").ifBlank { "FHD" }
+                        val rawType = m.optString("type").lowercase()
+                        val contentType = if (rawType == "single") ContentType.MOVIE else ContentType.SERIES
+                        val desc = m.optString("content").trim().ifBlank {
+                            "${m.optString("origin_name").trim().ifBlank { name }} (${m.optString("year", "2026")}) • $genres"
+                        }
+                        out[slug] = MovieItem(
+                            id = "modern_$slug",
+                            title = name,
+                            originalTitle = m.optString("origin_name").trim(),
+                            year = m.optString("year").trim(),
+                            country = countryCat,
+                            genre = genres,
+                            duration = m.optString("time").trim(),
+                            quality = quality,
+                            posterUrl = m.optString("poster").trim(),
+                            backdropUrl = m.optString("backdrop").trim().ifBlank { m.optString("poster").trim() },
+                            description = desc,
+                            contentType = contentType,
+                            providerId = "modern_vod",
+                            providerName = "NKI Live Cinema",
+                            imdbId = m.optString("imdbId").trim(),
+                            detailLookupId = slug
+                        )
+                    }
+                }
+                ingest(root.optJSONArray("heroMovies"))
+                val rows = root.optJSONArray("rows")
+                if (rows != null && rows.length() > 0) {
+                    ingest(rows.optJSONObject(0)?.optJSONArray("movies"))
+                }
+                out.values.toList()
+            }
         }
     }
 

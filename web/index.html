@@ -15,7 +15,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Sarabun:wght@500;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=3" />
+  <link rel="stylesheet" href="./styles.css?v=4" />
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js" defer></script>
 </head>
 <body>
@@ -377,15 +377,13 @@
                   </div>
                 </div>
                 <div class="field-group">
-                  <span class="field-label">GLOBAL DEFAULT MODEL &amp; REGISTRATION POLICY</span>
+                  <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+                    <span class="field-label" style="margin:0;">GLOBAL DEFAULT MODEL &amp; REGISTRATION POLICY</span>
+                    <button class="btn-glass" id="adminLoadModelsBtn" type="button" style="padding:4px 9px;font-size:11px;">🔄 Load Live Models</button>
+                  </div>
                   <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                    <select class="field-select" id="adminDefaultModelSelect" style="flex:1;min-width:160px;">
-                      <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
-                      <option value="gemini-2.5-flash">gemini-2.5-flash</option>
-                      <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview</option>
-                      <option value="gemini-2.5-pro">gemini-2.5-pro</option>
-                    </select>
-                    <select class="field-select" id="adminRegModeSelect" style="flex:1;min-width:140px;">
+                    <select class="field-select" id="adminDefaultModelSelect" style="flex:1;min-width:180px;"></select>
+                    <select class="field-select" id="adminRegModeSelect" style="flex:1;min-width:130px;">
                       <option value="INVITE_ONLY">🔒 Invite-Only</option>
                       <option value="OPEN">🌐 Open Sign-Up</option>
                     </select>
@@ -419,13 +417,12 @@
         </div>
 
         <div class="field-group">
-          <span class="field-label" id="geminiModelLabelText">GEMINI AI MODEL</span>
-          <select class="field-select" id="geminiModelSelect">
-            <option value="gemini-3-flash-preview">gemini-3-flash-preview (Ultra Fast)</option>
-            <option value="gemini-2.5-flash">gemini-2.5-flash (Balanced)</option>
-            <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview (Pro Cinema)</option>
-            <option value="gemini-2.5-pro">gemini-2.5-pro</option>
-          </select>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+            <span class="field-label" id="geminiModelLabelText" style="margin:0;">GEMINI AI MODEL (LIVE FROM API)</span>
+            <button class="btn-glass" id="loadModelsBtn" type="button" style="padding:4px 10px;font-size:11.5px;">🔄 Load Models</button>
+          </div>
+          <select class="field-select" id="geminiModelSelect"></select>
+          <div id="geminiModelsStatus" style="font-size:11px;color:#86efac;margin-top:2px;">Sign in to NKI Cloud or click Load Models to fetch live models from Google API</div>
         </div>
 
         <details class="local-key-details">
@@ -501,6 +498,6 @@
 
   <div class="toast" id="toast"></div>
 
-  <script type="module" src="./app.js?v=3"></script>
+  <script type="module" src="./app.js?v=4"></script>
 </body>
 </html>

@@ -592,6 +592,57 @@ fun SettingsSourcesScreen(
                                     }
                                     if (snap != null) {
                                         val nextRegMode = if (snap.registrationMode == "INVITE_ONLY") "OPEN" else "INVITE_ONLY"
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "Global Default Model: ${snap.defaultModel}",
+                                                color = EmeraldNeon,
+                                                fontSize = 11.5.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            Box(
+                                                modifier = Modifier
+                                                    .tvFocusableClickable(
+                                                        shape = RoundedCornerShape(6.dp),
+                                                        focusedBorderColor = EmeraldNeon,
+                                                        unfocusedBorderColor = CinemaGlassBorder,
+                                                        onClick = onRefreshGeminiModels
+                                                    )
+                                                    .background(CinemaSurfaceElevated)
+                                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                                            ) {
+                                                Text("🔄 Load Models", color = EmeraldNeon, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                            }
+                                        }
+                                        FlowRow(
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            discoveredGeminiModels.take(12).forEach { mId ->
+                                                val isGlobal = snap.defaultModel == mId
+                                                Box(
+                                                    modifier = Modifier
+                                                        .tvFocusableClickable(
+                                                            shape = RoundedCornerShape(99.dp),
+                                                            focusedBorderColor = EmeraldNeon,
+                                                            unfocusedBorderColor = if (isGlobal) EmeraldNeon else CinemaGlassBorder,
+                                                            onClick = { onAdminSavePolicy(mId, snap.registrationMode) }
+                                                        )
+                                                        .background(if (isGlobal) EmeraldPrimary else CinemaSurfaceElevated)
+                                                        .padding(horizontal = 9.dp, vertical = 5.dp)
+                                                ) {
+                                                    Text(
+                                                        text = mId,
+                                                        color = if (isGlobal) CinemaObsidian else TextPrimary,
+                                                        fontSize = 10.5.sp,
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                }
+                                            }
+                                        }
                                         Box(
                                             modifier = Modifier
                                                 .tvFocusableClickable(
@@ -899,6 +950,7 @@ fun SettingsSourcesScreen(
                 subtitle = "Hỗ trợ dịch và nghe phim tạo phụ đề sang mọi ngôn ngữ AI hỗ trợ. Đang chọn: ${primaryLang.displayName}."
             ) {
                 val hasKey = geminiApiKey.isNotBlank()
+                val hasCloudAi = cloudSession?.serverAiReady == true
                 val maskedKey = remember(geminiApiKey) {
                     val k = geminiApiKey.trim()
                     when {
@@ -911,17 +963,17 @@ fun SettingsSourcesScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(10.dp))
-                        .background(if (hasKey) EmeraldPrimary.copy(alpha = 0.15f) else CinemaSurfaceElevated)
-                        .border(1.dp, if (hasKey) EmeraldNeon.copy(alpha = 0.45f) else CinemaGlassBorder, RoundedCornerShape(10.dp))
+                        .background(if (hasKey || hasCloudAi) EmeraldPrimary.copy(alpha = 0.15f) else CinemaSurfaceElevated)
+                        .border(1.dp, if (hasKey || hasCloudAi) EmeraldNeon.copy(alpha = 0.45f) else CinemaGlassBorder, RoundedCornerShape(10.dp))
                         .padding(horizontal = 12.dp, vertical = 8.dp)
                 ) {
                     Text(
-                        text = if (hasKey) {
-                            "🔐 Đã lưu cố định ($maskedKey) • Model: ${subtitleConfig.geminiModelId}"
-                        } else {
-                            "🔓 Chưa nhập Gemini Key • Đang dùng Neural AI miễn phí (nhập Key 1 lần để lưu vĩnh viễn)"
+                        text = when {
+                            hasCloudAi -> "☁️ Đang dùng Gemini API tập trung trên NKI Cloud • Model: ${subtitleConfig.geminiModelId}"
+                            hasKey -> "🔐 Đã lưu cố định ($maskedKey) • Model: ${subtitleConfig.geminiModelId}"
+                            else -> "🔓 Chưa đăng nhập NKI Cloud / chưa nhập Key • Đang dùng Neural AI miễn phí"
                         },
-                        color = if (hasKey) EmeraldNeon else VioletSoft,
+                        color = if (hasKey || hasCloudAi) EmeraldNeon else VioletSoft,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -1071,10 +1123,10 @@ fun SettingsSourcesScreen(
                     Box(
                         modifier = Modifier
                             .tvFocusableClickable(shape = RoundedCornerShape(99.dp), onClick = onRefreshGeminiModels)
-                            .background(CinemaSurfaceElevated)
+                            .background(EmeraldPrimary.copy(alpha = 0.18f))
                             .padding(horizontal = 10.dp, vertical = 6.dp)
                     ) {
-                        Text("🔄 Tải Model từ Key", color = EmeraldNeon, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text("🔄 Tải Model thực tế từ API", color = EmeraldNeon, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
                 }
 

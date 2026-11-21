@@ -239,3 +239,93 @@ export async function transcribeAudioChunkServerSide({
   }
   return { cues, modelUsed };
 }
+
+/**
+ * Fetches all live generative models directly from Google Gemini API (v1beta/models),
+ * filtering strictly to `generateContent`-capable chat/multimodal models and sorting newest first.
+ */
+export async function fetchLiveGeminiModels(apiKey) {
+  const collected = [];
+  let pageToken = '';
+  for (let page = 0; page < 3; page++) {
+    const tokenParam = pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '';
+    const url = `https://generativelanguage.googleapis.com/v1beta/models?pageSize=100${tokenParam}&key=${encodeURIComponent(apiKey)}`;
+    const res = await fetch(url);
+    const bodyText = await res.text();
+    if (!res.ok) {
+      let msg = `Gemini models HTTP ${res.status}`;
+      try {
+        msg = JSON.parse(bodyText)?.error?.message || msg;
+      } catch {
+        // ignore
+      }
+      throw new Error(msg);
+    }
+    const json = JSON.parse(bodyText);
+    const list = Array.isArray(json.models) ? json.models : [];
+    for (const m of list) {
+      const methods = Array.isArray(m.supportedGenerationMethods) ? m.supportedGenerationMethods : [];
+      if (!methods.includes('generateContent')) continue;
+      const rawName = String(m.name || '').trim();
+      const id = rawName.replace(/^models\//, '');
+      if (!id) continue;
+      const lower = id.toLowerCase();
+      // Exclude non-text/non-subtitle specialized models (embeddings, imagen, veo, tts, audio-only robotics)
+      if (
+        lower.includes('embedding') ||
+        lower.includes('imagen') ||
+        lower.includes('veo') ||
+        lower.includes('aqa') ||
+        lower.includes('tts') ||
+        lower.includes('image-generation') ||
+        lower.includes('robotics') ||
+        lower.includes('computer-use') ||
+        lower.includes('deep-research')
+      ) {
+        continue;
+      }
+      if (!lower.startsWith('gemini') && !lower.startsWith('gemma')) continue;
+      collected.push({
+        id,
+        displayName: String(m.displayName || id).trim(),
+        description: String(m.description || '').trim().slice(0, 140),
+        inputTokenLimit: Number(m.inputTokenLimit || 0),
+        outputTokenLimit: Number(m.outputTokenLimit || 0),
+      });
+    }
+    pageToken = json.nextPageToken || '';
+    if (!pageToken) break;
+  }
+
+  // Deduplicate and rank newest/highest-version Gemini models first
+  const seen = new Set();
+  const deduped = collected.filter((m) => {
+    if (seen.has(m.id)) return false;
+    seen.add(m.id);
+    return true;
+  });
+
+  const versionScore = (id) => {
+    const low = id.toLowerCase();
+    const isGemini = low.startsWith('gemini') ? 1000 : 0;
+    const verMatch = low.match(/gemini-(\d+)(?:\.(\d+))?/);
+    const major = verMatch ? Number(verMatch[1]) : 0;
+    const minor = verMatch && verMatch[2] ? Number(verMatch[2]) : 0;
+    const tier = low.includes('flash-lite')
+      ? 25
+      : low.includes('flash')
+        ? 40
+        : low.includes('pro')
+          ? 35
+          : 10;
+    const stableBonus = low.includes('exp') || low.includes('001') || low.includes('002') ? -5 : 5;
+    return isGemini + major * 100 + minor * 10 + tier + stableBonus;
+  };
+
+  deduped.sort((a, b) => {
+    const diff = versionScore(b.id) - versionScore(a.id);
+    return diff !== 0 ? diff : a.id.localeCompare(b.id);
+  });
+
+  return deduped;
+}

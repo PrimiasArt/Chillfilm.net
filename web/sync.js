@@ -279,3 +279,29 @@ export async function cloudTranslateCueBatch({ cues, targetLang, model }) {
   }
   return cues.map((c, idx) => ({ ...c, text: (data.translated[idx] || c.text).trim() }));
 }
+
+/**
+ * Fetches LIVE available Gemini models from Google API via /api/ai/models
+ * (uses centralized server GEMINI_API_KEY when signed in, or optional personal key when provided).
+ */
+export async function cloudFetchLiveModels(personalApiKey = '') {
+  const cleanKey = String(personalApiKey || '').trim();
+  if (cleanKey.length >= 15) {
+    return apiFetch('/api/ai/models', {
+      method: 'POST',
+      auth: isCloudSignedIn(),
+      body: { apiKey: cleanKey },
+    });
+  }
+  return apiFetch('/api/ai/models', { method: 'GET', auth: true });
+}
+
+/**
+ * Fetches auto-updating multi-source live movie catalog & enriched Hero Billboard slides.
+ */
+export async function fetchLiveCatalogFeed(forceRefresh = false) {
+  const q = forceRefresh ? '?refresh=1' : '';
+  const res = await fetch(`${getCloudApiBase()}/api/catalog/feed${q}`);
+  if (!res.ok) throw new Error(`Catalog HTTP ${res.status}`);
+  return res.json();
+}

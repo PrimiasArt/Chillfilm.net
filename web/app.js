@@ -27,22 +27,24 @@ import {
   cloudFetchSubtitle,
   cloudSaveSubtitle,
   cloudTranslateCueBatch,
-} from './sync.js?v=3';
+  cloudFetchLiveModels,
+  fetchLiveCatalogFeed,
+} from './sync.js?v=4';
 
 const PHIM_API = 'https://phimapi.com';
 const PHIM_CDN = 'https://phimimg.com';
 const APK_RELEASE_URL = 'https://github.com/PrimiasArt/Chillfilm.net/releases/download/android-apk-latest/ChillFilm-latest.apk';
 
 const CATEGORIES = [
-  { id: 'hot', label: 'Trending', url: `${PHIM_API}/danh-sach/phim-moi-cap-nhat?page=1` },
-  { id: 'phim-le', label: 'Movies', url: `${PHIM_API}/v1/api/danh-sach/phim-le?page=1&limit=24` },
-  { id: 'phim-bo', label: 'TV Series', url: `${PHIM_API}/v1/api/danh-sach/phim-bo?page=1&limit=24` },
-  { id: 'hoat-hinh', label: 'Animation', url: `${PHIM_API}/v1/api/danh-sach/hoat-hinh?page=1&limit=24` },
-  { id: 'han-quoc', label: 'Korean', url: `${PHIM_API}/v1/api/quoc-gia/han-quoc?page=1&limit=24` },
-  { id: 'au-my', label: 'US / UK', url: `${PHIM_API}/v1/api/quoc-gia/au-my?page=1&limit=24` },
-  { id: 'trung-quoc', label: 'Chinese', url: `${PHIM_API}/v1/api/quoc-gia/trung-quoc?page=1&limit=24` },
-  { id: 'thai-lan', label: 'Thai', url: `${PHIM_API}/v1/api/quoc-gia/thai-lan?page=1&limit=24` },
-  { id: 'nhat-ban', label: 'Japanese', url: `${PHIM_API}/v1/api/quoc-gia/nhat-ban?page=1&limit=24` },
+  { id: 'hot', label: 'Trending', url: `${PHIM_API}/danh-sach/phim-moi-cap-nhat-v3?page=1` },
+  { id: 'phim-le', label: 'Movies', url: `${PHIM_API}/v1/api/danh-sach/phim-le?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
+  { id: 'phim-bo', label: 'TV Series', url: `${PHIM_API}/v1/api/danh-sach/phim-bo?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
+  { id: 'hoat-hinh', label: 'Animation', url: `${PHIM_API}/v1/api/danh-sach/hoat-hinh?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
+  { id: 'han-quoc', label: 'Korean', url: `${PHIM_API}/v1/api/quoc-gia/han-quoc?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
+  { id: 'au-my', label: 'US / UK', url: `${PHIM_API}/v1/api/quoc-gia/au-my?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
+  { id: 'trung-quoc', label: 'Chinese', url: `${PHIM_API}/v1/api/quoc-gia/trung-quoc?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
+  { id: 'thai-lan', label: 'Thai', url: `${PHIM_API}/v1/api/quoc-gia/thai-lan?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
+  { id: 'nhat-ban', label: 'Japanese', url: `${PHIM_API}/v1/api/quoc-gia/nhat-ban?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
 ];
 
 const DEFAULT_PREFS = {
@@ -106,7 +108,33 @@ const state = {
   lastCloudPushTs: 0,
   prefsPushTimer: null,
   lastCloudSubPushBatch: 0,
+  // Live Hero Carousel & Live Gemini Model Catalog
+  heroMovies: [],
+  heroIndex: 0,
+  heroTimer: null,
+  heroPaused: false,
+  catalogUpdatedAt: 0,
+  liveModels: loadCachedLiveModels(),
+  modelsLoading: false,
+  adminGlobalModel: '',
 };
+
+function loadCachedLiveModels() {
+  try {
+    const arr = JSON.parse(localStorage.getItem('chillfilm_nki_live_models_v1') || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveCachedLiveModels(models) {
+  try {
+    localStorage.setItem('chillfilm_nki_live_models_v1', JSON.stringify(models || []));
+  } catch {
+    // ignore
+  }
+}
 
 const $ = (id) => document.getElementById(id);
 const tr = (key, vars) => t(state.prefs.uiLang, key, vars);
@@ -141,7 +169,8 @@ function setUiLanguage(code) {
   savePrefs();
   applyUiTranslations();
   renderCategories();
-  if (state.movies.length) renderHero(state.movies[0]);
+  if (state.heroMovies.length) renderHero(state.heroMovies[state.heroIndex] || state.heroMovies[0]);
+  else if (state.movies.length) renderHero(state.movies[0]);
   if (state.activeCategory === 'hot' && state.homeRows.length) {
     renderHomeSwimlanes();
   }
@@ -526,10 +555,13 @@ function mapPhimItems(json) {
     name: m.name,
     origin_name: m.origin_name || '',
     year: m.year ? String(m.year) : '',
-    quality: m.quality || 'HD',
+    quality: m.quality || 'FHD',
     episode_current: m.episode_current || '',
     poster: normalizeImage(m.poster_url || m.thumb_url),
     backdrop: normalizeImage(m.thumb_url || m.poster_url),
+    genres: Array.isArray(m.category) ? m.category.map((c) => c?.name).filter(Boolean).slice(0, 3) : [],
+    tmdbScore: Number(m.tmdb?.vote_average || 0) || 0,
+    content: '',
   }));
 }
 
@@ -543,37 +575,59 @@ async function fetchCategoryList(cat) {
   }
 }
 
-async function loadCategory(catId) {
+async function loadCategory(catId, { forceRefresh = false, silent = false } = {}) {
   state.activeCategory = catId;
   renderCategories();
-  closeDetailView();
+  if (!silent) closeDetailView();
 
   const liftEl = document.querySelector('.content-lift');
   const swimWrap = $('homeSwimlanes');
   const gridSec = $('catalogGridSection');
 
-  // HOME ("hot"): Authentic Netflix Multi-Row Swimlanes + Top 10 Ranked Row!
+  // HOME ("hot"): Live Multi-Source Aggregated Feed (/api/catalog/feed) + Auto-Rotating Hero Billboard!
   if (catId === 'hot') {
     if (liftEl) liftEl.classList.remove('no-hero');
     $('topbar')?.classList.remove('solid');
     gridSec.style.display = 'none';
     swimWrap.style.display = 'block';
-    swimWrap.innerHTML = `<div style="text-align:center;padding:42px;color:#b3b3b3;">${escapeHtml(tr('loadingCatalog'))}</div>`;
+    if (!silent) {
+      swimWrap.innerHTML = `<div style="text-align:center;padding:42px;color:#b3b3b3;">${escapeHtml(tr('loadingCatalog'))}</div>`;
+    }
 
-    const rowCatIds = ['hot', 'phim-le', 'phim-bo', 'han-quoc', 'au-my', 'hoat-hinh', 'thai-lan'];
+    try {
+      const feed = await fetchLiveCatalogFeed(forceRefresh);
+      if (feed?.ok && Array.isArray(feed.rows) && feed.rows.length > 0) {
+        state.catalogUpdatedAt = feed.updatedAt || Date.now();
+        state.homeRows = feed.rows;
+        state.movies = feed.rows[0]?.movies || [];
+        const heroList = Array.isArray(feed.heroMovies) && feed.heroMovies.length
+          ? feed.heroMovies
+          : state.movies.slice(0, 6);
+        setHeroSlides(heroList);
+        renderHistorySection();
+        renderHomeSwimlanes();
+        if (forceRefresh && !silent) showToast('🔥 Updated latest & trending movies!');
+        return;
+      }
+    } catch {
+      // Graceful fallback to direct PhimAPI v3 if local/offline
+    }
+
+    const rowCatIds = ['hot', 'phim-le', 'phim-bo', 'han-quoc', 'au-my', 'hoat-hinh', 'trung-quoc', 'thai-lan', 'nhat-ban'];
     const rowCats = rowCatIds.map((id) => CATEGORIES.find((c) => c.id === id)).filter(Boolean);
     const results = await Promise.all(rowCats.map((c) => fetchCategoryList(c)));
 
+    state.catalogUpdatedAt = Date.now();
     state.movies = results[0] || [];
     state.homeRows = rowCats
       .map((c, idx) => ({ id: c.id, isTopTen: idx === 0, movies: results[idx] || [] }))
       .filter((r) => r.movies.length > 0);
 
     if (state.movies.length) {
-      renderHero(state.movies[0]);
+      setHeroSlides(state.movies.slice(0, 6));
       renderHistorySection();
       renderHomeSwimlanes();
-    } else {
+    } else if (!silent) {
       swimWrap.innerHTML = `<div style="text-align:center;padding:36px;color:#fca5a5;">${escapeHtml(tr('loadError'))}</div>`;
     }
     return;
@@ -584,16 +638,18 @@ async function loadCategory(catId) {
   $('topbar')?.classList.remove('solid');
   swimWrap.style.display = 'none';
   gridSec.style.display = 'block';
-  $('catalogGrid').innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:42px;color:#b3b3b3;">${escapeHtml(tr('loadingCatalog'))}</div>`;
+  if (!silent) {
+    $('catalogGrid').innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:42px;color:#b3b3b3;">${escapeHtml(tr('loadingCatalog'))}</div>`;
+  }
 
   const cat = CATEGORIES.find((c) => c.id === catId) || CATEGORIES[0];
   const list = await fetchCategoryList(cat);
   if (list.length) {
     state.movies = list;
-    renderHero(state.movies[0]);
+    setHeroSlides(list.slice(0, 5));
     renderHistorySection();
     renderMovieGrid(state.movies, getCategoryLabel(cat.id));
-  } else {
+  } else if (!silent) {
     $('catalogGrid').innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:36px;color:#fca5a5;">${escapeHtml(tr('loadError'))}</div>`;
   }
 }
@@ -609,10 +665,14 @@ function renderHomeSwimlanes() {
 
     const head = document.createElement('div');
     head.className = 'section-head';
+    const updatedLabel = row.isTopTen && state.catalogUpdatedAt
+      ? `<span class="live-feed-pill">● LIVE ${new Date(state.catalogUpdatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>`
+      : '';
     head.innerHTML = `
       <div class="section-title">
         ${row.isTopTen ? '<span class="top10-pill">TOP 10</span>' : ''}
         <span>${escapeHtml(getCategoryLabel(row.id))}</span>
+        ${updatedLabel}
       </div>
     `;
     sec.appendChild(head);
@@ -719,6 +779,27 @@ function renderCategories() {
   });
 }
 
+function setHeroSlides(movies) {
+  const valid = (Array.isArray(movies) ? movies : []).filter((m) => m && m.slug);
+  state.heroMovies = valid;
+  state.heroIndex = 0;
+  clearInterval(state.heroTimer);
+  if (!valid.length) {
+    $('heroBox').style.display = 'none';
+    return;
+  }
+  renderHero(valid[0]);
+  if (valid.length > 1) {
+    state.heroTimer = setInterval(() => {
+      if (state.heroPaused || $('playerModal')?.classList.contains('open') || $('detailView')?.classList.contains('active')) {
+        return;
+      }
+      state.heroIndex = (state.heroIndex + 1) % state.heroMovies.length;
+      renderHero(state.heroMovies[state.heroIndex]);
+    }, 8000);
+  }
+}
+
 function renderHero(movie) {
   const box = $('heroBox');
   if (!movie) {
@@ -727,6 +808,23 @@ function renderHero(movie) {
   }
   box.style.display = 'flex';
   const lang = resolveLanguage(state.prefs.primaryLang);
+  const matchText = movie.tmdbScore >= 5 ? `★ ${movie.tmdbScore.toFixed(1)} TMDB` : '🔥 HOT NEW';
+  const genreLine = Array.isArray(movie.genres) && movie.genres.length ? movie.genres.join(' • ') : '';
+  const epLine = movie.episode_current ? `<span style="color:#86efac;font-weight:700;">${escapeHtml(movie.episode_current)}</span>` : '';
+  const descText = movie.content || movie.origin_name || tr('heroDefaultDesc');
+  const totalSlides = state.heroMovies.length;
+  const controlsHtml = totalSlides > 1
+    ? `
+      <div class="hero-carousel-controls">
+        <button class="hero-nav-btn" id="heroPrevBtn" aria-label="Previous featured">‹</button>
+        <div class="hero-dots">
+          ${state.heroMovies.map((_, i) => `<button class="hero-dot ${i === state.heroIndex ? 'active' : ''}" data-hero-idx="${i}" aria-label="Slide ${i + 1}"></button>`).join('')}
+        </div>
+        <button class="hero-nav-btn" id="heroNextBtn" aria-label="Next featured">›</button>
+      </div>
+    `
+    : '';
+
   box.innerHTML = `
     <img class="hero-bg" src="${movie.backdrop || movie.poster}" alt="${escapeHtml(movie.name)}" />
     <div class="hero-overlay"></div>
@@ -734,24 +832,46 @@ function renderHero(movie) {
       <div class="hero-inner">
         <div class="hero-eyebrow">
           <div class="nf-series-mark"><span class="nki-tag">NKI</span><span>AI CINEMA</span></div>
+          <span class="live-feed-pill">● AUTO-UPDATED</span>
         </div>
         <h1 class="hero-title">${escapeHtml(movie.name)}</h1>
         <div class="hero-meta">
-          <span class="match-score">98% Match</span>
+          <span class="match-score">${escapeHtml(matchText)}</span>
           <span style="color:#e5e5e5;">${escapeHtml(movie.year || '2026')}</span>
+          ${epLine}
           <span class="badge-ai">${escapeHtml(tr('heroBadge', { lang: lang.badge }))}</span>
-          <span style="border:1px solid rgba(255,255,255,0.35);padding:1px 6px;border-radius:3px;font-size:10.5px;">${escapeHtml(movie.quality)}</span>
+          <span style="border:1px solid rgba(255,255,255,0.35);padding:1px 6px;border-radius:3px;font-size:10.5px;">${escapeHtml(movie.quality || 'FHD')}</span>
         </div>
-        <p class="hero-sub">${escapeHtml(movie.origin_name || tr('heroDefaultDesc'))}</p>
+        ${genreLine ? `<div class="hero-genres">${escapeHtml(genreLine)}</div>` : ''}
+        <p class="hero-sub">${escapeHtml(descText)}</p>
         <div class="hero-actions">
           <button class="btn-nf-play" id="heroPlayBtn">${escapeHtml(tr('watchNow'))}</button>
           <button class="btn-nf-info" id="heroDetailBtn">ⓘ ${escapeHtml(tr('detailsBtn'))}</button>
         </div>
       </div>
     </div>
+    ${controlsHtml}
   `;
+  box.onmouseenter = () => { state.heroPaused = true; };
+  box.onmouseleave = () => { state.heroPaused = false; };
   $('heroPlayBtn').onclick = () => openMovieDetail(movie.slug, true);
   $('heroDetailBtn').onclick = () => openMovieDetail(movie.slug, false);
+  if (totalSlides > 1) {
+    $('heroPrevBtn').onclick = () => {
+      state.heroIndex = (state.heroIndex - 1 + totalSlides) % totalSlides;
+      renderHero(state.heroMovies[state.heroIndex]);
+    };
+    $('heroNextBtn').onclick = () => {
+      state.heroIndex = (state.heroIndex + 1) % totalSlides;
+      renderHero(state.heroMovies[state.heroIndex]);
+    };
+    box.querySelectorAll('[data-hero-idx]').forEach((dot) => {
+      dot.onclick = () => {
+        state.heroIndex = Number(dot.dataset.heroIdx) || 0;
+        renderHero(state.heroMovies[state.heroIndex]);
+      };
+    });
+  }
 }
 
 function renderHistorySection() {
@@ -1767,11 +1887,15 @@ async function loadAdminVaultPanel() {
       `☁️ <strong>Shared AI Subtitles Cached:</strong> ${cfg.cachedSubtitlesCount || 0} episodes`,
     ].join('<br>');
 
-    if ($('adminDefaultModelSelect') && cfg.defaultModel) {
-      $('adminDefaultModelSelect').value = cfg.defaultModel;
+    if (cfg.defaultModel) {
+      state.adminGlobalModel = cfg.defaultModel;
     }
+    populateModelSelects();
     if ($('adminRegModeSelect') && cfg.registrationMode) {
       $('adminRegModeSelect').value = cfg.registrationMode;
+    }
+    if (!state.liveModels.length) {
+      loadLiveGeminiModels({ silent: true });
     }
 
     const invWrap = $('adminInvitesList');
@@ -1839,9 +1963,95 @@ async function loadAdminVaultPanel() {
   }
 }
 
+function populateModelSelects() {
+  const userSelect = $('geminiModelSelect');
+  const adminSelect = $('adminDefaultModelSelect');
+  const statusEl = $('geminiModelsStatus');
+  const curUserModel = state.prefs.geminiModel || getCloudSession()?.defaultModel || 'gemini-3-flash-preview';
+  const curAdminModel = state.adminGlobalModel || getCloudSession()?.defaultModel || curUserModel;
+
+  const list = Array.isArray(state.liveModels) && state.liveModels.length
+    ? state.liveModels.slice()
+    : [
+        { id: curUserModel, displayName: `${curUserModel} (Click Load Models)` },
+      ];
+
+  const ensurePresent = (arr, id) => {
+    if (id && !arr.some((m) => m.id === id)) {
+      arr.unshift({ id, displayName: `${id} (Selected)` });
+    }
+  };
+
+  if (userSelect) {
+    const uList = list.slice();
+    ensurePresent(uList, curUserModel);
+    userSelect.innerHTML = uList
+      .map((m) => {
+        const label = m.displayName && m.displayName !== m.id ? `${m.id} — ${m.displayName}` : m.id;
+        return `<option value="${escapeHtml(m.id)}" ${m.id === curUserModel ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+      })
+      .join('');
+    userSelect.value = curUserModel;
+  }
+
+  if (adminSelect) {
+    const aList = list.slice();
+    ensurePresent(aList, curAdminModel);
+    adminSelect.innerHTML = aList
+      .map((m) => {
+        const label = m.displayName && m.displayName !== m.id ? `${m.id} — ${m.displayName}` : m.id;
+        return `<option value="${escapeHtml(m.id)}" ${m.id === curAdminModel ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+      })
+      .join('');
+    adminSelect.value = curAdminModel;
+  }
+
+  if (statusEl) {
+    if (state.modelsLoading) {
+      statusEl.textContent = '⏳ Loading live models from Google Gemini API...';
+    } else if (state.liveModels.length) {
+      statusEl.textContent = `✅ Loaded ${state.liveModels.length} live models from Gemini API`;
+    } else if (isCloudSignedIn() || state.prefs.geminiApiKey) {
+      statusEl.textContent = 'Click "🔄 Load Models" to fetch live models from Gemini API';
+    } else {
+      statusEl.textContent = 'Sign in to NKI Cloud (or enter personal key) to load live models';
+    }
+  }
+}
+
+async function loadLiveGeminiModels({ silent = false } = {}) {
+  const personalKey = ($('geminiKeyInput')?.value || state.prefs.geminiApiKey || '').trim();
+  if (!isCloudSignedIn() && personalKey.length < 15) {
+    populateModelSelects();
+    if (!silent) showToast('Sign in to NKI Cloud or paste a Gemini API Key to load models');
+    return false;
+  }
+  state.modelsLoading = true;
+  populateModelSelects();
+  try {
+    const data = await cloudFetchLiveModels(isCloudSignedIn() ? '' : personalKey);
+    if (Array.isArray(data?.models) && data.models.length > 0) {
+      state.liveModels = data.models;
+      saveCachedLiveModels(data.models);
+      if (data.defaultModel && !state.adminGlobalModel) {
+        state.adminGlobalModel = data.defaultModel;
+      }
+      // If saved model is not in the live list and user never chose a live one, keep selection valid
+      state.modelsLoading = false;
+      populateModelSelects();
+      if (!silent) showToast(`✅ Loaded ${data.models.length} live Gemini models!`);
+      return true;
+    }
+  } catch (err) {
+    if (!silent) showToast(`Load models failed: ${err.message}`);
+  }
+  state.modelsLoading = false;
+  populateModelSelects();
+  return false;
+}
+
 function openSettingsModal() {
   $('geminiKeyInput').value = state.prefs.geminiApiKey || '';
-  $('geminiModelSelect').value = state.prefs.geminiModel || 'gemini-3-flash-preview';
   if ($('uiLangSelect')) {
     const curUi = resolveUiLang(state.prefs.uiLang);
     $('uiLangSelect').innerHTML = UI_LANGUAGES.map(
@@ -1851,7 +2061,11 @@ function openSettingsModal() {
   $('defaultLangSelect').innerHTML = SUBTITLE_LANGUAGES.map(
     (l) => `<option value="${l.code}" ${l.code === state.prefs.primaryLang ? 'selected' : ''}>${l.badge} — ${l.name} (${l.native})</option>`
   ).join('');
+  populateModelSelects();
   renderCloudCard();
+  if (isCloudSignedIn() || (state.prefs.geminiApiKey || '').trim().length >= 15) {
+    loadLiveGeminiModels({ silent: true });
+  }
   $('settingsModal').classList.add('open');
 }
 
@@ -1925,7 +2139,19 @@ function init() {
   $('openCloudBtn')?.addEventListener('click', openSettingsModal);
   $('openCastBtn').onclick = openTvCastModal;
   $('openSettingsBtn').onclick = openSettingsModal;
-  $('refreshBtn').onclick = () => loadCategory(state.activeCategory);
+  $('refreshBtn').onclick = () => loadCategory(state.activeCategory, { forceRefresh: true });
+
+  // Live Gemini Model Loader & Instant Picker
+  $('loadModelsBtn')?.addEventListener('click', () => loadLiveGeminiModels({ silent: false }));
+  $('adminLoadModelsBtn')?.addEventListener('click', () => loadLiveGeminiModels({ silent: false }));
+  $('geminiModelSelect')?.addEventListener('change', (e) => {
+    const chosen = e.target.value;
+    if (chosen) {
+      state.prefs.geminiModel = chosen;
+      savePrefs();
+      showToast(`✨ Active AI Model: ${chosen}`);
+    }
+  });
 
   // NKI Cloud Sync & Admin Vault Bindings
   $('cloudTabLogin')?.addEventListener('click', () => {
@@ -1957,6 +2183,7 @@ function init() {
       if ($('cloudPasswordInput')) $('cloudPasswordInput').value = '';
       await pullCloudStateAndMerge({ silent: true, force: true });
       renderCloudCard();
+      loadLiveGeminiModels({ silent: true });
     } catch (err) {
       showToast(err.message || 'Authentication failed');
     } finally {
@@ -1986,6 +2213,7 @@ function init() {
       $('adminVaultKeyInput').value = '';
       showToast('🔐 Server Gemini API Key encrypted & updated!');
       loadAdminVaultPanel();
+      loadLiveGeminiModels({ silent: true });
     } catch (err) {
       showToast(err.message || 'Failed to save key');
     }
@@ -2329,8 +2557,9 @@ function init() {
     savePrefs();
     applyUiTranslations();
     renderCategories();
-    if (state.movies.length) renderHero(state.movies[0]);
-    $('aiDot').style.display = state.prefs.geminiApiKey ? 'block' : 'none';
+    if (state.heroMovies.length) renderHero(state.heroMovies[state.heroIndex] || state.heroMovies[0]);
+  else if (state.movies.length) renderHero(state.movies[0]);
+    updateCloudHeaderBadge();
     $('settingsModal').classList.remove('open');
     showToast(tr('settingsSavedToast'));
   };
@@ -2364,7 +2593,20 @@ function init() {
   if (isCloudSignedIn()) {
     cloudRefreshMe().then(() => updateCloudHeaderBadge()).catch(() => {});
     pullCloudStateAndMerge({ silent: true, force: true });
+    loadLiveGeminiModels({ silent: true });
   }
+
+  // Silently auto-refresh Home live movie feed every 10 minutes so new/hot releases stay current!
+  setInterval(() => {
+    if (
+      document.visibilityState === 'visible' &&
+      state.activeCategory === 'hot' &&
+      !$('playerModal')?.classList.contains('open') &&
+      !$('detailView')?.classList.contains('active')
+    ) {
+      loadCategory('hot', { forceRefresh: false, silent: true });
+    }
+  }, 10 * 60 * 1000);
 }
 
 document.addEventListener('DOMContentLoaded', init);

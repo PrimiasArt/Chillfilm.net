@@ -1,4 +1,5 @@
 :root {
+  color-scheme: dark;
   --bg: #141414;
   --bg-deep: #0b0b0b;
   --surface: #181818;
@@ -1332,11 +1333,23 @@ button {
 .field-input, .field-select {
   width: 100%;
   background: #242424;
+  color: #f5f5f5;
+  color-scheme: dark;
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 4px;
   padding: 10px 12px;
   font-size: 13px;
   outline: none;
+}
+
+.field-select {
+  cursor: pointer;
+}
+
+.field-select option,
+.field-select optgroup {
+  background-color: #1c1c1c;
+  color: #f5f5f5;
 }
 
 .field-input:focus, .field-select:focus { border-color: var(--emerald-neon); }
@@ -1622,4 +1635,78 @@ button {
 .local-key-details > summary {
   color: #cbd5e1;
   font-size: 12px;
+}
+
+/* ==================== LIVE AUTO-ROTATING HERO BILLBOARD CONTROLS ==================== */
+.hero-carousel-controls {
+  position: absolute;
+  right: clamp(16px, 4vw, 48px);
+  bottom: clamp(46px, 7vh, 72px);
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.hero-nav-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(16, 16, 16, 0.68);
+  color: #fff;
+  font-size: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.hero-nav-btn:hover {
+  background: rgba(0, 200, 83, 0.28);
+  border-color: var(--emerald-neon);
+}
+.hero-dots {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.hero-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 99px;
+  border: none;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.35);
+  cursor: pointer;
+  transition: width 0.2s ease, background 0.2s ease;
+}
+.hero-dot.active {
+  width: 24px;
+  background: var(--emerald-neon);
+}
+.live-feed-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  font-weight: 800;
+  color: #86efac;
+  background: rgba(0, 200, 83, 0.14);
+  border: 1px solid rgba(0, 230, 118, 0.35);
+  border-radius: 99px;
+  padding: 2px 9px;
+  letter-spacing: 0.4px;
+}
+.hero-genres {
+  font-size: 12px;
+  color: #cbd5e1;
+  font-weight: 600;
+}
+@media (max-width: 680px) {
+  .hero-carousel-controls {
+    right: 14px;
+    bottom: 42px;
+    gap: 6px;
+  }
+  .hero-nav-btn { width: 28px; height: 28px; font-size: 15px; }
 }

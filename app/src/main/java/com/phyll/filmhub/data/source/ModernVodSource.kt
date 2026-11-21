@@ -151,26 +151,34 @@ class ModernVodSource(
         )
     )
 
+    suspend fun fetchLatestUpdatedFeed(limit: Int = 24): List<MovieItem> =
+        withContext(Dispatchers.IO) {
+            val url = "$BASE_API/danh-sach/phim-moi-cap-nhat-v3?page=1"
+            val body = httpGet(url) ?: return@withContext emptyList()
+            parseV1ListResponse(body, CountryCategory.ALL).take(limit)
+        }
+
     suspend fun fetchByCountry(country: CountryCategory, limit: Int = 20): List<MovieItem> =
         withContext(Dispatchers.IO) {
+            val sort = "sort_field=modified.time&sort_type=desc"
             val endpoint = when (country) {
-                CountryCategory.THAILAND -> "$BASE_API/v1/api/quoc-gia/thai-lan?page=1&limit=$limit"
-                CountryCategory.KOREA -> "$BASE_API/v1/api/quoc-gia/han-quoc?page=1&limit=$limit"
-                CountryCategory.CHINA -> "$BASE_API/v1/api/quoc-gia/trung-quoc?page=1&limit=$limit"
-                CountryCategory.USA -> "$BASE_API/v1/api/quoc-gia/au-my?page=1&limit=$limit"
-                CountryCategory.UK -> "$BASE_API/v1/api/quoc-gia/anh?page=1&limit=$limit"
-                CountryCategory.JAPAN -> "$BASE_API/v1/api/quoc-gia/nhat-ban?page=1&limit=$limit"
-                CountryCategory.GLOBAL -> "$BASE_API/v1/api/danh-sach/phim-le?page=1&limit=$limit"
-                CountryCategory.LIVE_TV -> "$BASE_API/v1/api/danh-sach/phim-bo?page=1&limit=$limit"
-                CountryCategory.ALL, CountryCategory.YOUTUBE -> "$BASE_API/v1/api/danh-sach/phim-le?page=1&limit=$limit"
+                CountryCategory.THAILAND -> "$BASE_API/v1/api/quoc-gia/thai-lan?page=1&$sort&limit=$limit"
+                CountryCategory.KOREA -> "$BASE_API/v1/api/quoc-gia/han-quoc?page=1&$sort&limit=$limit"
+                CountryCategory.CHINA -> "$BASE_API/v1/api/quoc-gia/trung-quoc?page=1&$sort&limit=$limit"
+                CountryCategory.USA -> "$BASE_API/v1/api/quoc-gia/au-my?page=1&$sort&limit=$limit"
+                CountryCategory.UK -> "$BASE_API/v1/api/quoc-gia/anh?page=1&$sort&limit=$limit"
+                CountryCategory.JAPAN -> "$BASE_API/v1/api/quoc-gia/nhat-ban?page=1&$sort&limit=$limit"
+                CountryCategory.GLOBAL -> "$BASE_API/v1/api/danh-sach/phim-le?page=1&$sort&limit=$limit"
+                CountryCategory.LIVE_TV -> "$BASE_API/v1/api/danh-sach/phim-bo?page=1&$sort&limit=$limit"
+                CountryCategory.ALL, CountryCategory.YOUTUBE -> "$BASE_API/danh-sach/phim-moi-cap-nhat-v3?page=1"
             }
             val body = httpGet(endpoint) ?: return@withContext emptyList()
-            parseV1ListResponse(body, country)
+            parseV1ListResponse(body, country).take(limit)
         }
 
     suspend fun fetchNewMoviesList(typeSlug: String, limit: Int = 20): List<MovieItem> =
         withContext(Dispatchers.IO) {
-            val url = "$BASE_API/v1/api/danh-sach/$typeSlug?page=1&limit=$limit"
+            val url = "$BASE_API/v1/api/danh-sach/$typeSlug?page=1&sort_field=modified.time&sort_type=desc&limit=$limit"
             val body = httpGet(url) ?: return@withContext emptyList()
             parseV1ListResponse(body, CountryCategory.GLOBAL)
         }
