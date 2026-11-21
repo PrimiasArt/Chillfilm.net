@@ -15,7 +15,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Sarabun:wght@500;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=10" />
+  <link rel="stylesheet" href="./styles.css?v=11" />
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js" defer></script>
 </head>
 <body>
@@ -52,6 +52,9 @@
       <button class="cloud-pill-btn" id="openCloudBtn" title="NKI Cloud Sync & AI">
         <span class="cloud-dot" id="cloudStatusDot"></span>
         <span id="cloudBtnText">Cloud</span>
+      </button>
+      <button class="icon-btn" id="openPartyBtn" title="Watch Party (Join or Create Room)" aria-label="Watch Party">
+        <svg class="ui-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
       </button>
       <button class="icon-btn" id="openCastBtn" title="Cast & Connect TV" aria-label="Cast TV">
         <svg class="ui-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6"/><path d="M2 12a9 9 0 0 1 8 8"/><path d="M2 16a5 5 0 0 1 4 4"/><line x1="2" y1="20" x2="2.01" y2="20"/></svg>
@@ -220,6 +223,30 @@
         </div>
       </div>
 
+      <!-- Watch Party Frosted-Glass Live Chat Overlay (Toggleable inside Player) -->
+      <aside class="party-chat-panel" id="partyChatPanel" style="display:none;">
+        <div class="party-chat-head">
+          <div style="min-width:0;">
+            <div class="party-room-badge" id="partyRoomBadge">🍿 ROOM • 1 watching</div>
+            <div class="party-role-sub" id="partyRoleSub">Synced Watch Party</div>
+          </div>
+          <div style="display:flex;gap:5px;flex-shrink:0;">
+            <button class="icon-btn hud-glass-btn" id="partyCopyLinkBtn" title="Copy Invite Link" style="width:28px;height:28px;">
+              <svg class="ui-ico" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            </button>
+            <button class="icon-btn hud-glass-btn" id="partyHideChatBtn" title="Hide Chat" style="width:28px;height:28px;">
+              <svg class="ui-ico" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="party-messages" id="partyMessagesList"></div>
+        <div class="party-input-row">
+          <input class="party-chat-input" id="partyChatInput" type="text" maxlength="220" placeholder="Say something..." />
+          <button class="btn-grad" id="partySendBtn" type="button" style="padding:6px 10px;font-size:11.5px;">Send</button>
+        </div>
+        <button class="party-leave-btn" id="partyLeaveBtn" type="button">Leave Watch Party</button>
+      </aside>
+
       <!-- Right-Side Frosted-Glass Episodes & Servers Drawer -->
       <div class="player-drawer-backdrop" id="playerDrawerBackdrop"></div>
       <aside class="player-drawer" id="playerDrawer" aria-label="Episodes and Servers">
@@ -272,6 +299,7 @@
             </div>
           </div>
           <div class="hud-right">
+            <button class="hud-party-pill" id="hudPartyBtn" title="Start or Toggle Watch Party">🍿 Party</button>
             <button class="hud-cc-pill" id="hudSubLangPill" title="AI Subtitles">CC • EN</button>
             <button class="icon-btn hud-glass-btn mobile-only" id="hudRotateBtn" title="Landscape Fullscreen" aria-label="Rotate">
               <svg class="ui-ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
@@ -725,8 +753,34 @@
     </div>
   </div>
 
+  <!-- WATCH PARTY JOIN / CREATE MODAL -->
+  <div class="backdrop" id="partyModal">
+    <div class="modal-card" style="max-width:420px;">
+      <div class="modal-head">
+        <h3>🍿 ChillFilm Watch Party</h3>
+        <button class="icon-btn" data-close="partyModal" aria-label="Close"><svg class="ui-ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <div class="info-box" style="font-size:12px;">
+          Watch together in sync! Enter a 6-character room code from a friend to join instantly, or start any movie and click <strong>🍿 Party</strong> inside the player to host a room.
+        </div>
+        <div class="field-group">
+          <span class="field-label">YOUR NICKNAME</span>
+          <input class="field-input" id="partyNickInput" maxlength="28" placeholder="e.g. Minh, Alex..." />
+        </div>
+        <div class="field-group">
+          <span class="field-label">6-CHARACTER ROOM CODE</span>
+          <div style="display:flex;gap:8px;">
+            <input class="field-input" id="partyCodeInput" maxlength="8" placeholder="e.g. CF7K2P" style="text-transform:uppercase;letter-spacing:2px;font-weight:800;" />
+            <button class="btn-grad" id="partyJoinSubmitBtn" type="button" style="white-space:nowrap;">🍿 Join Room</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="toast" id="toast"></div>
 
-  <script type="module" src="./app.js?v=10"></script>
+  <script type="module" src="./app.js?v=11"></script>
 </body>
 </html>

@@ -43,26 +43,19 @@ const GENRE_MAP_PHIMAPI = {
   anime: { slug: 'hoat-hinh', sqlTerm: 'Anime' },
 };
 
-async function verifyStreamAlive(streamUrl, timeoutMs = 2200) {
+async function verifyStreamAlive(streamUrl, timeoutMs = 2400) {
   if (!streamUrl || !streamUrl.startsWith('http')) return false;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(streamUrl, {
-      method: 'HEAD',
+      method: 'GET',
       signal: ctrl.signal,
       headers: { 'User-Agent': 'ChillFilm-NKI/3.5' },
     });
-    if (res.ok) return true;
-    if (res.status === 405 || res.status === 403) {
-      const getRes = await fetch(streamUrl, {
-        method: 'GET',
-        signal: ctrl.signal,
-        headers: { 'User-Agent': 'ChillFilm-NKI/3.5', Range: 'bytes=0-128' },
-      });
-      return getRes.ok;
-    }
-    return false;
+    const ok = res.ok;
+    try { res.body?.cancel?.(); } catch { /* ignore */ }
+    return ok;
   } catch {
     return false;
   } finally {

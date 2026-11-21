@@ -33,7 +33,13 @@ import {
   fetchLiveCatalogFeed,
   fetchCatalogBrowse,
   fetchCatalogDetail,
-} from './sync.js?v=10';
+  partyCreate,
+  partyJoin,
+  partyPoll,
+  partyControl,
+  partySendChat,
+  partyLeave,
+} from './sync.js?v=11';
 
 const PHIM_API = 'https://phimapi.com';
 const PHIM_CDN = 'https://phimimg.com';
@@ -134,6 +140,19 @@ const state = {
   audioSubLoopTimer: null,
   audioSubSessionId: 0,
   audioSubChunksDone: 0,
+  // Phase 3 Watch Party
+  party: {
+    roomCode: '',
+    hostToken: '',
+    memberId: '',
+    nickname: '',
+    isHost: false,
+    pollTimer: null,
+    lastMsgId: 0,
+    chatVisible: false,
+    applyingRemoteSync: false,
+    lastEpisodeUrl: '',
+  },
   // Subtitles & Resume
   subTracks: [],
   activeSubTrackId: null,
@@ -2105,7 +2124,280 @@ function startWebAiAudioSub() {
   captureNextAudioSubChunk(sessionId);
 }
 
-function openPlayer(movie, episode, startSec = 0, { preserveFailover = false } = {}) {
+/* ==================== PHASE 3: WATCH PARTY ENGINE (NEON SYNC + LIVE CHAT) ==================== */
+function getDefaultPartyNick() {
+  const session = getCloudSession();
+  if (session?.user?.displayName) return session.user.displayName;
+  if (session?.user?.username) return session.user.username;
+  return localStorage.getItem('chillfilm_nki_party_nick_v1') || 'Guest';
+}
+
+function renderPartyHeaderAndButton() {
+  const p = state.party;
+  const hudBtn = $('hudPartyBtn');
+  const panel = $('partyChatPanel');
+  if (hudBtn) {
+    hudBtn.classList.toggle('active', Boolean(p.roomCode));
+    hudBtn.textContent = p.roomCode ? `🍿 ${p.roomCode}` : '🍿 Party';
+  }
+  if (panel) {
+    panel.style.display = p.roomCode && p.chatVisible ? 'flex' : 'none';
+  }
+}
+
+function appendPartyMessages(messages) {
+  const list = $('partyMessagesList');
+  if (!list || !Array.isArray(messages) || !messages.length) return;
+  for (const m of messages) {
+    if (!m || !m.text) continue;
+    if (m.id && m.id <= state.party.lastMsgId) continue;
+    if (m.id) state.party.lastMsgId = m.id;
+    const div = document.createElement('div');
+    div.className = 'party-msg';
+    div.innerHTML = `
+      <div class="party-msg-author">
+        <span>${escapeHtml(m.senderName || 'Guest')}</span>
+        ${m.isHost ? '<span class="party-host-tag">HOST</span>' : ''}
+      </div>
+      <div>${escapeHtml(m.text)}</div>
+    `;
+    list.appendChild(div);
+  }
+  list.scrollTop = list.scrollHeight;
+}
+
+function pushHostPartyState(extra = {}) {
+  const p = state.party;
+  if (!p.roomCode || !p.isHost || !p.hostToken || p.applyingRemoteSync) return;
+  const video = $('videoEl');
+  partyControl({
+    roomCode: p.roomCode,
+    hostToken: p.hostToken,
+    isPlaying: typeof extra.isPlaying === 'boolean' ? extra.isPlaying : !video?.paused,
+    positionSec: typeof extra.positionSec === 'number' ? extra.positionSec : Number(video?.currentTime || 0),
+    playbackRate: Number(video?.playbackRate || 1),
+    episode: extra.episode || null,
+  }).catch(() => {});
+}
+
+function startPartyPolling() {
+  clearInterval(state.party.pollTimer);
+  const tick = async () => {
+    const p = state.party;
+    if (!p.roomCode) return;
+    try {
+      const data = await partyPoll({
+        roomCode: p.roomCode,
+        sinceMsgId: p.lastMsgId,
+        memberId: p.memberId,
+        nickname: p.nickname,
+        hostToken: p.hostToken,
+      });
+      const snap = data?.party;
+      if (!snap) return;
+
+      if ($('partyRoomBadge')) {
+        $('partyRoomBadge').textContent = `🍿 ${snap.roomCode} • ${snap.viewerCount} watching`;
+      }
+      if ($('partyRoleSub')) {
+        $('partyRoleSub').textContent = p.isHost
+          ? `You are HOST (${snap.hostName}) • Controls synced`
+          : `Hosted by ${snap.hostName} • Auto-synced`;
+      }
+      appendPartyMessages(snap.messages || []);
+
+      // Guest playback synchronization (follow Host Play/Pause/Seek & Episode changes!)
+      if (!p.isHost && $('playerModal')?.classList.contains('open')) {
+        const video = $('videoEl');
+        if (snap.episode?.link_m3u8 && p.lastEpisodeUrl && snap.episode.link_m3u8 !== p.lastEpisodeUrl) {
+          p.lastEpisodeUrl = snap.episode.link_m3u8;
+          openPlayer(state.currentMovie || snap.movie, snap.episode, snap.positionSec || 0, { preserveParty: true });
+          return;
+        }
+        if (video) {
+          const elapsedSec = snap.isPlaying
+            ? Math.max(0, (snap.serverTime - snap.stateUpdatedAt) / 1000) * (snap.playbackRate || 1)
+            : 0;
+          const expectedPos = Math.max(0, (snap.positionSec || 0) + elapsedSec);
+          p.applyingRemoteSync = true;
+          try {
+            if (Math.abs((video.playbackRate || 1) - (snap.playbackRate || 1)) > 0.05) {
+              video.playbackRate = snap.playbackRate || 1;
+            }
+            if (isFinite(video.duration) && video.duration > 5 && Math.abs((video.currentTime || 0) - expectedPos) > 1.8) {
+              video.currentTime = Math.min(video.duration - 1, expectedPos);
+            }
+            if (snap.isPlaying && video.paused) {
+              video.play().catch(() => {});
+            } else if (!snap.isPlaying && !video.paused) {
+              video.pause();
+            }
+          } finally {
+            setTimeout(() => { p.applyingRemoteSync = false; }, 250);
+          }
+        }
+      }
+    } catch (err) {
+      if (err?.status === 404) {
+        showToast('Watch Party room ended or expired');
+        leaveWatchParty(true);
+      }
+    }
+  };
+  state.party.pollTimer = setInterval(tick, 2200);
+}
+
+async function createWatchPartyForCurrent() {
+  if (!state.currentMovie || !state.currentEpisode) {
+    showToast('Open a movie first to host a Watch Party!');
+    return;
+  }
+  const nickname = getDefaultPartyNick();
+  const video = $('videoEl');
+  try {
+    showToast('🍿 Creating Watch Party room...');
+    const res = await partyCreate({
+      movie: {
+        slug: state.currentMovie.slug,
+        source: state.currentMovie.source || 'phimapi',
+        sourceId: state.currentMovie.sourceId || '',
+        name: getDisplayTitle(state.currentMovie),
+        poster: state.currentMovie.poster || '',
+        year: state.currentMovie.year || '',
+      },
+      episode: {
+        name: state.currentEpisode.name || 'Full',
+        slug: state.currentEpisode.slug || 'full',
+        link_m3u8: state.currentEpisode.link_m3u8,
+      },
+      nickname,
+      positionSec: Number(video?.currentTime || 0),
+      isPlaying: !video?.paused,
+    });
+    state.party = {
+      roomCode: res.roomCode,
+      hostToken: res.hostToken,
+      memberId: res.memberId,
+      nickname,
+      isHost: true,
+      pollTimer: null,
+      lastMsgId: 0,
+      chatVisible: true,
+      applyingRemoteSync: false,
+      lastEpisodeUrl: state.currentEpisode.link_m3u8,
+    };
+    if ($('partyMessagesList')) $('partyMessagesList').innerHTML = '';
+    appendPartyMessages(res.party?.messages || []);
+    if ($('partyRoomBadge')) $('partyRoomBadge').textContent = `🍿 ${res.roomCode} • 1 watching`;
+    if ($('partyRoleSub')) $('partyRoleSub').textContent = `You are HOST (${nickname}) • Controls synced`;
+    renderPartyHeaderAndButton();
+    startPartyPolling();
+    const shareUrl = `${window.location.origin}/?party=${res.roomCode}`;
+    navigator.clipboard?.writeText(shareUrl).catch(() => {});
+    showToast(`🍿 Room ${res.roomCode} created & invite link copied!`);
+  } catch (err) {
+    showToast(`Watch Party failed: ${err?.message || 'error'}`);
+  }
+}
+
+async function joinWatchPartyByCode(rawCode, rawNick = '') {
+  const roomCode = String(rawCode || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (roomCode.length < 4) return showToast('Enter a valid 6-character room code');
+  const nickname = String(rawNick || getDefaultPartyNick()).trim() || 'Guest';
+  try {
+    localStorage.setItem('chillfilm_nki_party_nick_v1', nickname);
+  } catch { /* ignore */ }
+
+  try {
+    showToast(`🍿 Joining Watch Party ${roomCode}...`);
+    const res = await partyJoin({ roomCode, nickname });
+    const snap = res.party;
+    if (!snap?.movie?.slug || !snap?.episode?.link_m3u8) {
+      throw new Error('Room has no active video');
+    }
+    $('partyModal')?.classList.remove('open');
+
+    state.party = {
+      roomCode: snap.roomCode,
+      hostToken: '',
+      memberId: res.memberId,
+      nickname,
+      isHost: false,
+      pollTimer: null,
+      lastMsgId: 0,
+      chatVisible: true,
+      applyingRemoteSync: false,
+      lastEpisodeUrl: snap.episode.link_m3u8,
+    };
+    if ($('partyMessagesList')) $('partyMessagesList').innerHTML = '';
+    appendPartyMessages(snap.messages || []);
+    if ($('partyRoomBadge')) $('partyRoomBadge').textContent = `🍿 ${snap.roomCode} • ${snap.viewerCount} watching`;
+    if ($('partyRoleSub')) $('partyRoleSub').textContent = `Hosted by ${snap.hostName} • Auto-synced`;
+
+    const elapsedSec = snap.isPlaying ? Math.max(0, (snap.serverTime - snap.stateUpdatedAt) / 1000) : 0;
+    const startSec = Math.max(0, (snap.positionSec || 0) + elapsedSec);
+    const partyMovie = {
+      ...snap.movie,
+      type: 'single',
+      servers: [{ server_name: 'Watch Party Sync', episodes: [snap.episode] }],
+    };
+    openPlayer(partyMovie, snap.episode, startSec, { preserveParty: true });
+    renderPartyHeaderAndButton();
+    startPartyPolling();
+    showToast(`🍿 Joined ${snap.hostName}'s Watch Party!`);
+  } catch (err) {
+    showToast(err?.message || 'Could not join Watch Party');
+  }
+}
+
+function leaveWatchParty(silent = false) {
+  const p = state.party;
+  clearInterval(p.pollTimer);
+  if (p.roomCode && p.memberId) {
+    partyLeave({ roomCode: p.roomCode, memberId: p.memberId }).catch(() => {});
+  }
+  state.party = {
+    roomCode: '',
+    hostToken: '',
+    memberId: '',
+    nickname: '',
+    isHost: false,
+    pollTimer: null,
+    lastMsgId: 0,
+    chatVisible: false,
+    applyingRemoteSync: false,
+    lastEpisodeUrl: '',
+  };
+  renderPartyHeaderAndButton();
+  if (!silent) showToast('Left Watch Party');
+}
+
+async function sendPartyChatMsg() {
+  const p = state.party;
+  const input = $('partyChatInput');
+  const text = (input?.value || '').trim();
+  if (!p.roomCode || !text) return;
+  input.value = '';
+  try {
+    const res = await partySendChat({
+      roomCode: p.roomCode,
+      nickname: p.nickname,
+      text,
+      hostToken: p.hostToken,
+    });
+    if (res?.message) appendPartyMessages([res.message]);
+  } catch (err) {
+    showToast(err?.message || 'Failed to send message');
+  }
+}
+
+function openPartyJoinModal(prefillCode = '') {
+  if ($('partyNickInput')) $('partyNickInput').value = getDefaultPartyNick();
+  if ($('partyCodeInput')) $('partyCodeInput').value = String(prefillCode || '').toUpperCase();
+  $('partyModal')?.classList.add('open');
+}
+
+function openPlayer(movie, episode, startSec = 0, { preserveFailover = false, preserveParty = false } = {}) {
   // Save previous episode position if switching mid-session
   if (state.currentMovie && state.currentEpisode && $('playerModal').classList.contains('open')) {
     persistCurrentPlaybackProgress();
@@ -2138,6 +2430,11 @@ function openPlayer(movie, episode, startSec = 0, { preserveFailover = false } =
   }
   renderPlayerDrawer();
   updateMediaSession(movie, episode);
+  if (state.party.roomCode && state.party.isHost && !preserveParty) {
+    state.party.lastEpisodeUrl = episode.link_m3u8;
+    pushHostPartyState({ positionSec: startSec, isPlaying: true, episode });
+  }
+  renderPartyHeaderAndButton();
 
   const resolvedStartSec = startSec > 2 ? Math.floor(startSec) : getSavedEpisodePosition(movie.slug, episode);
   state.pendingSeekSec = resolvedStartSec;
@@ -2307,6 +2604,7 @@ function closePlayer(e) {
   cancelAutoNext(false);
   clearStallWatchdog();
   closePlayerDrawer();
+  if (state.party.roomCode) leaveWatchParty(true);
   if ($('skipIntroBtn')) $('skipIntroBtn').style.display = 'none';
   if ($('streamFailoverBar')) $('streamFailoverBar').style.display = 'none';
   if ($('hudAudioSubPrompt')) $('hudAudioSubPrompt').style.display = 'none';
@@ -3282,6 +3580,36 @@ function init() {
   });
 
   $('openCloudBtn')?.addEventListener('click', openSettingsModal);
+  $('openPartyBtn')?.addEventListener('click', () => openPartyJoinModal(''));
+  $('hudPartyBtn')?.addEventListener('click', () => {
+    if (state.party.roomCode) {
+      state.party.chatVisible = !state.party.chatVisible;
+      renderPartyHeaderAndButton();
+    } else {
+      createWatchPartyForCurrent();
+    }
+  });
+  $('partyJoinSubmitBtn')?.addEventListener('click', () => {
+    joinWatchPartyByCode($('partyCodeInput')?.value, $('partyNickInput')?.value);
+  });
+  $('partyCodeInput')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') joinWatchPartyByCode($('partyCodeInput')?.value, $('partyNickInput')?.value);
+  });
+  $('partyCopyLinkBtn')?.addEventListener('click', () => {
+    if (!state.party.roomCode) return;
+    const shareUrl = `${window.location.origin}/?party=${state.party.roomCode}`;
+    navigator.clipboard?.writeText(shareUrl).catch(() => {});
+    showToast(`📋 Copied Watch Party link (${state.party.roomCode})!`);
+  });
+  $('partyHideChatBtn')?.addEventListener('click', () => {
+    state.party.chatVisible = false;
+    renderPartyHeaderAndButton();
+  });
+  $('partySendBtn')?.addEventListener('click', sendPartyChatMsg);
+  $('partyChatInput')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') sendPartyChatMsg();
+  });
+  $('partyLeaveBtn')?.addEventListener('click', () => leaveWatchParty(false));
   $('openCastBtn').onclick = openTvCastModal;
   $('openSettingsBtn').onclick = openSettingsModal;
   $('refreshBtn').onclick = () => loadCategory(state.activeCategory, { forceRefresh: true });
@@ -3542,6 +3870,7 @@ function init() {
     syncPlayIcons(false);
     clearStallWatchdog();
     setControlsVisible(true, 1600);
+    pushHostPartyState({ isPlaying: true });
   });
   video.addEventListener('playing', () => {
     clearStallWatchdog();
@@ -3562,6 +3891,7 @@ function init() {
     }
   });
   video.addEventListener('seeked', () => {
+    pushHostPartyState({ positionSec: video.currentTime || 0 });
     if (state.audioSubActive && state.audioSubRecorder?.state === 'recording') {
       // Restart rolling 18s AI audio capture cleanly at the new seeked timestamp
       try { state.audioSubRecorder.stop(); } catch { /* ignore */ }
@@ -3572,6 +3902,7 @@ function init() {
     clearStallWatchdog();
     persistCurrentPlaybackProgress({ immediate: true });
     setControlsVisible(true);
+    pushHostPartyState({ isPlaying: false });
   });
   video.addEventListener('timeupdate', () => {
     const cur = video.currentTime || 0;
@@ -3965,6 +4296,19 @@ function init() {
     pullCloudStateAndMerge({ silent: true, force: true });
     loadLiveGeminiModels({ silent: true });
   }
+
+  // Auto-detect ?party=XXXXXX shareable Watch Party invite link on startup
+  try {
+    const inviteRoom = new URLSearchParams(window.location.search).get('party');
+    if (inviteRoom && inviteRoom.trim().length >= 4) {
+      const code = inviteRoom.trim().toUpperCase();
+      if (isCloudSignedIn()) {
+        joinWatchPartyByCode(code, getDefaultPartyNick());
+      } else {
+        openPartyJoinModal(code);
+      }
+    }
+  } catch { /* ignore */ }
 
   // Silently auto-refresh Home live movie feed every 10 minutes so new/hot releases stay current!
   setInterval(() => {

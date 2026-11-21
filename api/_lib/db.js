@@ -196,6 +196,36 @@ export async function ensureSchema() {
       ON nki_my_list (user_id, added_at DESC)
     `;
     await sql`
+      CREATE TABLE IF NOT EXISTS nki_watch_parties (
+        room_code TEXT PRIMARY KEY,
+        host_token TEXT NOT NULL,
+        host_name TEXT NOT NULL,
+        movie_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        episode_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        is_playing BOOLEAN NOT NULL DEFAULT FALSE,
+        position_sec REAL NOT NULL DEFAULT 0,
+        playback_rate REAL NOT NULL DEFAULT 1,
+        state_updated_at BIGINT NOT NULL,
+        members_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        created_at BIGINT NOT NULL,
+        expires_at BIGINT NOT NULL
+      )
+    `;
+    await sql`
+      CREATE TABLE IF NOT EXISTS nki_party_messages (
+        id BIGSERIAL PRIMARY KEY,
+        room_code TEXT NOT NULL,
+        sender_name TEXT NOT NULL,
+        sender_is_host BOOLEAN NOT NULL DEFAULT FALSE,
+        text TEXT NOT NULL,
+        created_at BIGINT NOT NULL
+      )
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_nki_party_messages_room
+      ON nki_party_messages (room_code, id ASC)
+    `;
+    await sql`
       CREATE INDEX IF NOT EXISTS idx_nki_catalog_updated
       ON nki_catalog_items (updated_at DESC)
     `;

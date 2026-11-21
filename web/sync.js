@@ -365,3 +365,55 @@ export async function fetchCatalogDetail({ source = 'phimapi', slug, sourceId = 
   }
   return data.detail;
 }
+
+/* ==================== WATCH PARTY CLIENT (/api/party) ==================== */
+export async function partyCreate({ movie, episode, nickname, positionSec = 0, isPlaying = false }) {
+  return apiFetch('/api/party', {
+    method: 'POST',
+    auth: false,
+    body: { action: 'create', movie, episode, nickname, positionSec, isPlaying },
+  });
+}
+
+export async function partyJoin({ roomCode, nickname, memberId = '' }) {
+  return apiFetch('/api/party', {
+    method: 'POST',
+    auth: false,
+    body: { action: 'join', roomCode, nickname, memberId },
+  });
+}
+
+export async function partyPoll({ roomCode, sinceMsgId = 0, memberId = '', nickname = '', hostToken = '' }) {
+  const qs = new URLSearchParams({
+    room: roomCode,
+    sinceMsgId: String(sinceMsgId || 0),
+    memberId,
+    nickname,
+  });
+  if (hostToken) qs.set('hostToken', hostToken);
+  return apiFetch(`/api/party?${qs.toString()}`, { method: 'GET', auth: false });
+}
+
+export async function partyControl({ roomCode, hostToken, isPlaying, positionSec, playbackRate = 1, episode = null }) {
+  return apiFetch('/api/party', {
+    method: 'POST',
+    auth: false,
+    body: { action: 'control', roomCode, hostToken, isPlaying, positionSec, playbackRate, episode },
+  });
+}
+
+export async function partySendChat({ roomCode, nickname, text, hostToken = '' }) {
+  return apiFetch('/api/party', {
+    method: 'POST',
+    auth: false,
+    body: { action: 'chat', roomCode, nickname, text, hostToken },
+  });
+}
+
+export async function partyLeave({ roomCode, memberId }) {
+  return apiFetch('/api/party', {
+    method: 'POST',
+    auth: false,
+    body: { action: 'leave', roomCode, memberId },
+  });
+}
