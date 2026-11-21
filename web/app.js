@@ -37,6 +37,27 @@ const PHIM_API = 'https://phimapi.com';
 const PHIM_CDN = 'https://phimimg.com';
 const APK_RELEASE_URL = 'https://github.com/PrimiasArt/Chillfilm.net/releases/download/android-apk-latest/ChillFilm-latest.apk';
 
+const SVG_ICONS = {
+  playLg: '<svg class="ui-ico" viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><polygon points="7,4 20,12 7,20"/></svg>',
+  pauseLg: '<svg class="ui-ico" viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>',
+  playSm: '<svg class="ui-ico" viewBox="0 0 24 24" width="19" height="19" fill="currentColor"><polygon points="7,4 20,12 7,20"/></svg>',
+  pauseSm: '<svg class="ui-ico" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>',
+  playMini: '<svg class="ui-ico" viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><polygon points="7,4 20,12 7,20"/></svg>',
+  pauseMini: '<svg class="ui-ico" viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>',
+  playCard: '<svg class="ui-ico" viewBox="0 0 24 24" width="19" height="19" fill="currentColor"><polygon points="7,4 20,12 7,20"/></svg>',
+  chevLeft: '<svg class="ui-ico" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>',
+  chevRight: '<svg class="ui-ico" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>',
+  chevLeftSm: '<svg class="ui-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>',
+  chevRightSm: '<svg class="ui-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>',
+  volHigh: '<svg class="ui-ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>',
+  volLow: '<svg class="ui-ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>',
+  volMute: '<svg class="ui-ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>',
+  fsEnter: '<svg class="ui-ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>',
+  fsExit: '<svg class="ui-ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>',
+  aspect: '<svg class="ui-ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><polyline points="7 12 7 9 10 9"/><polyline points="17 12 17 15 14 15"/></svg>',
+  nextEp: '<svg class="ui-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 4 15 12 5 20 5 4" fill="currentColor"/><line x1="19" y1="5" x2="19" y2="19"/></svg>',
+};
+
 const CATEGORIES = [
   { id: 'hot', label: 'Trending', url: `${PHIM_API}/danh-sach/phim-moi-cap-nhat-v3?page=1` },
   { id: 'crawled', label: '🤖 Auto-Crawled', browse: { category: 'crawled' } },
@@ -82,6 +103,7 @@ const state = {
   gainNode: null,
   eqNodes: null,
   volumeScale: 1.0,
+  lastNonZeroVolume: 1.0,
   eqPreset: 'FLAT',
   aspectMode: 'fit',
   brightness: 1.0,
@@ -93,6 +115,7 @@ const state = {
   minimizedAt: 0,
   controlsVisible: true,
   controlsTimer: null,
+  hudPointerInside: false,
   // Subtitles & Resume
   subTracks: [],
   activeSubTrackId: null,
@@ -223,9 +246,12 @@ function applyUiTranslations() {
   setText('continueSectionTitle', 'continueWatching');
   setHtml('footerTagline', 'footerTagline');
   setText('footerApkLink', 'downloadApk');
-  setText('hudLockBtn', 'lockBtn');
+  if ($('hudLockBtn')) $('hudLockBtn').title = tr('lockBtn');
   const isFs = Boolean(document.fullscreenElement || document.webkitFullscreenElement);
-  setText('hudFsBtn', isFs ? 'exitFsBtn' : 'fullscreenBtn');
+  if ($('hudFsBtn')) {
+    $('hudFsBtn').title = isFs ? tr('exitFsBtn') : tr('fullscreenBtn');
+    $('hudFsBtn').innerHTML = isFs ? SVG_ICONS.fsExit : SVG_ICONS.fsEnter;
+  }
   if ($('miniExpandBtn')) $('miniExpandBtn').title = tr('miniExpandTitle');
   if ($('miniCloseBtn')) $('miniCloseBtn').title = tr('miniCloseTitle');
 
@@ -728,12 +754,12 @@ function renderHomeSwimlanes() {
 
     const leftBtn = document.createElement('button');
     leftBtn.className = 'rail-arrow left';
-    leftBtn.innerHTML = '‹';
+    leftBtn.innerHTML = SVG_ICONS.chevLeft;
     leftBtn.setAttribute('aria-label', 'Scroll left');
 
     const rightBtn = document.createElement('button');
     rightBtn.className = 'rail-arrow right';
-    rightBtn.innerHTML = '›';
+    rightBtn.innerHTML = SVG_ICONS.chevRight;
     rightBtn.setAttribute('aria-label', 'Scroll right');
 
     const rail = document.createElement('div');
@@ -868,11 +894,11 @@ function renderHero(movie) {
   const controlsHtml = totalSlides > 1
     ? `
       <div class="hero-carousel-controls">
-        <button class="hero-nav-btn" id="heroPrevBtn" aria-label="Previous featured">‹</button>
+        <button class="hero-nav-btn" id="heroPrevBtn" aria-label="Previous featured">${SVG_ICONS.chevLeftSm}</button>
         <div class="hero-dots">
           ${state.heroMovies.map((_, i) => `<button class="hero-dot ${i === state.heroIndex ? 'active' : ''}" data-hero-idx="${i}" aria-label="Slide ${i + 1}"></button>`).join('')}
         </div>
-        <button class="hero-nav-btn" id="heroNextBtn" aria-label="Next featured">›</button>
+        <button class="hero-nav-btn" id="heroNextBtn" aria-label="Next featured">${SVG_ICONS.chevRightSm}</button>
       </div>
     `
     : '';
@@ -982,7 +1008,7 @@ function createMovieCardElement(movie) {
       <span class="card-nki-mark">NKI</span>
       <span class="card-badge">AI</span>
       <span class="card-quality">${escapeHtml((movie.episode_current || movie.quality || 'HD').slice(0, 12))}</span>
-      <div class="card-hover-play"><span>▶</span></div>
+      <div class="card-hover-play"><span>${SVG_ICONS.playCard}</span></div>
       ${movie.progress ? `<div class="card-progress"><div class="card-progress-fill" style="width:${Math.round(movie.progress * 100)}%"></div></div>` : ''}
     </div>
     <div class="card-info">
@@ -1196,19 +1222,61 @@ function ensureWebAudioDsp(videoEl) {
   }
 }
 
+function syncPlayIcons(isPaused) {
+  if ($('playPauseBtn')) $('playPauseBtn').innerHTML = isPaused ? SVG_ICONS.playLg : SVG_ICONS.pauseLg;
+  if ($('hudPlayBtn')) $('hudPlayBtn').innerHTML = isPaused ? SVG_ICONS.playSm : SVG_ICONS.pauseSm;
+  if ($('miniPlayBtn')) $('miniPlayBtn').innerHTML = isPaused ? SVG_ICONS.playMini : SVG_ICONS.pauseMini;
+}
+
 function applyVolumeBoost(scale) {
   state.volumeScale = Math.max(0, Math.min(2.0, scale));
+  if (state.volumeScale > 0.02) {
+    state.lastNonZeroVolume = state.volumeScale;
+  }
   const video = $('videoEl');
   if (state.gainNode) {
     video.volume = 1.0;
+    video.muted = state.volumeScale <= 0.001;
     state.gainNode.gain.value = state.volumeScale;
   } else {
+    video.muted = state.volumeScale <= 0.001;
     video.volume = Math.min(1.0, state.volumeScale);
   }
   const pct = Math.round(state.volumeScale * 100);
-  $('boostSlider').value = pct;
-  $('boostValLabel').textContent = pct > 100 ? `${pct}% BOOST` : `${pct}%`;
-  $('hudSpeedBoostBtn').textContent = pct > 100 ? `🔊 ${pct}%` : `⚡ ${state.speed}x`;
+  if ($('boostSlider')) $('boostSlider').value = pct;
+  if ($('boostValLabel')) $('boostValLabel').textContent = pct > 100 ? `${pct}% BOOST` : `${pct}%`;
+
+  const hudVol = $('hudVolSlider');
+  if (hudVol) {
+    hudVol.value = pct;
+    hudVol.style.setProperty('--pct', `${Math.min(100, pct / 2)}%`);
+    hudVol.classList.toggle('boosted', pct > 100);
+  }
+  const hudPct = $('hudVolPct');
+  if (hudPct) {
+    hudPct.textContent = `${pct}%`;
+    hudPct.classList.toggle('boosted', pct > 100);
+  }
+  const muteBtn = $('hudMuteBtn');
+  if (muteBtn) {
+    muteBtn.innerHTML = pct === 0 ? SVG_ICONS.volMute : pct < 55 ? SVG_ICONS.volLow : SVG_ICONS.volHigh;
+  }
+  if ($('hudSpeedBoostBtn')) {
+    $('hudSpeedBoostBtn').textContent = pct > 100 ? `🔊 ${pct}%` : `${state.speed}x`;
+  }
+}
+
+function toggleMute() {
+  ensureWebAudioDsp($('videoEl'));
+  if (state.volumeScale > 0.01) {
+    state.lastNonZeroVolume = state.volumeScale;
+    applyVolumeBoost(0);
+    showGestureToast('🔇 Muted');
+  } else {
+    const restored = state.lastNonZeroVolume > 0.05 ? state.lastNonZeroVolume : 1.0;
+    applyVolumeBoost(restored);
+    showGestureToast(`🔊 ${Math.round(restored * 100)}%`);
+  }
 }
 
 function applyEqPreset(preset) {
@@ -1290,13 +1358,16 @@ function openPlayer(movie, episode, startSec = 0) {
   const modal = $('playerModal');
   const video = $('videoEl');
   state.isMinimized = false;
+  state.hudPointerInside = false;
   modal.classList.remove('minimized');
   modal.classList.add('open');
+  document.documentElement.style.overflow = 'hidden';
   document.body.style.overflow = 'hidden';
 
   $('hudMovieTitle').textContent = `${movie.name} • ${episode.name}`;
   if ($('miniTitle')) $('miniTitle').textContent = `${movie.name} • ${episode.name}`;
   updateSubStatusBadge(tr('checkingSavedSub'));
+  applyVolumeBoost(state.volumeScale);
   setControlsVisible(true);
 
   // Destroy previous HLS instance
@@ -1367,15 +1438,26 @@ function openPlayer(movie, episode, startSec = 0) {
   // Next episode button visibility
   const curIdx = state.episodesFlat.findIndex((e) => e.link_m3u8 === episode.link_m3u8);
   const nextEp = curIdx >= 0 && curIdx + 1 < state.episodesFlat.length ? state.episodesFlat[curIdx + 1] : null;
-  $('hudNextOrAspectBtn').textContent = nextEp ? tr('nextEpBtn') : tr('aspectBtn');
-  $('hudNextOrAspectBtn').onclick = () => {
+  const nextBtn = $('hudNextOrAspectBtn');
+  if (nextBtn) {
     if (nextEp) {
-      persistCurrentPlaybackProgress();
-      openPlayer(movie, nextEp, 0);
+      nextBtn.classList.add('has-label');
+      nextBtn.innerHTML = `${SVG_ICONS.nextEp}<span>${escapeHtml(tr('nextEpBtn').replace(/^[^\w\p{L}]+/u, '').trim() || 'Next')}</span>`;
+      nextBtn.title = nextEp.name ? `Next: ${nextEp.name}` : tr('nextEpBtn');
     } else {
-      openMoreModal();
+      nextBtn.classList.remove('has-label');
+      nextBtn.innerHTML = SVG_ICONS.aspect;
+      nextBtn.title = tr('aspectBtn');
     }
-  };
+    nextBtn.onclick = () => {
+      if (nextEp) {
+        persistCurrentPlaybackProgress();
+        openPlayer(movie, nextEp, 0);
+      } else {
+        openMoreModal();
+      }
+    };
+  }
 
   // Auto-discover (or instantly restore from IndexedDB!) subtitles into user's chosen AI language!
   autoLoadSubtitlesForMovie(movie, episode);
@@ -1401,9 +1483,10 @@ function minimizePlayer(e) {
   state.minimizedAt = Date.now();
   $('lockFab').classList.remove('visible');
   modal.classList.add('minimized');
+  $('playerStage')?.classList.remove('hud-hidden');
+  document.documentElement.style.overflow = '';
   document.body.style.overflow = '';
-  const video = $('videoEl');
-  if ($('miniPlayBtn')) $('miniPlayBtn').textContent = video.paused ? '▶' : '⏸';
+  syncPlayIcons($('videoEl').paused);
 }
 
 function restorePlayer(e) {
@@ -1413,7 +1496,9 @@ function restorePlayer(e) {
   const modal = $('playerModal');
   if (!modal.classList.contains('open')) return;
   state.isMinimized = false;
+  state.hudPointerInside = false;
   modal.classList.remove('minimized');
+  document.documentElement.style.overflow = 'hidden';
   document.body.style.overflow = 'hidden';
   setControlsVisible(true);
 }
@@ -1438,21 +1523,27 @@ function closePlayer(e) {
   else if (document.webkitFullscreenElement) document.webkitExitFullscreen?.();
   try { screen.orientation?.unlock?.(); } catch { /* ignore */ }
   $('playerModal').classList.remove('open', 'minimized');
+  $('playerStage')?.classList.remove('hud-hidden');
+  document.documentElement.style.overflow = '';
   document.body.style.overflow = '';
   state.isLocked = false;
   state.isMinimized = false;
+  state.hudPointerInside = false;
   $('lockFab').classList.remove('visible');
 }
 
-function setControlsVisible(show) {
+function setControlsVisible(show, hideDelayMs = 1800) {
   state.controlsVisible = show;
   const hud = $('playerHud');
   const modal = $('playerModal');
-  hud.classList.toggle('hidden', !show || state.isLocked);
-  modal.classList.toggle('controls-visible', show && !state.isLocked);
+  const stage = $('playerStage');
+  const isHidden = !show || state.isLocked;
+  hud.classList.toggle('hidden', isHidden);
+  modal.classList.toggle('controls-visible', !isHidden);
+  stage?.classList.toggle('hud-hidden', isHidden && !state.isMinimized && !$('videoEl').paused);
   clearTimeout(state.controlsTimer);
-  if (show && !state.isLocked && !$('videoEl').paused) {
-    state.controlsTimer = setTimeout(() => setControlsVisible(false), 4500);
+  if (show && !state.isLocked && !$('videoEl').paused && !state.hudPointerInside) {
+    state.controlsTimer = setTimeout(() => setControlsVisible(false), hideDelayMs);
   }
 }
 
@@ -2544,25 +2635,47 @@ function init() {
     }
   };
 
-  $('playPauseBtn').onclick = () => {
+  const togglePlayPause = () => {
     ensureWebAudioDsp(video);
     if (video.paused) video.play().catch(() => {});
     else video.pause();
     setControlsVisible(true);
   };
-  $('rewBtn').onclick = () => {
+  const seekBack10 = () => {
     video.currentTime = Math.max(0, video.currentTime - 10);
     showGestureToast('⏪ -10s');
     setControlsVisible(true);
   };
-  $('fwdBtn').onclick = () => {
+  const seekFwd10 = () => {
     video.currentTime = Math.min(video.duration || 0, video.currentTime + 10);
     showGestureToast('+10s ⏩');
     setControlsVisible(true);
   };
 
+  $('playPauseBtn').onclick = togglePlayPause;
+  if ($('hudPlayBtn')) $('hudPlayBtn').onclick = togglePlayPause;
+  $('rewBtn').onclick = seekBack10;
+  if ($('hudRewBtn')) $('hudRewBtn').onclick = seekBack10;
+  $('fwdBtn').onclick = seekFwd10;
+  if ($('hudFwdBtn')) $('hudFwdBtn').onclick = seekFwd10;
+
+  if ($('hudMuteBtn')) {
+    $('hudMuteBtn').onclick = () => {
+      toggleMute();
+      setControlsVisible(true);
+    };
+  }
+  if ($('hudVolSlider')) {
+    $('hudVolSlider').addEventListener('input', (e) => {
+      ensureWebAudioDsp(video);
+      applyVolumeBoost(Number(e.target.value) / 100);
+      setControlsVisible(true);
+    });
+  }
+
   $('hudLockBtn').onclick = () => {
     state.isLocked = true;
+    state.hudPointerInside = false;
     $('lockFab').classList.add('visible');
     setControlsVisible(false);
     showGestureToast(tr('lockedToast'));
@@ -2580,7 +2693,10 @@ function init() {
   }
   const onFsChange = () => {
     const active = Boolean(document.fullscreenElement || document.webkitFullscreenElement);
-    $('hudFsBtn').textContent = active ? tr('exitFsBtn') : tr('fullscreenBtn');
+    if ($('hudFsBtn')) {
+      $('hudFsBtn').innerHTML = active ? SVG_ICONS.fsExit : SVG_ICONS.fsEnter;
+      $('hudFsBtn').title = active ? tr('exitFsBtn') : tr('fullscreenBtn');
+    }
     $('playerModal').classList.toggle('is-fullscreen', active);
   };
   document.addEventListener('fullscreenchange', onFsChange);
@@ -2588,13 +2704,11 @@ function init() {
 
   // Seekbar, timeupdate (auto-save every 3s) & lifecycle save
   video.addEventListener('play', () => {
-    $('playPauseBtn').textContent = '⏸';
-    if ($('miniPlayBtn')) $('miniPlayBtn').textContent = '⏸';
-    setControlsVisible(true);
+    syncPlayIcons(false);
+    setControlsVisible(true, 1600);
   });
   video.addEventListener('pause', () => {
-    $('playPauseBtn').textContent = '▶';
-    if ($('miniPlayBtn')) $('miniPlayBtn').textContent = '▶';
+    syncPlayIcons(true);
     persistCurrentPlaybackProgress({ immediate: true });
     setControlsVisible(true);
   });
@@ -2603,7 +2717,12 @@ function init() {
     const dur = video.duration || 0;
     $('curTimeLabel').textContent = formatTime(cur);
     $('durTimeLabel').textContent = formatTime(dur);
-    if (dur > 0) $('seekRange').value = String((cur / dur) * 1000);
+    if (dur > 0) {
+      const ratio = Math.max(0, Math.min(1, cur / dur));
+      const seekEl = $('seekRange');
+      seekEl.value = String(ratio * 1000);
+      seekEl.style.setProperty('--pct', `${(ratio * 100).toFixed(2)}%`);
+    }
     renderActiveSubtitle(cur * 1000);
     if (!video.paused && cur > 2 && Date.now() - state.lastSavedPosTs >= 3000) {
       persistCurrentPlaybackProgress({ immediate: false });
@@ -2626,15 +2745,52 @@ function init() {
     }
   });
   $('seekRange').addEventListener('input', (e) => {
+    const val = Number(e.target.value);
+    e.target.style.setProperty('--pct', `${(val / 10).toFixed(2)}%`);
     const dur = video.duration || 0;
-    if (dur > 0) video.currentTime = (Number(e.target.value) / 1000) * dur;
+    if (dur > 0) video.currentTime = (val / 1000) * dur;
     setControlsVisible(true);
   });
 
-  // Tap & Swipe Gestures on Player Stage (Tap minimized pop-out -> Restore!)
+  // Tap, Mouse Auto-Hide & Swipe Gestures on Player Stage
   const stage = $('playerStage');
   let lastTap = 0;
   let touchStart = null;
+  let lastMouseX = -1;
+  let lastMouseY = -1;
+
+  // Keep HUD steady while mouse is directly over interactive top/bottom bars, hide fast once mouse leaves!
+  const bindHudHoverGuard = (el) => {
+    if (!el) return;
+    el.addEventListener('mouseenter', () => {
+      state.hudPointerInside = true;
+      clearTimeout(state.controlsTimer);
+    });
+    el.addEventListener('mouseleave', () => {
+      state.hudPointerInside = false;
+      if (!$('videoEl').paused && !state.isLocked && state.controlsVisible) {
+        setControlsVisible(true, 1100);
+      }
+    });
+  };
+  bindHudHoverGuard($('hudBottomBar'));
+  bindHudHoverGuard(document.querySelector('.hud-top'));
+
+  stage.addEventListener('mousemove', (e) => {
+    if (state.isMinimized || state.isLocked) return;
+    if (Math.abs(e.clientX - lastMouseX) < 3 && Math.abs(e.clientY - lastMouseY) < 3) return;
+    lastMouseX = e.clientX;
+    lastMouseY = e.clientY;
+    setControlsVisible(true, 1800);
+  });
+
+  stage.addEventListener('mouseleave', () => {
+    state.hudPointerInside = false;
+    if (!state.isMinimized && !state.isLocked && !video.paused) {
+      clearTimeout(state.controlsTimer);
+      state.controlsTimer = setTimeout(() => setControlsVisible(false), 260);
+    }
+  });
   stage.addEventListener('click', (e) => {
     if (e.target.closest?.('.mini-close-btn, .mini-ctrl-btn')) return;
     if (state.isMinimized) {
@@ -2718,6 +2874,7 @@ function init() {
     else if (e.key === 'ArrowUp') { e.preventDefault(); ensureWebAudioDsp(video); applyVolumeBoost(state.volumeScale + 0.1); showGestureToast(`🔊 ${Math.round(state.volumeScale * 100)}%`); }
     else if (e.key === 'ArrowDown') { e.preventDefault(); ensureWebAudioDsp(video); applyVolumeBoost(state.volumeScale - 0.1); showGestureToast(`🔊 ${Math.round(state.volumeScale * 100)}%`); }
     else if (e.key.toLowerCase() === 'f') { $('hudFsBtn').click(); }
+    else if (e.key.toLowerCase() === 'm') { toggleMute(); }
     else if (e.key.toLowerCase() === 'c') { openSubModal(); }
     else if (e.key === 'Escape') { minimizePlayer(); }
   });
@@ -2769,7 +2926,7 @@ function init() {
       state.speed = Number(b.dataset.speed);
       video.playbackRate = state.speed;
       document.querySelectorAll('[data-speed]').forEach((x) => x.classList.toggle('active', x === b));
-      $('hudSpeedBoostBtn').textContent = `⚡ ${state.speed}x`;
+      $('hudSpeedBoostBtn').textContent = state.volumeScale > 1.01 ? `🔊 ${Math.round(state.volumeScale * 100)}%` : `${state.speed}x`;
       showGestureToast(`Tốc độ ${state.speed}x`);
     };
   });
