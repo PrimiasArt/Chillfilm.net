@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import {
   ensureSchema,
   getServerGeminiConfig,
@@ -13,6 +14,8 @@ import {
   requireAdmin,
   sanitizeUserPublic,
 } from '../_lib/auth.js';
+import { isSafeSourceUrl } from '../_lib/safety.js';
+import { getCustomBlockedTerms, listDynamicSources, setCustomBlockedTerms } from '../_lib/sources.js';
 
 export async function OPTIONS() {
   return optionsResponse();
@@ -27,12 +30,14 @@ export async function GET(request) {
     const sql = getSql();
     const day = todayDayKey();
 
-    const [aiCfg, invites, users, usageToday, poolStats] = await Promise.all([
+    const [aiCfg, invites, users, usageToday, poolStats, sources, customBlockedTerms] = await Promise.all([
       getServerGeminiConfig(),
       sql`SELECT code, label, max_uses, used_count, daily_ai_limit, active, created_at FROM nki_invites ORDER BY created_at DESC LIMIT 50`,
       sql`SELECT id, username, display_name, role, status, daily_ai_limit, token_version, created_at, last_seen_at FROM nki_users ORDER BY created_at ASC LIMIT 100`,
       sql`SELECT user_id, requests_count, cues_count, audio_chunks FROM nki_ai_usage WHERE day_key = ${day}`,
       sql`SELECT COUNT(*)::int AS total_subs FROM nki_subtitle_pool`,
+      listDynamicSources({ onlyEnabled: false }),
+      getCustomBlockedTerms(),
     ]);
 
     const usageMap = new Map(usageToday.map((u) => [u.user_id, u]));
@@ -47,7 +52,9 @@ export async function GET(request) {
         defaultModel: aiCfg.defaultModel,
         registrationMode: aiCfg.registrationMode,
         cachedSubtitlesCount: Number(poolStats?.[0]?.total_subs || 0),
+        customBlockedTerms,
       },
+      sources,
       invites: invites.map((i) => ({
         code: i.code,
         label: i.label,
@@ -151,6 +158,56 @@ export async function POST(request) {
         await sql`UPDATE nki_users SET daily_ai_limit = ${clamped} WHERE id = ${targetUserId}`;
       }
       return jsonResponse({ ok: true, userId: targetUserId });
+    }
+
+    if (action === 'addSource') {
+      const name = String(body.name || '').trim().slice(0, 60);
+      const sourceType = String(body.sourceType || 'PHIMAPI_JSON').trim().toUpperCase();
+      const baseUrl = String(body.baseUrl || '').trim();
+      const countryHint = String(body.countryHint || 'global').trim().slice(0, 32);
+      const allowedTypes = new Set(['PHIMAPI_JSON', 'MACCMS_JSON', 'M3U_PLAYLIST', 'CUSTOM_JSON']);
+      if (!name || !baseUrl) {
+        return jsonResponse({ error: 'Source name and URL are required' }, 400);
+      }
+      if (!allowedTypes.has(sourceType)) {
+        return jsonResponse({ error: 'Unsupported sourceType' }, 400);
+      }
+      if (!isSafeSourceUrl(baseUrl)) {
+        return jsonResponse({ error: 'Source URL blocked by VN-Safe anti-porn / SSRF guard' }, 403);
+      }
+      const id = `src_${crypto.randomUUID().slice(0, 8)}`;
+      const now = Date.now();
+      await sql`
+        INSERT INTO nki_sources (id, name, source_type, base_url, country_hint, enabled, priority, created_by, created_at)
+        VALUES (${id}, ${name}, ${sourceType}, ${baseUrl}, ${countryHint}, TRUE, 50, ${adminUser.username}, ${now})
+      `;
+      return jsonResponse({
+        ok: true,
+        source: { id, name, sourceType, baseUrl, countryHint, enabled: true, priority: 50, createdAt: now },
+      }, 201);
+    }
+
+    if (action === 'toggleSource') {
+      const id = String(body.id || '').trim();
+      if (!id) return jsonResponse({ error: 'Source id required' }, 400);
+      const enabled = Boolean(body.enabled);
+      await sql`UPDATE nki_sources SET enabled = ${enabled} WHERE id = ${id}`;
+      return jsonResponse({ ok: true, id, enabled });
+    }
+
+    if (action === 'deleteSource') {
+      const id = String(body.id || '').trim();
+      if (!id) return jsonResponse({ error: 'Source id required' }, 400);
+      await sql`DELETE FROM nki_sources WHERE id = ${id}`;
+      return jsonResponse({ ok: true, id });
+    }
+
+    if (action === 'updateBlockedTerms') {
+      const rawTerms = Array.isArray(body.terms)
+        ? body.terms
+        : String(body.termsText || '').split(/[,\n]+/);
+      const saved = await setCustomBlockedTerms(rawTerms);
+      return jsonResponse({ ok: true, customBlockedTerms: saved });
     }
 
     return jsonResponse({ error: `Unknown action: ${action}` }, 400);

@@ -305,3 +305,26 @@ export async function fetchLiveCatalogFeed(forceRefresh = false) {
   if (!res.ok) throw new Error(`Catalog HTTP ${res.status}`);
   return res.json();
 }
+
+export async function fetchCatalogBrowse(params = {}) {
+  const qs = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => {
+    if (v !== undefined && v !== null && String(v).trim() !== '') {
+      qs.set(k, String(v).trim());
+    }
+  });
+  const res = await fetch(`${getCloudApiBase()}/api/catalog/browse?${qs.toString()}`);
+  if (!res.ok) throw new Error(`Browse HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function fetchCatalogDetail({ source = 'phimapi', slug, sourceId = '' }) {
+  const qs = new URLSearchParams({ source, slug });
+  if (sourceId) qs.set('sourceId', sourceId);
+  const res = await fetch(`${getCloudApiBase()}/api/catalog/detail?${qs.toString()}`);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error || `Detail HTTP ${res.status}`);
+  }
+  return data.detail;
+}

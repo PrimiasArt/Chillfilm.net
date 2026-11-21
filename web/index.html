@@ -15,7 +15,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Sarabun:wght@500;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=5" />
+  <link rel="stylesheet" href="./styles.css?v=6" />
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js" defer></script>
 </head>
 <body>
@@ -73,8 +73,13 @@
       <section class="hero" id="heroBox" style="display:none;"></section>
 
       <div class="container content-lift">
-        <!-- Mobile / Quick Genre Strip -->
-        <nav class="cat-strip" id="catStrip"></nav>
+        <!-- Mobile / Quick Genre Strip + All 36 Countries Selector -->
+        <div class="cat-toolbar">
+          <nav class="cat-strip" id="catStrip"></nav>
+          <select class="country-picker-select" id="countryPickerSelect" title="Browse All 36+ Countries">
+            <option value="">🌍 All Countries (36+)</option>
+          </select>
+        </div>
 
         <!-- Continue Watching Swimlane -->
         <section id="historySection" style="display:none;" class="nf-row-section">
@@ -401,6 +406,36 @@
                   <span class="field-label">REGISTERED DEVICES / MEMBERS</span>
                   <div id="adminUsersList" class="admin-list"></div>
                 </div>
+
+                <hr style="border:none;border-top:1px solid rgba(255,255,255,0.1);" />
+
+                <div class="field-group">
+                  <span class="field-label">🌐 GLOBAL MULTI-SOURCE CRAWLERS (AUTO VN-SAFE FILTERED)</span>
+                  <div style="display:flex;flex-direction:column;gap:6px;">
+                    <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                      <input class="field-input" id="adminSourceNameInput" placeholder="Source Name (e.g. Asian MacCMS / World M3U)" style="flex:1;min-width:140px;" />
+                      <select class="field-select" id="adminSourceTypeSelect" style="flex:1;min-width:130px;">
+                        <option value="PHIMAPI_JSON">PhimAPI / OPhim JSON</option>
+                        <option value="MACCMS_JSON">MacCMS v10 JSON</option>
+                        <option value="M3U_PLAYLIST">M3U / M3U8 Cinema</option>
+                        <option value="CUSTOM_JSON">Custom JSON Catalog</option>
+                      </select>
+                    </div>
+                    <div style="display:flex;gap:6px;">
+                      <input class="field-input" id="adminSourceUrlInput" placeholder="https://.../api.php/provide/vod/ or .m3u8" />
+                      <button class="btn-grad" id="adminAddSourceBtn" type="button" style="white-space:nowrap;">+ Add Source</button>
+                    </div>
+                  </div>
+                  <div id="adminSourcesList" class="admin-list" style="margin-top:6px;"></div>
+                </div>
+
+                <div class="field-group">
+                  <span class="field-label">🛡️ CUSTOM VN-BANNED / BLOCKED TITLES (ALWAYS BLOCKS PORN/SEX)</span>
+                  <div style="display:flex;gap:6px;">
+                    <input class="field-input" id="adminBlockedTermsInput" placeholder="Comma-separated slugs/titles to block globally..." />
+                    <button class="btn-glass" id="adminSaveBlockedBtn" type="button" style="white-space:nowrap;">Save Filter</button>
+                  </div>
+                </div>
               </div>
             </details>
           </div>
@@ -498,6 +533,6 @@
 
   <div class="toast" id="toast"></div>
 
-  <script type="module" src="./app.js?v=5"></script>
+  <script type="module" src="./app.js?v=6"></script>
 </body>
 </html>

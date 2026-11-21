@@ -2,7 +2,10 @@ package com.phyll.filmhub.cloud
 
 import com.phyll.filmhub.model.ContentType
 import com.phyll.filmhub.model.CountryCategory
+import com.phyll.filmhub.model.Episode
+import com.phyll.filmhub.model.ExternalSubtitleRef
 import com.phyll.filmhub.model.MovieItem
+import com.phyll.filmhub.model.ServerGroup
 import com.phyll.filmhub.model.SubtitleCue
 import com.phyll.filmhub.model.WatchProgress
 import kotlinx.coroutines.Dispatchers
@@ -82,6 +85,17 @@ data class CloudSubtitlePayload(
     val primaryCues: List<SubtitleCue>,
     val secondaryCues: List<SubtitleCue>,
     val savedAtMs: Long
+)
+
+data class CloudCatalogRow(
+    val id: String,
+    val title: String,
+    val movies: List<MovieItem>
+)
+
+data class CloudCatalogFeedResult(
+    val heroAndTrending: List<MovieItem>,
+    val extraSourceRows: List<CloudCatalogRow>
 )
 
 data class CloudSyncPullResult(
@@ -378,9 +392,10 @@ object CloudSyncClient {
     }
 
     /**
-     * Fetches the auto-updating multi-source live movie feed (KKPhim v3 + NguonC hot signal + enriched Hero).
+     * Fetches the auto-updating multi-source live movie feed (KKPhim v3 + NguonC hot signal +
+     * Internet Archive World Cinema + ALL Admin dynamic sources, 100% VN-Safe filtered!).
      */
-    suspend fun fetchLiveHeroAndTrending(): Result<List<MovieItem>> = withContext(Dispatchers.IO) {
+    suspend fun fetchLiveCatalogFeedFull(): Result<CloudCatalogFeedResult> = withContext(Dispatchers.IO) {
         runCatching {
             val req = Request.Builder().url("$baseUrl/api/catalog/feed").get().build()
             client.newCall(req).execute().use { resp ->
@@ -388,62 +403,195 @@ object CloudSyncClient {
                 if (!resp.isSuccessful) error("Catalog feed HTTP ${resp.code}")
                 val root = JSONObject(raw)
                 val out = LinkedHashMap<String, MovieItem>()
-                fun ingest(arr: JSONArray?) {
-                    if (arr == null) return
-                    for (i in 0 until arr.length()) {
-                        val m = arr.optJSONObject(i) ?: continue
-                        val slug = m.optString("slug").trim()
-                        val name = m.optString("name").trim()
-                        if (slug.isEmpty() || name.isEmpty() || out.containsKey(slug)) continue
-                        val genresArr = m.optJSONArray("genres")
-                        val genres = buildList {
-                            if (genresArr != null) {
-                                for (g in 0 until genresArr.length()) {
-                                    genresArr.optString(g).takeIf { it.isNotBlank() }?.let { add(it) }
-                                }
+                parseCloudMovieArray(root.optJSONArray("heroMovies")).forEach { out[it.id] = it }
+                val rows = root.optJSONArray("rows")
+                val extraRows = ArrayList<CloudCatalogRow>()
+                if (rows != null) {
+                    for (rIdx in 0 until rows.length()) {
+                        val rowObj = rows.optJSONObject(rIdx) ?: continue
+                        val rowId = rowObj.optString("id")
+                        val rowMovies = parseCloudMovieArray(rowObj.optJSONArray("movies"))
+                        if (rIdx == 0) {
+                            rowMovies.forEach { if (!out.containsKey(it.id)) out[it.id] = it }
+                        } else if (rowId.startsWith("src_") || rowId in setOf("archive", "an-do", "phap")) {
+                            val title = rowObj.optString("customTitle").ifBlank { rowId }
+                            if (rowMovies.isNotEmpty()) {
+                                extraRows.add(CloudCatalogRow(id = rowId, title = title, movies = rowMovies))
                             }
-                        }.joinToString(" • ").ifBlank { "New & Hot" }
-                        val countriesArr = m.optJSONArray("countries")
-                        val firstCountry = countriesArr?.optString(0).orEmpty()
-                        val countryCat = CountryCategory.fromSlugOrName(firstCountry)
-                        val epCur = m.optString("episode_current").trim()
-                        val quality = listOfNotNull(
-                            m.optString("quality", "FHD").trim().takeIf { it.isNotBlank() },
-                            epCur.takeIf { it.isNotBlank() && !it.equals("Full", true) }
-                        ).joinToString(" • ").ifBlank { "FHD" }
-                        val rawType = m.optString("type").lowercase()
-                        val contentType = if (rawType == "single") ContentType.MOVIE else ContentType.SERIES
-                        val desc = m.optString("content").trim().ifBlank {
-                            "${m.optString("origin_name").trim().ifBlank { name }} (${m.optString("year", "2026")}) • $genres"
                         }
-                        out[slug] = MovieItem(
-                            id = "modern_$slug",
-                            title = name,
-                            originalTitle = m.optString("origin_name").trim(),
-                            year = m.optString("year").trim(),
-                            country = countryCat,
-                            genre = genres,
-                            duration = m.optString("time").trim(),
-                            quality = quality,
-                            posterUrl = m.optString("poster").trim(),
-                            backdropUrl = m.optString("backdrop").trim().ifBlank { m.optString("poster").trim() },
-                            description = desc,
-                            contentType = contentType,
-                            providerId = "modern_vod",
-                            providerName = "NKI Live Cinema",
-                            imdbId = m.optString("imdbId").trim(),
-                            detailLookupId = slug
-                        )
                     }
                 }
-                ingest(root.optJSONArray("heroMovies"))
-                val rows = root.optJSONArray("rows")
-                if (rows != null && rows.length() > 0) {
-                    ingest(rows.optJSONObject(0)?.optJSONArray("movies"))
-                }
-                out.values.toList()
+                CloudCatalogFeedResult(
+                    heroAndTrending = out.values.toList(),
+                    extraSourceRows = extraRows
+                )
             }
         }
+    }
+
+    suspend fun fetchLiveHeroAndTrending(): Result<List<MovieItem>> =
+        fetchLiveCatalogFeedFull().map { it.heroAndTrending }
+
+    /**
+     * Searches across ALL server-side global sources (KKPhim + Internet Archive + Admin dynamic sources)
+     * through the Hard VN-Safe anti-porn filter.
+     */
+    suspend fun searchGlobalCatalog(query: String): Result<List<MovieItem>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val q = query.trim()
+            if (q.isEmpty()) return@runCatching emptyList()
+            val req = Request.Builder().url("$baseUrl/api/catalog/browse?q=${enc(q)}").get().build()
+            client.newCall(req).execute().use { resp ->
+                val raw = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) error("Browse HTTP ${resp.code}")
+                val root = JSONObject(raw)
+                parseCloudMovieArray(root.optJSONArray("items"))
+            }
+        }
+    }
+
+    /**
+     * Resolves playable streams & subtitles for multi-source cloud items (Internet Archive, MacCMS,
+     * custom PhimAPI sources) via `/api/catalog/detail`.
+     */
+    suspend fun resolveCloudDetail(movie: MovieItem): MovieItem = withContext(Dispatchers.IO) {
+        runCatching {
+            val source = movie.providerId.removePrefix("cloud_").ifBlank { "phimapi" }
+            val parts = (movie.detailLookupId ?: movie.id).split("|", limit = 2)
+            val slug = parts[0].removePrefix("modern_")
+            val srcId = if (parts.size > 1) parts[1] else ""
+            val url = buildString {
+                append("$baseUrl/api/catalog/detail?source=${enc(source)}&slug=${enc(slug)}")
+                if (srcId.isNotBlank()) append("&sourceId=${enc(srcId)}")
+            }
+            val req = Request.Builder().url(url).get().build()
+            client.newCall(req).execute().use { resp ->
+                val raw = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) return@runCatching movie
+                val d = JSONObject(raw).optJSONObject("detail") ?: return@runCatching movie
+                val srvArr = d.optJSONArray("servers") ?: JSONArray()
+                val servers = ArrayList<ServerGroup>()
+                for (i in 0 until srvArr.length()) {
+                    val sObj = srvArr.optJSONObject(i) ?: continue
+                    val epArr = sObj.optJSONArray("episodes") ?: continue
+                    val eps = ArrayList<Episode>()
+                    for (j in 0 until epArr.length()) {
+                        val eObj = epArr.optJSONObject(j) ?: continue
+                        val link = eObj.optString("link_m3u8").trim()
+                        if (link.isEmpty()) continue
+                        val subsArr = eObj.optJSONArray("subtitles")
+                        val extSubs = ArrayList<ExternalSubtitleRef>()
+                        if (subsArr != null) {
+                            for (k in 0 until subsArr.length()) {
+                                val subObj = subsArr.optJSONObject(k) ?: continue
+                                val subUrl = subObj.optString("url").trim()
+                                if (subUrl.isNotEmpty()) {
+                                    extSubs.add(
+                                        ExternalSubtitleRef(
+                                            id = subObj.optString("id", "cloud_sub_$k"),
+                                            label = subObj.optString("label", "Subtitle"),
+                                            languageCode = subObj.optString("langCode", "en"),
+                                            urlOrContent = subUrl,
+                                            sourcePlatform = movie.providerName
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                        eps.add(
+                            Episode(
+                                id = "${slug}_${i}_$j",
+                                name = eObj.optString("name", "Full"),
+                                streamUrl = link,
+                                subtitles = extSubs
+                            )
+                        )
+                    }
+                    if (eps.isNotEmpty()) {
+                        servers.add(ServerGroup(sObj.optString("server_name", movie.providerName), eps))
+                    }
+                }
+                movie.copy(
+                    originalTitle = d.optString("origin_name").ifBlank { movie.originalTitle },
+                    description = d.optString("content").ifBlank { movie.description },
+                    duration = d.optString("time").ifBlank { movie.duration },
+                    imdbId = d.optString("imdbId").ifBlank { movie.imdbId },
+                    servers = servers
+                )
+            }
+        }.getOrDefault(movie)
+    }
+
+    private fun parseCloudMovieArray(arr: JSONArray?): List<MovieItem> {
+        if (arr == null || arr.length() == 0) return emptyList()
+        val list = ArrayList<MovieItem>(arr.length())
+        for (i in 0 until arr.length()) {
+            val m = arr.optJSONObject(i) ?: continue
+            val slug = m.optString("slug").trim()
+            val name = m.optString("name").trim()
+            if (slug.isEmpty() || name.isEmpty()) continue
+            val src = m.optString("source", "phimapi").trim().lowercase()
+            val srcId = m.optString("sourceId", "").trim()
+            val srcName = m.optString("sourceName", "NKI Live Cinema").trim()
+            val streamUrl = m.optString("streamUrl", "").trim()
+
+            val genresArr = m.optJSONArray("genres")
+            val genres = buildList {
+                if (genresArr != null) {
+                    for (g in 0 until genresArr.length()) {
+                        genresArr.optString(g).takeIf { it.isNotBlank() }?.let { add(it) }
+                    }
+                }
+            }.joinToString(" • ").ifBlank { srcName }
+            val countriesArr = m.optJSONArray("countries")
+            val firstCountry = countriesArr?.optString(0).orEmpty()
+            val countryCat = CountryCategory.fromSlugOrName(firstCountry)
+            val epCur = m.optString("episode_current").trim()
+            val quality = listOfNotNull(
+                m.optString("quality", "FHD").trim().takeIf { it.isNotBlank() },
+                epCur.takeIf { it.isNotBlank() && !it.equals("Full", true) }
+            ).joinToString(" • ").ifBlank { "FHD" }
+            val rawType = m.optString("type").lowercase()
+            val contentType = when (rawType) {
+                "live" -> ContentType.LIVE_CHANNEL
+                "single" -> ContentType.MOVIE
+                else -> ContentType.SERIES
+            }
+            val desc = m.optString("content").trim().ifBlank {
+                "${m.optString("origin_name").trim().ifBlank { name }} (${m.optString("year", "2026")}) • $genres"
+            }
+            val directServers = if (src == "direct" && streamUrl.isNotEmpty()) {
+                listOf(ServerGroup(srcName, listOf(Episode(id = "${slug}_live", name = "Live", streamUrl = streamUrl))))
+            } else {
+                emptyList()
+            }
+            val providerId = if (src == "phimapi") "modern_vod" else "cloud_$src"
+            val itemId = if (src == "phimapi") "modern_$slug" else "${providerId}_${srcId}_$slug"
+            val lookup = if (srcId.isNotEmpty() && src != "phimapi") "$slug|$srcId" else slug
+
+            list.add(
+                MovieItem(
+                    id = itemId,
+                    title = name,
+                    originalTitle = m.optString("origin_name").trim(),
+                    year = m.optString("year").trim(),
+                    country = countryCat,
+                    genre = genres,
+                    duration = m.optString("time").trim(),
+                    quality = quality,
+                    posterUrl = m.optString("poster").trim(),
+                    backdropUrl = m.optString("backdrop").trim().ifBlank { m.optString("poster").trim() },
+                    description = desc,
+                    contentType = contentType,
+                    providerId = providerId,
+                    providerName = srcName,
+                    imdbId = m.optString("imdbId").trim(),
+                    servers = directServers,
+                    detailLookupId = lookup
+                )
+            )
+        }
+        return list
     }
 
     suspend fun pullState(sinceMs: Long = 0L): Result<CloudSyncPullResult> = withContext(Dispatchers.IO) {

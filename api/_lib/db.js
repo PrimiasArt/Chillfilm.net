@@ -109,6 +109,19 @@ export async function ensureSchema() {
         PRIMARY KEY (user_id, day_key)
       )
     `;
+    await sql`
+      CREATE TABLE IF NOT EXISTS nki_sources (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        source_type TEXT NOT NULL,
+        base_url TEXT NOT NULL,
+        country_hint TEXT NOT NULL DEFAULT 'global',
+        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        priority INT NOT NULL DEFAULT 50,
+        created_by TEXT NOT NULL DEFAULT '',
+        created_at BIGINT NOT NULL
+      )
+    `;
   })().catch((err) => {
     _schemaReadyPromise = null;
     throw err;

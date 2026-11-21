@@ -63,23 +63,25 @@ class MovieRepository {
 
         when (selectedCountry) {
             CountryCategory.ALL -> {
+                val cloudFeedDeferred = async {
+                    CloudSyncClient.fetchLiveCatalogFeedFull().getOrNull()
+                }
                 val asyncSections = listOf(
                     async {
-                        // Auto-updating live multi-source Trending & Newest feed (KKPhim v3 + NguonC + enriched Hero)
-                        val liveHot = CloudSyncClient.fetchLiveHeroAndTrending()
-                            .getOrNull()
-                            ?.takeIf { it.isNotEmpty() }
+                        val cloudFeed = cloudFeedDeferred.await()
+                        val liveHot = cloudFeed?.heroAndTrending?.takeIf { it.isNotEmpty() }
                             ?: modernSource.fetchLatestUpdatedFeed(24).ifEmpty { blockbusters }
-                        cacheAll(liveHot)
+                        val safeHot = ContentSafetyFilter.filterSafe(liveHot)
+                        cacheAll(safeHot)
                         CatalogSection(
                             id = "live_hot_trending",
                             title = "🔥 Trending & Newly Updated (Live)",
-                            subtitle = "Auto-updated from live VOD crawlers • Multi-language AI Subtitles ready",
-                            movies = liveHot
+                            subtitle = "Auto-updated from global clean VOD crawlers • Multi-language AI Subtitles",
+                            movies = safeHot
                         )
                     },
                     async {
-                        val movies = modernSource.fetchNewMoviesList("phim-le", 18)
+                        val movies = ContentSafetyFilter.filterSafe(modernSource.fetchNewMoviesList("phim-le", 18))
                         cacheAll(movies)
                         CatalogSection(
                             id = "new_feature_films",
@@ -89,7 +91,7 @@ class MovieRepository {
                         )
                     },
                     async {
-                        val series = modernSource.fetchNewMoviesList("phim-bo", 18)
+                        val series = ContentSafetyFilter.filterSafe(modernSource.fetchNewMoviesList("phim-bo", 18))
                         cacheAll(series)
                         CatalogSection(
                             id = "new_tv_series",
@@ -171,6 +173,23 @@ class MovieRepository {
                 ).awaitAll()
 
                 sections.addAll(asyncSections.filter { it.movies.isNotEmpty() })
+
+                // Append global extra rows from Vercel Cloud Aggregator (India, Europe, Internet Archive & Admin dynamic sources!)
+                val extraRows = cloudFeedDeferred.await()?.extraSourceRows.orEmpty()
+                for (row in extraRows) {
+                    val safeRow = ContentSafetyFilter.filterSafe(row.movies)
+                    if (safeRow.isNotEmpty()) {
+                        cacheAll(safeRow)
+                        sections.add(
+                            CatalogSection(
+                                id = "cloud_${row.id}",
+                                title = row.title,
+                                subtitle = "Global Clean Multi-Source • AI Subtitles Ready",
+                                movies = safeRow
+                            )
+                        )
+                    }
+                }
             }
 
             CountryCategory.YOUTUBE -> {
@@ -235,17 +254,21 @@ class MovieRepository {
             }
         }
 
+        val cloudSearchDeferred = async { CloudSyncClient.searchGlobalCatalog(kw).getOrDefault(emptyList()) }
         val modernDeferred = async { modernSource.searchMovies(kw, 20) }
         val youtubeDeferred = async { youtubeSource.searchVideos(kw, 16) }
         val customDeferreds = customProviders.filter { it.enabled }.map { p ->
             async { customSource.searchProvider(p, kw) }
         }
 
+        val cloudResults = cloudSearchDeferred.await()
         val modernResults = modernDeferred.await()
         val youtubeResults = youtubeDeferred.await()
         val customResults = customDeferreds.awaitAll().flatten()
 
-        val combined = (modernResults + youtubeResults + customResults).distinctBy { it.id }
+        val combined = ContentSafetyFilter.filterSafe(
+            (cloudResults + modernResults + youtubeResults + customResults).distinctBy { it.id }
+        )
         cacheAll(combined)
         combined
     }
@@ -258,9 +281,10 @@ class MovieRepository {
             movieLookupCache[movie.id] = movie
             return movie
         }
-        val resolved = when (movie.providerId) {
-            "modern_vod" -> modernSource.resolveMovieDetails(movie)
-            YouTubeSource.PROVIDER_ID -> youtubeSource.resolveVideoDetails(movie)
+        val resolved = when {
+            movie.providerId == "modern_vod" -> modernSource.resolveMovieDetails(movie)
+            movie.providerId == YouTubeSource.PROVIDER_ID -> youtubeSource.resolveVideoDetails(movie)
+            movie.providerId.startsWith("cloud_") -> CloudSyncClient.resolveCloudDetail(movie)
             else -> {
                 val provider = customProviders.firstOrNull { it.id == movie.providerId }
                 if (provider != null) customSource.resolveDetails(provider, movie) else movie

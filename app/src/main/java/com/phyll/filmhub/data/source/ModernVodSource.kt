@@ -1,5 +1,6 @@
 package com.phyll.filmhub.data.source
 
+import com.phyll.filmhub.data.ContentSafetyFilter
 import com.phyll.filmhub.model.ContentType
 import com.phyll.filmhub.model.CountryCategory
 import com.phyll.filmhub.model.Episode
@@ -315,15 +316,32 @@ class ModernVodSource(
                 }
 
                 val categoryArr = item.optJSONArray("category")
+                val rawCatTags = ArrayList<String>()
                 val genres = buildList {
                     if (categoryArr != null) {
-                        for (c in 0 until minOf(3, categoryArr.length())) {
-                            categoryArr.optJSONObject(c)?.optString("name")
-                                ?.takeIf { it.isNotBlank() }
-                                ?.let { add(it) }
+                        for (c in 0 until categoryArr.length()) {
+                            val cObj = categoryArr.optJSONObject(c) ?: continue
+                            val cSlug = cObj.optString("slug").trim()
+                            val cName = cObj.optString("name").trim()
+                            if (cSlug.isNotEmpty()) rawCatTags.add(cSlug)
+                            if (cName.isNotEmpty()) {
+                                rawCatTags.add(cName)
+                                if (size < 3) add(cName)
+                            }
                         }
                     }
                 }.joinToString(" • ").ifBlank { "Điện ảnh ${resolvedCountry.displayName}" }
+
+                // Hard VN-Safe anti-porn guard (blocks phim-18 / sex / JAV / VN-banned, keeps legal T18 cinema!)
+                if (ContentSafetyFilter.isBlockedRaw(
+                        slug = slug,
+                        title = name,
+                        originalTitle = originName,
+                        categoryTags = rawCatTags
+                    )
+                ) {
+                    continue
+                }
 
                 val imdbId = item.optJSONObject("imdb")?.optString("id")
                     ?.takeIf { it.startsWith("tt") }

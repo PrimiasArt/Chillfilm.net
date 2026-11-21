@@ -29,7 +29,9 @@ import {
   cloudTranslateCueBatch,
   cloudFetchLiveModels,
   fetchLiveCatalogFeed,
-} from './sync.js?v=4';
+  fetchCatalogBrowse,
+  fetchCatalogDetail,
+} from './sync.js?v=6';
 
 const PHIM_API = 'https://phimapi.com';
 const PHIM_CDN = 'https://phimimg.com';
@@ -37,14 +39,16 @@ const APK_RELEASE_URL = 'https://github.com/PrimiasArt/Chillfilm.net/releases/do
 
 const CATEGORIES = [
   { id: 'hot', label: 'Trending', url: `${PHIM_API}/danh-sach/phim-moi-cap-nhat-v3?page=1` },
-  { id: 'phim-le', label: 'Movies', url: `${PHIM_API}/v1/api/danh-sach/phim-le?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
-  { id: 'phim-bo', label: 'TV Series', url: `${PHIM_API}/v1/api/danh-sach/phim-bo?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
-  { id: 'hoat-hinh', label: 'Animation', url: `${PHIM_API}/v1/api/danh-sach/hoat-hinh?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
-  { id: 'han-quoc', label: 'Korean', url: `${PHIM_API}/v1/api/quoc-gia/han-quoc?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
-  { id: 'au-my', label: 'US / UK', url: `${PHIM_API}/v1/api/quoc-gia/au-my?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
-  { id: 'trung-quoc', label: 'Chinese', url: `${PHIM_API}/v1/api/quoc-gia/trung-quoc?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
-  { id: 'thai-lan', label: 'Thai', url: `${PHIM_API}/v1/api/quoc-gia/thai-lan?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
-  { id: 'nhat-ban', label: 'Japanese', url: `${PHIM_API}/v1/api/quoc-gia/nhat-ban?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
+  { id: 'phim-le', label: 'Movies', browse: { category: 'phim-le' }, url: `${PHIM_API}/v1/api/danh-sach/phim-le?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
+  { id: 'phim-bo', label: 'TV Series', browse: { category: 'phim-bo' }, url: `${PHIM_API}/v1/api/danh-sach/phim-bo?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
+  { id: 'hoat-hinh', label: 'Animation', browse: { category: 'hoat-hinh' }, url: `${PHIM_API}/v1/api/danh-sach/hoat-hinh?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
+  { id: 'han-quoc', label: 'Korean', browse: { country: 'han-quoc' }, url: `${PHIM_API}/v1/api/quoc-gia/han-quoc?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
+  { id: 'au-my', label: 'US / UK', browse: { country: 'au-my' }, url: `${PHIM_API}/v1/api/quoc-gia/au-my?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
+  { id: 'trung-quoc', label: 'Chinese', browse: { country: 'trung-quoc' }, url: `${PHIM_API}/v1/api/quoc-gia/trung-quoc?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
+  { id: 'thai-lan', label: 'Thai', browse: { country: 'thai-lan' }, url: `${PHIM_API}/v1/api/quoc-gia/thai-lan?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
+  { id: 'nhat-ban', label: 'Japanese', browse: { country: 'nhat-ban' }, url: `${PHIM_API}/v1/api/quoc-gia/nhat-ban?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
+  { id: 'archive', label: '🏛 World Archive', browse: { category: 'archive' } },
+  { id: 'iptv', label: '📺 Live Cinema', browse: { category: 'iptv' } },
 ];
 
 const DEFAULT_PREFS = {
@@ -118,6 +122,7 @@ const state = {
   liveModels: loadCachedLiveModels(),
   modelsLoading: false,
   adminGlobalModel: '',
+  globalCountries: [],
 };
 
 function loadCachedLiveModels() {
@@ -141,7 +146,26 @@ const $ = (id) => document.getElementById(id);
 const tr = (key, vars) => t(state.prefs.uiLang, key, vars);
 
 function getCategoryLabel(catId) {
-  return tr(`cat_${catId}`);
+  const key = `cat_${catId}`;
+  const translated = tr(key);
+  if (translated && translated !== key) return translated;
+  const found = CATEGORIES.find((c) => c.id === catId);
+  if (found) return found.label;
+  const cFound = state.globalCountries.find((c) => c.slug === catId);
+  return cFound ? `${cFound.flag || '🌍'} ${cFound.name}` : catId;
+}
+
+function renderCountryPicker(countries) {
+  if (Array.isArray(countries) && countries.length) {
+    state.globalCountries = countries;
+  }
+  const sel = $('countryPickerSelect');
+  if (!sel || !state.globalCountries.length) return;
+  const curVal = sel.value || '';
+  sel.innerHTML = `<option value="">🌍 All Countries (${state.globalCountries.length})</option>` +
+    state.globalCountries
+      .map((c) => `<option value="${escapeHtml(c.slug)}" ${c.slug === curVal ? 'selected' : ''}>${escapeHtml(c.flag || '🌍')} ${escapeHtml(c.name)}</option>`)
+      .join('');
 }
 
 function renderLangMenu() {
@@ -599,6 +623,9 @@ async function loadCategory(catId, { forceRefresh = false, silent = false } = {}
       const feed = await fetchLiveCatalogFeed(forceRefresh);
       if (feed?.ok && Array.isArray(feed.rows) && feed.rows.length > 0) {
         state.catalogUpdatedAt = feed.updatedAt || Date.now();
+        if (Array.isArray(feed.countries) && feed.countries.length) {
+          renderCountryPicker(feed.countries);
+        }
         state.homeRows = feed.rows;
         state.movies = feed.rows[0]?.movies || [];
         const heroList = Array.isArray(feed.heroMovies) && feed.heroMovies.length
@@ -607,7 +634,7 @@ async function loadCategory(catId, { forceRefresh = false, silent = false } = {}
         setHeroSlides(heroList);
         renderHistorySection();
         renderHomeSwimlanes();
-        if (forceRefresh && !silent) showToast('🔥 Updated latest & trending movies!');
+        if (forceRefresh && !silent) showToast('🔥 Updated latest multi-source movies!');
         return;
       }
     } catch {
@@ -643,13 +670,23 @@ async function loadCategory(catId, { forceRefresh = false, silent = false } = {}
     $('catalogGrid').innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:42px;color:#b3b3b3;">${escapeHtml(tr('loadingCatalog'))}</div>`;
   }
 
-  const cat = CATEGORIES.find((c) => c.id === catId) || CATEGORIES[0];
-  const list = await fetchCategoryList(cat);
+  const cat = CATEGORIES.find((c) => c.id === catId);
+  let list = [];
+  try {
+    const browseParams = cat?.browse || { country: catId };
+    const data = await fetchCatalogBrowse(browseParams);
+    if (Array.isArray(data?.countries) && data.countries.length && !state.globalCountries.length) {
+      renderCountryPicker(data.countries);
+    }
+    list = Array.isArray(data?.items) ? data.items : [];
+  } catch {
+    if (cat?.url) list = await fetchCategoryList(cat);
+  }
   if (list.length) {
     state.movies = list;
     setHeroSlides(list.slice(0, 5));
     renderHistorySection();
-    renderMovieGrid(state.movies, getCategoryLabel(cat.id));
+    renderMovieGrid(state.movies, getCategoryLabel(catId));
   } else if (!silent) {
     $('catalogGrid').innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:36px;color:#fca5a5;">${escapeHtml(tr('loadError'))}</div>`;
   }
@@ -669,10 +706,11 @@ function renderHomeSwimlanes() {
     const updatedLabel = row.isTopTen && state.catalogUpdatedAt
       ? `<span class="live-feed-pill">● LIVE ${new Date(state.catalogUpdatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>`
       : '';
+    const rowLabel = row.customTitle || getCategoryLabel(row.id);
     head.innerHTML = `
       <div class="section-title">
         ${row.isTopTen ? '<span class="top10-pill">TOP 10</span>' : ''}
-        <span>${escapeHtml(getCategoryLabel(row.id))}</span>
+        <span>${escapeHtml(rowLabel)}</span>
         ${updatedLabel}
       </div>
     `;
@@ -697,7 +735,7 @@ function renderHomeSwimlanes() {
     const displayList = row.isTopTen ? row.movies.slice(0, 10) : row.movies.slice(0, 18);
     displayList.forEach((movie, idx) => {
       const card = createMovieCardElement(movie);
-      card.onclick = () => openMovieDetail(movie.slug, false);
+      card.onclick = () => openMovieDetail(movie, false);
       if (row.isTopTen) {
         const rankWrap = document.createElement('div');
         rankWrap.className = 'rank-card-wrap';
@@ -740,9 +778,15 @@ async function executeSearch(keyword) {
   $('catalogGrid').innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:42px;color:#b3b3b3;">${escapeHtml(tr('loadingCatalog'))}</div>`;
 
   try {
-    const res = await fetch(`${PHIM_API}/v1/api/tim-kiem?keyword=${encodeURIComponent(q)}&limit=24`);
-    const json = await res.json();
-    const list = mapPhimItems(json);
+    let list = [];
+    try {
+      const data = await fetchCatalogBrowse({ q });
+      list = Array.isArray(data?.items) ? data.items : [];
+    } catch {
+      const res = await fetch(`${PHIM_API}/v1/api/tim-kiem?keyword=${encodeURIComponent(q)}&limit=24`);
+      const json = await res.json();
+      list = mapPhimItems(json);
+    }
     renderMovieGrid(list, tr('searchResultsTitle', { q, n: list.length }));
   } catch {
     showToast(tr('loadError'));
@@ -855,8 +899,8 @@ function renderHero(movie) {
   `;
   box.onmouseenter = () => { state.heroPaused = true; };
   box.onmouseleave = () => { state.heroPaused = false; };
-  $('heroPlayBtn').onclick = () => openMovieDetail(movie.slug, true);
-  $('heroDetailBtn').onclick = () => openMovieDetail(movie.slug, false);
+  $('heroPlayBtn').onclick = () => openMovieDetail(movie, true);
+  $('heroDetailBtn').onclick = () => openMovieDetail(movie, false);
   if (totalSlides > 1) {
     $('heroPrevBtn').onclick = () => {
       state.heroIndex = (state.heroIndex - 1 + totalSlides) % totalSlides;
@@ -909,7 +953,7 @@ function renderMovieGrid(list, title) {
   }
   list.forEach((movie) => {
     const card = createMovieCardElement(movie);
-    card.onclick = () => openMovieDetail(movie.slug, false);
+    card.onclick = () => openMovieDetail(movie, false);
     grid.appendChild(card);
   });
 }
@@ -934,34 +978,72 @@ function createMovieCardElement(movie) {
   return el;
 }
 
-/* ==================== MOVIE DETAIL ==================== */
-async function openMovieDetail(slug, autoPlayFirst = false, resumeSec = 0, resumeUrl = '') {
+/* ==================== MOVIE DETAIL (MULTI-SOURCE + VN-SAFE) ==================== */
+async function openMovieDetail(movieOrSlug, autoPlayFirst = false, resumeSec = 0, resumeUrl = '') {
+  const movieObj = typeof movieOrSlug === 'object' && movieOrSlug ? movieOrSlug : null;
+  const slug = movieObj ? movieObj.slug : String(movieOrSlug || '').trim();
+  const source = movieObj?.source || 'phimapi';
+  const sourceId = movieObj?.sourceId || '';
+
+  // Direct stream (e.g. Live Cinema M3U channels or Custom JSON direct video) -> play immediately!
+  if (movieObj && movieObj.streamUrl && source === 'direct') {
+    const directMovie = {
+      slug: movieObj.slug || 'direct',
+      source: 'direct',
+      name: movieObj.name || 'Live Cinema',
+      origin_name: movieObj.origin_name || '',
+      year: movieObj.year || 'LIVE',
+      quality: movieObj.quality || 'LIVE',
+      poster: movieObj.poster || '',
+      backdrop: movieObj.backdrop || movieObj.poster || '',
+      type: 'single',
+      servers: [{ server_name: movieObj.sourceName || 'Live', episodes: [{ name: 'Live', slug: 'full', link_m3u8: movieObj.streamUrl }] }],
+    };
+    state.currentMovie = directMovie;
+    state.episodesFlat = directMovie.servers[0].episodes;
+    openPlayer(directMovie, state.episodesFlat[0], 0);
+    return;
+  }
+
   showToast('Đang tải thông tin phim...');
   try {
-    const res = await fetch(`${PHIM_API}/phim/${encodeURIComponent(slug)}`);
-    const json = await res.json();
-    const m = json.movie || {};
-    const servers = (json.episodes || []).map((s) => ({
-      server_name: s.server_name || 'Server',
-      episodes: (s.server_data || []).filter((e) => e.link_m3u8),
-    })).filter((s) => s.episodes.length);
+    let detail = null;
+    try {
+      detail = await fetchCatalogDetail({ source, slug, sourceId });
+    } catch (apiErr) {
+      if (String(apiErr?.message || '').toLowerCase().includes('blocked')) {
+        showToast('🛡️ Nội dung này bị chặn theo chính sách lọc phim sạch.');
+        return;
+      }
+      if (source !== 'phimapi') throw apiErr;
+      // Offline fallback for phimapi
+      const res = await fetch(`${PHIM_API}/phim/${encodeURIComponent(slug)}`);
+      const json = await res.json();
+      const m = json.movie || {};
+      const servers = (json.episodes || []).map((s) => ({
+        server_name: s.server_name || 'Server',
+        episodes: (s.server_data || []).filter((e) => e.link_m3u8),
+      })).filter((s) => s.episodes.length);
+      detail = {
+        slug: m.slug || slug,
+        source: 'phimapi',
+        name: m.name || slug,
+        origin_name: m.origin_name || '',
+        year: m.year ? String(m.year) : '',
+        quality: m.quality || 'FHD',
+        time: m.time || '',
+        content: (m.content || '').replace(/<[^>]+>/g, '').trim(),
+        imdbId: m.imdb?.id || '',
+        type: m.type || 'single',
+        poster: normalizeImage(m.poster_url || m.thumb_url),
+        backdrop: normalizeImage(m.thumb_url || m.poster_url),
+        servers,
+      };
+    }
 
-    const detail = {
-      slug: m.slug || slug,
-      name: m.name || slug,
-      origin_name: m.origin_name || '',
-      year: m.year ? String(m.year) : '',
-      quality: m.quality || 'FHD',
-      time: m.time || '',
-      content: (m.content || '').replace(/<[^>]+>/g, '').trim(),
-      imdbId: m.imdb?.id || '',
-      type: m.type || 'single',
-      poster: normalizeImage(m.poster_url || m.thumb_url),
-      backdrop: normalizeImage(m.thumb_url || m.poster_url),
-      servers,
-    };
+    if (!detail) throw new Error('Not found');
     state.currentMovie = detail;
-    state.episodesFlat = servers[0]?.episodes || [];
+    state.episodesFlat = detail.servers?.[0]?.episodes || [];
 
     if (autoPlayFirst && state.episodesFlat.length) {
       const savedHist = resumeSec <= 0 && !resumeUrl ? getLatestMovieHistory(detail.slug) : null;
@@ -978,7 +1060,7 @@ async function openMovieDetail(slug, autoPlayFirst = false, resumeSec = 0, resum
 
     renderDetailView(detail);
   } catch (e) {
-    showToast('Không thể tải chi tiết phim này!');
+    showToast(e?.message || 'Không thể tải chi tiết phim này!');
   }
 }
 
@@ -1480,6 +1562,14 @@ async function autoLoadSubtitlesForMovie(movie, episode) {
   const epNumMatch = (episode.name || '').match(/\d+/);
   const epNum = epNumMatch ? Number(epNumMatch[0]) : 1;
 
+  // Built-in episode subtitles (e.g. Internet Archive attached .SRT/.VTT tracks)
+  const attachedSubs = Array.isArray(episode.subtitles) ? episode.subtitles : [];
+  if (attachedSubs.length > 0) {
+    state.subTracks = attachedSubs;
+    await selectSubtitleTrack(attachedSubs[0]);
+    return;
+  }
+
   if (!movie.imdbId) {
     updateSubStatusBadge('Chưa có mã IMDb • Bấm CC để nạp file .SRT');
     return;
@@ -1970,6 +2060,49 @@ async function loadAdminVaultPanel() {
         };
       });
     }
+
+    // Dynamic Global Movie Sources list
+    const srcWrap = $('adminSourcesList');
+    if (srcWrap) {
+      const sources = Array.isArray(data.sources) ? data.sources : [];
+      srcWrap.innerHTML = sources.length
+        ? sources.map((s) => `
+            <div class="admin-row">
+              <div style="min-width:0;flex:1;">
+                <div style="font-weight:800;color:${s.enabled ? '#86efac' : '#9ca3af'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(s.name)} <span style="font-size:10px;opacity:.8;">[${escapeHtml(s.sourceType)}]</span></div>
+                <div style="font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(s.baseUrl)}</div>
+              </div>
+              <div style="display:flex;gap:5px;flex-shrink:0;">
+                <button class="btn-glass" data-toggle-src="${escapeHtml(s.id)}" data-src-next="${s.enabled ? '0' : '1'}" style="padding:4px 8px;font-size:11px;">${s.enabled ? 'Pause' : 'Enable'}</button>
+                <button class="btn-glass" data-del-src="${escapeHtml(s.id)}" style="padding:4px 8px;font-size:11px;color:#fca5a5;">Del</button>
+              </div>
+            </div>
+          `).join('')
+        : '<div style="font-size:11.5px;color:var(--muted);">Built-in active: KKPhim (36 countries) + Internet Archive (29k+ films) + Live Cinema. Add more MacCMS / OPhim / M3U sources above!</div>';
+
+      srcWrap.querySelectorAll('[data-toggle-src]').forEach((btn) => {
+        btn.onclick = async () => {
+          await cloudAdminAction({
+            action: 'toggleSource',
+            id: btn.dataset.toggleSrc,
+            enabled: btn.dataset.srcNext === '1',
+          });
+          showToast('Updated movie source status');
+          loadAdminVaultPanel();
+        };
+      });
+      srcWrap.querySelectorAll('[data-del-src]').forEach((btn) => {
+        btn.onclick = async () => {
+          await cloudAdminAction({ action: 'deleteSource', id: btn.dataset.delSrc });
+          showToast('Deleted movie source');
+          loadAdminVaultPanel();
+        };
+      });
+    }
+
+    if ($('adminBlockedTermsInput') && Array.isArray(cfg.customBlockedTerms)) {
+      $('adminBlockedTermsInput').value = cfg.customBlockedTerms.join(', ');
+    }
   } catch (err) {
     box.textContent = `Admin Vault error: ${err.message}`;
   }
@@ -2127,8 +2260,21 @@ function init() {
     $('langSwitchBtn')?.classList.remove('open');
   });
 
-  // Topbar & Search
-  $('brandHome').onclick = () => loadCategory('hot');
+  // Topbar & Search + All 36 Countries Picker
+  $('brandHome').onclick = () => {
+    if ($('countryPickerSelect')) $('countryPickerSelect').value = '';
+    loadCategory('hot');
+  };
+  $('countryPickerSelect')?.addEventListener('change', (e) => {
+    const slug = e.target.value;
+    if (!slug) {
+      loadCategory('hot');
+    } else {
+      $('searchInputDesktop').value = '';
+      $('searchInputMobile').value = '';
+      loadCategory(slug);
+    }
+  });
   $('searchBtnDesktop').onclick = () => executeSearch($('searchInputDesktop').value);
   $('searchInputDesktop').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') executeSearch(e.target.value);
@@ -2259,6 +2405,32 @@ function init() {
       loadAdminVaultPanel();
     } catch (err) {
       showToast(err.message || 'Invite creation failed');
+    }
+  });
+  $('adminAddSourceBtn')?.addEventListener('click', async () => {
+    const name = $('adminSourceNameInput')?.value.trim() || '';
+    const sourceType = $('adminSourceTypeSelect')?.value || 'PHIMAPI_JSON';
+    const baseUrl = $('adminSourceUrlInput')?.value.trim() || '';
+    if (!name || !baseUrl) return showToast('Enter both source name and URL');
+    try {
+      await cloudAdminAction({ action: 'addSource', name, sourceType, baseUrl });
+      $('adminSourceNameInput').value = '';
+      $('adminSourceUrlInput').value = '';
+      showToast(`🌐 Added clean movie source: ${name}! Refreshing feed...`);
+      loadAdminVaultPanel();
+      loadCategory('hot', { forceRefresh: true, silent: true });
+    } catch (err) {
+      showToast(err.message || 'Source blocked or invalid');
+    }
+  });
+  $('adminSaveBlockedBtn')?.addEventListener('click', async () => {
+    try {
+      const termsText = $('adminBlockedTermsInput')?.value || '';
+      await cloudAdminAction({ action: 'updateBlockedTerms', termsText });
+      showToast('🛡️ Updated VN-Safe custom blocklist!');
+      loadAdminVaultPanel();
+    } catch (err) {
+      showToast(err.message || 'Failed to save blocklist');
     }
   });
 

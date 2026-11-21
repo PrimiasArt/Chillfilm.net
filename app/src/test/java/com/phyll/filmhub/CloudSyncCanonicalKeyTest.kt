@@ -1,7 +1,10 @@
 package com.phyll.filmhub
 
 import com.phyll.filmhub.cloud.CloudSyncClient
+import com.phyll.filmhub.data.ContentSafetyFilter
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CloudSyncCanonicalKeyTest {
@@ -23,5 +26,43 @@ class CloudSyncCanonicalKeyTest {
         assertEquals("tap-7", CloudSyncClient.normalizeEpisodeKey("07"))
         assertEquals("full", CloudSyncClient.normalizeEpisodeKey("Full"))
         assertEquals("full", CloudSyncClient.normalizeEpisodeKey("Full HD"))
+    }
+
+    @Test
+    fun contentSafetyFilter_allowsLegalT18CinemaAndBlocksPornOrVnBanned() {
+        assertFalse(
+            ContentSafetyFilter.isBlockedRaw(
+                slug = "deadpool-va-wolverine",
+                title = "Deadpool & Wolverine",
+                categoryTags = listOf("hanh-dong", "hai-huoc")
+            )
+        )
+        assertFalse(
+            ContentSafetyFilter.isBlockedRaw(
+                slug = "sex-education",
+                title = "Sex Education",
+                originalTitle = "Sex Education",
+                categoryTags = listOf("hai-huoc", "tam-ly")
+            )
+        )
+        assertTrue(
+            ContentSafetyFilter.isBlockedRaw(
+                slug = "sample-adult",
+                title = "Adult Film",
+                categoryTags = listOf("phim-18", "Phim 18+")
+            )
+        )
+        assertTrue(
+            ContentSafetyFilter.isBlockedRaw(
+                slug = "ssis-999",
+                title = "SSIS-999 Uncensored"
+            )
+        )
+        assertTrue(
+            ContentSafetyFilter.isBlockedRaw(
+                slug = "uncharted",
+                title = "Uncharted"
+            )
+        )
     }
 }
