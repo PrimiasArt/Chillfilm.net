@@ -105,11 +105,25 @@ async function callGeminiWithFallback({ apiKey, contents, preferredModel, prefer
   throw new Error(lastError);
 }
 
+function buildMovieContextLine(movieContext) {
+  if (!movieContext || typeof movieContext !== 'object') return '';
+  const title = String(movieContext.title || '').trim().slice(0, 100);
+  const genres = Array.isArray(movieContext.genres)
+    ? movieContext.genres.map((g) => String(g || '').trim()).filter(Boolean).slice(0, 4).join(', ')
+    : String(movieContext.genres || '').trim().slice(0, 80);
+  if (!title && !genres) return '';
+  const parts = [];
+  if (title) parts.push(`"${title}"`);
+  if (genres) parts.push(`[${genres}]`);
+  return `Movie context: ${parts.join(' ')} — match tone, era, pronouns, and honorifics naturally to the genre.`;
+}
+
 /**
  * Translates an array of dialogue texts (`string[]` or `{i, t}[]`) via server-side Gemini API.
  */
-export async function translateTextsServerSide({ texts, targetLang, apiKey, preferredModel }) {
+export async function translateTextsServerSide({ texts, targetLang, apiKey, preferredModel, movieContext = null }) {
   const langInstruction = resolveLangInstruction(targetLang);
+  const ctxLine = buildMovieContextLine(movieContext);
   const inputPayload = texts.map((t, idx) => ({
     i: idx,
     t: String(t || '').replace(/\r?\n/g, ' ').trim(),
@@ -117,6 +131,7 @@ export async function translateTextsServerSide({ texts, targetLang, apiKey, pref
 
   const prompt = [
     `Cinema subtitle translator: translate each movie dialogue line into ${langInstruction}.`,
+    ...(ctxLine ? [ctxLine] : []),
     'Keep concise, natural, idiomatic, easy to read on screen.',
     'Return ONLY JSON array: [{"i":0,"t":"..."}]',
     'Input:',
@@ -175,12 +190,15 @@ export async function transcribeAudioChunkServerSide({
   apiKey,
   preferredModel,
   preferTurboFlash = false,
+  movieContext = null,
 }) {
   const durationSec = (Number(chunkDurationMs || 60000) / 1000).toFixed(1);
   const langInstruction = resolveLangInstruction(targetLang);
+  const ctxLine = buildMovieContextLine(movieContext);
   const prompt = [
     `Universal cinema subtitle creator: listen to this ${durationSec}-second movie audio clip (starts at 0.0s).`,
     `Transcribe ALL spoken dialogue (from ANY spoken language) directly into ${langInstruction}.`,
+    ...(ctxLine ? [ctxLine] : []),
     'Rules:',
     `- "s" and "e" = float seconds relative to 0.0 of this clip (0.0 <= s < e <= ${durationSec}), 1.2s-4.8s per cue.`,
     '- Skip music/silence; if no speech, return [].',

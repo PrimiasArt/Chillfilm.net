@@ -57,6 +57,7 @@ export async function POST(request) {
       targetLang,
       apiKey: aiCfg.apiKey,
       preferredModel,
+      movieContext: body.movieContext || null,
     });
 
     metric('ai.translate', 1, { outcome: 'success', model: modelUsed });

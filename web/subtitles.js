@@ -147,7 +147,7 @@ export async function fetchOpenSubtitlesV3(imdbId, isSeries, season = 1, episode
   }
 }
 
-export async function translateCueBatch({ cues, targetLang, geminiApiKey, geminiModel, cloudTranslator = null }) {
+export async function translateCueBatch({ cues, targetLang, geminiApiKey, geminiModel, cloudTranslator = null, movieContext = null }) {
   if (!cues.length) return cues;
   const langSpec = resolveLanguage(targetLang);
 
@@ -158,6 +158,7 @@ export async function translateCueBatch({ cues, targetLang, geminiApiKey, gemini
         cues,
         targetLang: langSpec.code,
         model: geminiModel || 'gemini-3-flash-preview',
+        movieContext,
       });
       if (cloudTranslated && cloudTranslated.length === cues.length) return cloudTranslated;
     } catch (e) {
@@ -168,7 +169,7 @@ export async function translateCueBatch({ cues, targetLang, geminiApiKey, gemini
   // 2. Optional Personal Local Gemini API Key override (only if user explicitly entered one)
   if (geminiApiKey && geminiApiKey.trim().length > 10) {
     try {
-      const translated = await translateWithGemini(cues, langSpec, geminiApiKey.trim(), geminiModel || 'gemini-3-flash-preview');
+      const translated = await translateWithGemini(cues, langSpec, geminiApiKey.trim(), geminiModel || 'gemini-3-flash-preview', movieContext);
       if (translated && translated.length === cues.length) return translated;
     } catch (e) {
       console.warn('Gemini batch fallback to free neural:', e);
@@ -177,6 +178,71 @@ export async function translateCueBatch({ cues, targetLang, geminiApiKey, gemini
 
   // 3. Fast Free Neural Translation fallback (works out-of-the-box with zero API key!)
   return translateWithGoogleFree(cues, langSpec.code);
+}
+
+export async function transcribeAudioChunkDirect({
+  audioBase64,
+  mimeType = 'audio/webm',
+  chunkStartOffsetMs = 0,
+  chunkDurationMs = 18000,
+  targetLang = 'vi',
+  apiKey = '',
+  modelId = 'gemini-3-flash-preview',
+  movieContext = null,
+}) {
+  if (!apiKey || apiKey.trim().length < 15 || !audioBase64) return [];
+  const langSpec = resolveLanguage(targetLang);
+  const cleanModel = (modelId || 'gemini-3-flash-preview').replace(/^models\//, '');
+  const durationSec = (Number(chunkDurationMs || 18000) / 1000).toFixed(1);
+  const ctxHint = movieContext?.title
+    ? `Movie context: "${movieContext.title}"${movieContext.genres?.length ? ` [${movieContext.genres.join(', ')}]` : ''} — adapt tone and pronouns naturally.\n`
+    : '';
+  const prompt = `Universal cinema subtitle creator: listen to this ${durationSec}-second movie audio clip (starts at 0.0s).\nTranscribe ALL spoken dialogue directly into ${langSpec.prompt}.\n${ctxHint}Rules:\n- "s" and "e" = float seconds relative to 0.0 (0.0 <= s < e <= ${durationSec}), 1.2s-4.8s per cue.\n- Skip music/silence; if no speech, return [].\nReturn ONLY JSON array: [{"s":1.2,"e":3.6,"t":"translated subtitle text"}]`;
+
+  const genConfig = { temperature: 0.15, responseMimeType: 'application/json' };
+  const lower = cleanModel.toLowerCase();
+  if (lower.startsWith('gemini-3') && lower.includes('flash')) genConfig.thinkingConfig = { thinkingLevel: 'MINIMAL' };
+  else if (lower.startsWith('gemini-2.5') && lower.includes('flash')) genConfig.thinkingConfig = { thinkingBudget: 0 };
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(cleanModel)}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [
+        {
+          parts: [
+            { inline_data: { mime_type: mimeType, data: audioBase64 } },
+            { text: prompt },
+          ],
+        },
+      ],
+      generationConfig: genConfig,
+    }),
+  });
+  if (!res.ok) throw new Error(`Gemini Audio HTTP ${res.status}`);
+  const json = await res.json();
+  const parts = json?.candidates?.[0]?.content?.parts || [];
+  let raw = '';
+  for (const p of parts) {
+    if (!p.thought && p.text) raw = p.text.trim();
+  }
+  const s = raw.indexOf('[');
+  const e = raw.lastIndexOf(']');
+  if (s < 0 || e <= s) return [];
+  const arr = JSON.parse(raw.slice(s, e + 1));
+  const out = [];
+  for (let i = 0; i < arr.length; i++) {
+    const o = arr[i];
+    const txt = String(o?.t || o?.text || '').trim();
+    const sSec = Number(o?.s ?? o?.start);
+    if (!txt || !Number.isFinite(sSec)) continue;
+    const eSec = Number.isFinite(Number(o?.e ?? o?.end)) ? Number(o?.e ?? o?.end) : sSec + 2.5;
+    const relStart = Math.max(0, Math.min(chunkDurationMs + 4000, Math.round(sSec * 1000)));
+    const relEnd = Math.max(relStart + 500, Math.min(chunkDurationMs + 5000, Math.round(eSec * 1000)));
+    out.push({ id: i + 1, startMs: chunkStartOffsetMs + relStart, endMs: chunkStartOffsetMs + relEnd, text: txt });
+  }
+  return out;
 }
 
 /* ==================== PERSISTENT TRANSLATED SUBTITLE CACHE (INDEXEDDB) ==================== */
@@ -315,10 +381,13 @@ export async function saveCachedEpisodeSub(cacheKey, payload) {
   }
 }
 
-async function translateWithGemini(cues, langSpec, apiKey, modelId) {
+async function translateWithGemini(cues, langSpec, apiKey, modelId, movieContext = null) {
   const cleanModel = modelId.replace(/^models\//, '') || 'gemini-3-flash-preview';
   const inputPayload = cues.map((c, idx) => ({ i: idx, t: c.text.replace(/\n/g, ' ') }));
-  const prompt = `Cinema subtitle translator: translate each line into ${langSpec.prompt}.\nKeep concise, natural, idiomatic.\nReturn ONLY JSON array: [{"i":0,"t":"..."}]\nInput:\n${JSON.stringify(inputPayload)}`;
+  const ctxHint = movieContext?.title
+    ? `Movie context: "${movieContext.title}"${movieContext.genres?.length ? ` [${movieContext.genres.join(', ')}]` : ''} — adapt pronouns & tone naturally.\n`
+    : '';
+  const prompt = `Cinema subtitle translator: translate each line into ${langSpec.prompt}.\n${ctxHint}Keep concise, natural, idiomatic.\nReturn ONLY JSON array: [{"i":0,"t":"..."}]\nInput:\n${JSON.stringify(inputPayload)}`;
 
   const genConfig = { temperature: 0.15, responseMimeType: 'application/json' };
   const lower = cleanModel.toLowerCase();

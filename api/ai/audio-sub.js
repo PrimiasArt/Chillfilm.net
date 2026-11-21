@@ -56,6 +56,7 @@ export async function POST(request) {
       apiKey: aiCfg.apiKey,
       preferredModel,
       preferTurboFlash: Boolean(body.preferTurboFlash),
+      movieContext: body.movieContext || null,
     });
 
     metric('ai.audio_sub', 1, { outcome: 'success', model: modelUsed });

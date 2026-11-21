@@ -262,7 +262,7 @@ export async function cloudSaveSubtitle({
   }
 }
 
-export async function cloudTranslateCueBatch({ cues, targetLang, model }) {
+export async function cloudTranslateCueBatch({ cues, targetLang, model, movieContext = null }) {
   const session = getCloudSession();
   if (!session?.token || !cues?.length) return null;
   const data = await apiFetch('/api/ai/translate', {
@@ -272,12 +272,40 @@ export async function cloudTranslateCueBatch({ cues, targetLang, model }) {
       texts: cues.map((c) => c.text),
       targetLang,
       model: model || session.defaultModel || 'gemini-3-flash-preview',
+      movieContext: movieContext || undefined,
     },
   });
   if (!Array.isArray(data?.translated) || data.translated.length !== cues.length) {
     return null;
   }
   return cues.map((c, idx) => ({ ...c, text: (data.translated[idx] || c.text).trim() }));
+}
+
+export async function cloudTranscribeAudioChunk({
+  audioBase64,
+  mimeType = 'audio/webm',
+  chunkStartOffsetMs = 0,
+  chunkDurationMs = 18000,
+  targetLang = 'vi',
+  model = '',
+  movieContext = null,
+}) {
+  const session = getCloudSession();
+  if (!session?.token || !audioBase64) return null;
+  return apiFetch('/api/ai/audio-sub', {
+    method: 'POST',
+    auth: true,
+    body: {
+      audioBase64,
+      mimeType,
+      chunkStartOffsetMs,
+      chunkDurationMs,
+      targetLang,
+      model: model || session.defaultModel || 'gemini-3-flash-preview',
+      preferTurboFlash: true,
+      movieContext: movieContext || undefined,
+    },
+  });
 }
 
 /**

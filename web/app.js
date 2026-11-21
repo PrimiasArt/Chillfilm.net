@@ -5,10 +5,11 @@ import {
   findActiveCueText,
   fetchOpenSubtitlesV3,
   translateCueBatch,
+  transcribeAudioChunkDirect,
   buildSubCacheKey,
   loadCachedEpisodeSub,
   saveCachedEpisodeSub,
-} from './subtitles.js?v=3';
+} from './subtitles.js?v=9';
 import { UI_LANGUAGES, resolveUiLang, t } from './i18n.js?v=3';
 import {
   normalizeMovieSlug,
@@ -27,11 +28,12 @@ import {
   cloudFetchSubtitle,
   cloudSaveSubtitle,
   cloudTranslateCueBatch,
+  cloudTranscribeAudioChunk,
   cloudFetchLiveModels,
   fetchLiveCatalogFeed,
   fetchCatalogBrowse,
   fetchCatalogDetail,
-} from './sync.js?v=6';
+} from './sync.js?v=9';
 
 const PHIM_API = 'https://phimapi.com';
 const PHIM_CDN = 'https://phimimg.com';
@@ -85,6 +87,7 @@ const DEFAULT_PREFS = {
   secondaryColor: '#FFFFFF',
   boxOpacity: 0.78,
   syncOffsetMs: 0,
+  skipIntroSec: 85,
   geminiApiKey: '',
   geminiModel: 'gemini-3-flash-preview',
   tvIp: '',
@@ -97,11 +100,13 @@ const state = {
   homeRows: [],
   currentMovie: null,
   currentEpisode: null,
+  currentServerIdx: 0,
   episodesFlat: [],
   hls: null,
   audioCtx: null,
   gainNode: null,
   eqNodes: null,
+  audioCaptureDest: null,
   volumeScale: 1.0,
   lastNonZeroVolume: 1.0,
   eqPreset: 'FLAT',
@@ -116,6 +121,19 @@ const state = {
   controlsVisible: true,
   controlsTimer: null,
   hudPointerInside: false,
+  // Phase 1 Cinema Pro (Skip Intro, Auto-Next, Failover, Live AI Audio Sub)
+  skipIntroDismissed: false,
+  autoNextCancelled: false,
+  autoNextTimer: null,
+  autoNextCountdownSec: 0,
+  stallTimer: null,
+  failoverTriedServers: new Set(),
+  hlsNetworkRetries: 0,
+  audioSubActive: false,
+  audioSubRecorder: null,
+  audioSubLoopTimer: null,
+  audioSubSessionId: 0,
+  audioSubChunksDone: 0,
   // Subtitles & Resume
   subTracks: [],
   activeSubTrackId: null,
@@ -339,6 +357,7 @@ function savePrefs(skipCloudPush = false) {
         primaryColor: state.prefs.primaryColor,
         secondaryColor: state.prefs.secondaryColor,
         boxOpacity: state.prefs.boxOpacity,
+        skipIntroSec: state.prefs.skipIntroSec,
         geminiModel: state.prefs.geminiModel,
       };
       cloudPushState({ prefs: syncablePrefs, prefsUpdatedAt: Date.now() }).catch(() => {});
@@ -559,7 +578,7 @@ async function pullCloudStateAndMerge({ silent = true, force = false } = {}) {
     if (data.prefs && typeof data.prefs === 'object') {
       const p = data.prefs;
       let prefsChanged = false;
-      ['primaryLang', 'secondaryLang', 'dualSub', 'subEnabled', 'primarySize', 'secondarySize', 'primaryColor', 'secondaryColor', 'boxOpacity', 'geminiModel'].forEach((k) => {
+      ['primaryLang', 'secondaryLang', 'dualSub', 'subEnabled', 'primarySize', 'secondarySize', 'primaryColor', 'secondaryColor', 'boxOpacity', 'skipIntroSec', 'geminiModel'].forEach((k) => {
         if (p[k] !== undefined && p[k] !== state.prefs[k]) {
           state.prefs[k] = p[k];
           prefsChanged = true;
@@ -628,6 +647,38 @@ async function fetchCategoryList(cat) {
   }
 }
 
+function renderSkeletonRowsHtml(rowCount = 3, cardsPerRow = 7) {
+  let html = '';
+  for (let r = 0; r < rowCount; r++) {
+    let cards = '';
+    for (let c = 0; c < cardsPerRow; c++) {
+      cards += `
+        <div class="skeleton-card">
+          <div class="shimmer-box skeleton-poster"></div>
+          <div class="shimmer-box skeleton-line"></div>
+          <div class="shimmer-box skeleton-line short"></div>
+        </div>
+      `;
+    }
+    html += `<div class="skeleton-row-wrap"><div class="shimmer-box skeleton-row-title"></div><div class="skeleton-rail">${cards}</div></div>`;
+  }
+  return html;
+}
+
+function renderSkeletonGridHtml(count = 12) {
+  let cards = '';
+  for (let i = 0; i < count; i++) {
+    cards += `
+      <div class="skeleton-card" style="width:100%;">
+        <div class="shimmer-box skeleton-poster"></div>
+        <div class="shimmer-box skeleton-line"></div>
+        <div class="shimmer-box skeleton-line short"></div>
+      </div>
+    `;
+  }
+  return cards;
+}
+
 async function loadCategory(catId, { forceRefresh = false, silent = false } = {}) {
   state.activeCategory = catId;
   renderCategories();
@@ -644,7 +695,7 @@ async function loadCategory(catId, { forceRefresh = false, silent = false } = {}
     gridSec.style.display = 'none';
     swimWrap.style.display = 'block';
     if (!silent) {
-      swimWrap.innerHTML = `<div style="text-align:center;padding:42px;color:#b3b3b3;">${escapeHtml(tr('loadingCatalog'))}</div>`;
+      swimWrap.innerHTML = renderSkeletonRowsHtml(3, 8);
     }
 
     try {
@@ -696,7 +747,7 @@ async function loadCategory(catId, { forceRefresh = false, silent = false } = {}
   swimWrap.style.display = 'none';
   gridSec.style.display = 'block';
   if (!silent) {
-    $('catalogGrid').innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:42px;color:#b3b3b3;">${escapeHtml(tr('loadingCatalog'))}</div>`;
+    $('catalogGrid').innerHTML = renderSkeletonGridHtml(12);
   }
 
   const cat = CATEGORIES.find((c) => c.id === catId);
@@ -808,7 +859,7 @@ async function executeSearch(keyword) {
   document.querySelector('.content-lift')?.classList.add('no-hero');
   $('topbar')?.classList.add('solid');
   $('catalogTitle').textContent = tr('searchResultsTitle', { q, n: '...' });
-  $('catalogGrid').innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:42px;color:#b3b3b3;">${escapeHtml(tr('loadingCatalog'))}</div>`;
+  $('catalogGrid').innerHTML = renderSkeletonGridHtml(12);
 
   try {
     let list = [];
@@ -1004,7 +1055,7 @@ function createMovieCardElement(movie) {
   el.className = 'movie-card';
   el.innerHTML = `
     <div class="poster-wrap">
-      <img loading="lazy" src="${escapeHtml(posterSrc)}" alt="${escapeHtml(movie.name)}" />
+      <img loading="lazy" src="${escapeHtml(posterSrc)}" alt="${escapeHtml(movie.name)}" onerror="if(!this.dataset.fb){this.dataset.fb='1';this.classList.add('img-fallback');this.src='./assets/icon-192.png?v=2';}" />
       <span class="card-nki-mark">NKI</span>
       <span class="card-badge">AI</span>
       <span class="card-quality">${escapeHtml((movie.episode_current || movie.quality || 'HD').slice(0, 12))}</span>
@@ -1214,6 +1265,14 @@ function ensureWebAudioDsp(videoEl) {
     mid.connect(high);
     high.connect(gain);
     gain.connect(ctx.destination);
+    // Tap pre-gain clean audio into a MediaStreamDestination for Web AI Live Audio Subtitling
+    try {
+      const captureDest = ctx.createMediaStreamDestination();
+      high.connect(captureDest);
+      state.audioCaptureDest = captureDest;
+    } catch {
+      state.audioCaptureDest = null;
+    }
     state.audioCtx = ctx;
     state.gainNode = gain;
     state.eqNodes = { low, mid, high };
@@ -1343,14 +1402,533 @@ async function togglePlayerFullscreen(lockLandscape = false) {
   }
 }
 
-function openPlayer(movie, episode, startSec = 0) {
+function getCurrentMovieContext() {
+  if (!state.currentMovie) return null;
+  return {
+    title: state.currentMovie.name || state.currentMovie.origin_name || '',
+    genres: Array.isArray(state.currentMovie.genres) ? state.currentMovie.genres : [],
+  };
+}
+
+function getSkipIntroSec() {
+  const n = Number(state.prefs.skipIntroSec);
+  if (!Number.isFinite(n) || n < 10) return 85;
+  return Math.min(300, Math.round(n));
+}
+
+function syncSkipIntroSettingsUi() {
+  const sec = getSkipIntroSec();
+  if ($('skipIntroSettingLabel')) $('skipIntroSettingLabel').textContent = `${sec}s`;
+  if ($('customSkipIntroInput')) $('customSkipIntroInput').value = String(sec);
+  if ($('skipIntroLabel')) $('skipIntroLabel').textContent = `Skip Intro (+${sec}s)`;
+  document.querySelectorAll('[data-skipintro]').forEach((b) => {
+    b.classList.toggle('active', Number(b.dataset.skipintro) === sec);
+  });
+}
+
+function applySkipIntroPref(seconds) {
+  const clamped = Math.max(10, Math.min(300, Math.round(Number(seconds) || 85)));
+  state.prefs.skipIntroSec = clamped;
+  savePrefs();
+  syncSkipIntroSettingsUi();
+  showToast(`⏭ Skip Intro set to +${clamped}s`);
+}
+
+function updateSkipIntroUi(curSec, durSec) {
+  const btn = $('skipIntroBtn');
+  if (!btn) return;
+  const skipSec = getSkipIntroSec();
+  const maxWindow = Math.max(180, skipSec + 95);
+  const canShow =
+    !state.skipIntroDismissed &&
+    !state.isLocked &&
+    !state.isMinimized &&
+    curSec >= 3 &&
+    curSec <= maxWindow &&
+    (durSec === 0 || durSec > skipSec + 50);
+  if (canShow) {
+    if ($('skipIntroLabel')) $('skipIntroLabel').textContent = `Skip Intro (+${skipSec}s)`;
+    btn.style.display = 'inline-flex';
+  } else {
+    btn.style.display = 'none';
+  }
+}
+
+function getNextEpisode() {
+  if (!state.currentEpisode || !Array.isArray(state.episodesFlat) || state.episodesFlat.length < 2) return null;
+  const curIdx = state.episodesFlat.findIndex((e) => e.link_m3u8 === state.currentEpisode.link_m3u8);
+  if (curIdx >= 0 && curIdx + 1 < state.episodesFlat.length) {
+    return state.episodesFlat[curIdx + 1];
+  }
+  return null;
+}
+
+function cancelAutoNext(markDismissed = true) {
+  clearInterval(state.autoNextTimer);
+  state.autoNextTimer = null;
+  state.autoNextCountdownSec = 0;
+  if (markDismissed) state.autoNextCancelled = true;
+  if ($('autoNextCard')) $('autoNextCard').style.display = 'none';
+}
+
+function playNextEpisodeNow() {
+  const nextEp = getNextEpisode();
+  cancelAutoNext(false);
+  if (nextEp && state.currentMovie) {
+    persistCurrentPlaybackProgress({ immediate: true });
+    openPlayer(state.currentMovie, nextEp, 0);
+  }
+}
+
+function startAutoNextCountdown(nextEp, startSeconds = 5) {
+  if (!nextEp || state.autoNextTimer || state.autoNextCancelled) return;
+  const card = $('autoNextCard');
+  if (!card) return;
+  state.autoNextCountdownSec = startSeconds;
+  if ($('autoNextTitle')) $('autoNextTitle').textContent = `${state.currentMovie?.name || ''} • ${nextEp.name}`;
+  if ($('autoNextCountdown')) $('autoNextCountdown').textContent = `NEXT EPISODE IN ${state.autoNextCountdownSec}s`;
+  if ($('autoNextBarFill')) $('autoNextBarFill').style.width = '100%';
+  card.style.display = 'flex';
+
+  state.autoNextTimer = setInterval(() => {
+    state.autoNextCountdownSec -= 1;
+    if (state.autoNextCountdownSec <= 0) {
+      playNextEpisodeNow();
+      return;
+    }
+    if ($('autoNextCountdown')) $('autoNextCountdown').textContent = `NEXT EPISODE IN ${state.autoNextCountdownSec}s`;
+    if ($('autoNextBarFill')) {
+      $('autoNextBarFill').style.width = `${Math.max(0, Math.round((state.autoNextCountdownSec / startSeconds) * 100))}%`;
+    }
+  }, 1000);
+}
+
+function checkAutoNext(curSec, durSec) {
+  if (state.autoNextCancelled || state.autoNextTimer || state.isMinimized) return;
+  const nextEp = getNextEpisode();
+  if (!nextEp) return;
+  if (durSec > 45 && durSec - curSec <= 15 && durSec - curSec > 0.5) {
+    startAutoNextCountdown(nextEp, 5);
+  }
+}
+
+/* ==================== RIGHT-SIDE EPISODES & SERVERS DRAWER ==================== */
+function renderPlayerDrawer() {
+  const movie = state.currentMovie;
+  if (!movie) return;
+  const servers = Array.isArray(movie.servers) ? movie.servers : [];
+  if ($('drawerMovieTitle')) $('drawerMovieTitle').textContent = movie.name || 'Episodes & Servers';
+  const curServer = servers[state.currentServerIdx] || servers[0];
+  if ($('drawerServerSummary')) {
+    $('drawerServerSummary').textContent = `${servers.length} Server${servers.length === 1 ? '' : 's'} • ${(curServer?.episodes || []).length} Ep`;
+  }
+
+  const srvBar = $('drawerServersBar');
+  if (srvBar) {
+    srvBar.innerHTML = '';
+    servers.forEach((srv, idx) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `drawer-srv-btn ${idx === state.currentServerIdx ? 'active' : ''}`;
+      btn.textContent = srv.server_name || `Server ${idx + 1}`;
+      btn.onclick = () => switchPlayerServer(idx);
+      srvBar.appendChild(btn);
+    });
+  }
+
+  const epGrid = $('drawerEpisodesGrid');
+  if (epGrid) {
+    epGrid.innerHTML = '';
+    const eps = curServer?.episodes || state.episodesFlat || [];
+    eps.forEach((ep) => {
+      const isCur = state.currentEpisode && (
+        ep.link_m3u8 === state.currentEpisode.link_m3u8 ||
+        normalizeEpisodeKey(ep.name || ep.slug) === normalizeEpisodeKey(state.currentEpisode.name || state.currentEpisode.slug)
+      );
+      const savedSec = !isCur ? getSavedEpisodePosition(movie.slug, ep) : 0;
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = `drawer-ep-btn ${isCur ? 'active' : ''}`;
+      b.innerHTML = savedSec > 10
+        ? `<span>${escapeHtml(ep.name)}</span><span style="font-size:9.5px;opacity:.78;">${formatTime(savedSec)}</span>`
+        : `<span>${escapeHtml(ep.name)}</span>`;
+      b.onclick = () => {
+        closePlayerDrawer();
+        state.episodesFlat = eps;
+        persistCurrentPlaybackProgress({ immediate: true });
+        openPlayer(movie, ep, 0);
+      };
+      epGrid.appendChild(b);
+    });
+  }
+}
+
+function switchPlayerServer(newIdx, { keepPosition = true, isAutoFailover = false } = {}) {
+  const movie = state.currentMovie;
+  if (!movie || !Array.isArray(movie.servers) || !movie.servers[newIdx]) return false;
+  const targetServer = movie.servers[newIdx];
+  const eps = targetServer.episodes || [];
+  if (!eps.length) return false;
+
+  const curKey = normalizeEpisodeKey(state.currentEpisode?.name || state.currentEpisode?.slug || 'full');
+  const curPos = keepPosition ? Math.floor($('videoEl')?.currentTime || 0) : 0;
+  const matchedEp =
+    eps.find((e) => normalizeEpisodeKey(e.name || e.slug) === curKey) ||
+    eps[Math.min(Math.max(0, state.episodesFlat.findIndex((e) => e.link_m3u8 === state.currentEpisode?.link_m3u8)), eps.length - 1)] ||
+    eps[0];
+
+  state.currentServerIdx = newIdx;
+  state.episodesFlat = eps;
+  if (!isAutoFailover) {
+    closePlayerDrawer();
+    showToast(`⚡ Switched to ${targetServer.server_name || `Server ${newIdx + 1}`}`);
+  }
+  openPlayer(movie, matchedEp, curPos, { preserveFailover: isAutoFailover });
+  return true;
+}
+
+function openPlayerDrawer() {
+  renderPlayerDrawer();
+  $('playerDrawer')?.classList.add('open');
+  $('playerDrawerBackdrop')?.classList.add('open');
+  state.hudPointerInside = true;
+  clearTimeout(state.controlsTimer);
+}
+
+function closePlayerDrawer() {
+  $('playerDrawer')?.classList.remove('open');
+  $('playerDrawerBackdrop')?.classList.remove('open');
+  state.hudPointerInside = false;
+  if (!$('videoEl')?.paused && !state.isLocked) {
+    setControlsVisible(true, 1600);
+  }
+}
+
+/* ==================== AUTO-FAILOVER STREAM ENGINE ==================== */
+function clearStallWatchdog() {
+  clearTimeout(state.stallTimer);
+  state.stallTimer = null;
+}
+
+function armStallWatchdog() {
+  clearStallWatchdog();
+  const video = $('videoEl');
+  if (!video || video.paused || state.isMinimized || !$('playerModal')?.classList.contains('open')) return;
+  state.stallTimer = setTimeout(() => {
+    const v = $('videoEl');
+    if (v && !v.paused && v.readyState < 3 && $('playerModal')?.classList.contains('open')) {
+      triggerAutoFailover('Stream stalled > 6s');
+    }
+  }, 6500);
+}
+
+function triggerAutoFailover(reason = 'Stream error') {
+  clearStallWatchdog();
+  const movie = state.currentMovie;
+  if (!movie) return;
+  state.failoverTriedServers.add(state.currentServerIdx);
+  const servers = Array.isArray(movie.servers) ? movie.servers : [];
+  for (let i = 0; i < servers.length; i++) {
+    if (!state.failoverTriedServers.has(i) && (servers[i]?.episodes?.length || 0) > 0) {
+      showToast(`⚡ ${reason} — auto-switching to ${servers[i].server_name || `Server ${i + 1}`}...`);
+      switchPlayerServer(i, { keepPosition: true, isAutoFailover: true });
+      return;
+    }
+  }
+  // All servers for this movie exhausted -> surface compact 1-click failover recovery bar
+  if ($('streamFailoverMsg')) {
+    $('streamFailoverMsg').textContent = `⚠️ ${reason} — all servers for this movie failed`;
+  }
+  if ($('streamFailoverBar')) {
+    $('streamFailoverBar').style.display = 'flex';
+  }
+}
+
+/* ==================== HARDWARE MEDIA SESSION API ==================== */
+function updateMediaSession(movie, episode) {
+  if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
+  try {
+    const artworkUrl = movie?.poster || './assets/icon-192.png?v=2';
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: `${movie?.name || 'ChillFilm'} • ${episode?.name || 'Full'}`,
+      artist: movie?.origin_name || 'ChillFilm • NKI Cinema',
+      album: movie?.sourceName || 'NKI AI Cinema',
+      artwork: [
+        { src: artworkUrl, sizes: '512x512', type: 'image/jpeg' },
+      ],
+    });
+    const video = $('videoEl');
+    navigator.mediaSession.setActionHandler('play', () => video?.play().catch(() => {}));
+    navigator.mediaSession.setActionHandler('pause', () => video?.pause());
+    navigator.mediaSession.setActionHandler('seekbackward', () => {
+      if (video) video.currentTime = Math.max(0, video.currentTime - 10);
+    });
+    navigator.mediaSession.setActionHandler('seekforward', () => {
+      if (video) video.currentTime = Math.min(video.duration || 0, video.currentTime + 10);
+    });
+    navigator.mediaSession.setActionHandler('seekto', (details) => {
+      if (video && typeof details?.seekTime === 'number') video.currentTime = details.seekTime;
+    });
+    navigator.mediaSession.setActionHandler('nexttrack', () => {
+      if (getNextEpisode()) playNextEpisodeNow();
+    });
+    navigator.mediaSession.setActionHandler('previoustrack', () => {
+      if (!state.currentEpisode || !state.episodesFlat.length) return;
+      const idx = state.episodesFlat.findIndex((e) => e.link_m3u8 === state.currentEpisode.link_m3u8);
+      if (idx > 0 && state.currentMovie) {
+        persistCurrentPlaybackProgress({ immediate: true });
+        openPlayer(state.currentMovie, state.episodesFlat[idx - 1], 0);
+      }
+    });
+  } catch {
+    // Graceful fallback if browser restricts MediaSession
+  }
+}
+
+/* ==================== WEB LIVE AI AUDIO SUBTITLER (ROLLING 18s CHUNKS) ==================== */
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const res = String(reader.result || '');
+      const idx = res.indexOf(',');
+      resolve(idx >= 0 ? res.slice(idx + 1) : res);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+function syncAudioSubUi(statusMsg = '') {
+  const modalBtn = $('aiAudioSubBtn');
+  const modalStatus = $('aiAudioSubStatus');
+  const promptBtn = $('hudAudioSubPrompt');
+  const promptTxt = $('hudAudioSubPromptText');
+
+  if (modalBtn) {
+    modalBtn.textContent = state.audioSubActive ? '⏹ Stop AI Audio Sub' : '🎙 Start AI Audio Sub';
+    modalBtn.style.background = state.audioSubActive ? '#dc2626' : '';
+    modalBtn.style.color = state.audioSubActive ? '#ffffff' : '';
+  }
+  if (modalStatus && statusMsg) {
+    modalStatus.textContent = statusMsg;
+  }
+  if (promptBtn && promptTxt) {
+    if (state.audioSubActive) {
+      promptBtn.style.display = 'inline-flex';
+      promptBtn.classList.add('recording');
+      promptTxt.textContent = statusMsg || `🎙 AI Listening (${state.primaryCues.length} cues) • Stop`;
+    } else {
+      promptBtn.classList.remove('recording');
+      promptTxt.textContent = 'No SRT • Tap for AI Audio Sub';
+    }
+  }
+}
+
+function mergeAudioSubCues(newCues) {
+  if (!Array.isArray(newCues) || !newCues.length) return;
+  const combined = [...state.primaryCues, ...newCues]
+    .filter((c) => c && c.text && Number.isFinite(c.startMs))
+    .sort((a, b) => a.startMs - b.startMs);
+
+  // Deduplicate overlapping identical cues
+  const deduped = [];
+  for (const c of combined) {
+    const prev = deduped[deduped.length - 1];
+    if (prev && Math.abs(prev.startMs - c.startMs) < 1200 && prev.text === c.text) continue;
+    deduped.push({ id: deduped.length + 1, startMs: c.startMs, endMs: Math.max(c.endMs || c.startMs + 2500, c.startMs + 500), text: c.text });
+  }
+  state.primaryCues = deduped;
+  state.sourceCues = deduped;
+  state.lastSubTrackLabel = `🎙 AI Audio (${resolveLanguage(state.prefs.primaryLang).badge})`;
+  renderActiveSubtitle(($('videoEl')?.currentTime || 0) * 1000);
+  if (deduped.length >= 3) {
+    persistCurrentSubCache(false, deduped.length).catch(() => {});
+  }
+}
+
+function stopWebAiAudioSub(silent = false) {
+  state.audioSubActive = false;
+  state.audioSubSessionId += 1;
+  clearTimeout(state.audioSubLoopTimer);
+  state.audioSubLoopTimer = null;
+  if (state.audioSubRecorder && state.audioSubRecorder.state !== 'inactive') {
+    try { state.audioSubRecorder.stop(); } catch { /* ignore */ }
+  }
+  state.audioSubRecorder = null;
+  if ($('hudAudioSubPrompt')) {
+    $('hudAudioSubPrompt').classList.remove('recording');
+    if (state.primaryCues.length >= 3) {
+      $('hudAudioSubPrompt').style.display = 'none';
+    }
+  }
+  syncAudioSubUi(
+    state.primaryCues.length
+      ? `Stopped • Saved ${state.primaryCues.length} AI cues to cache & NKI Cloud Pool`
+      : 'Listens to playing audio in 18s chunks & saves to NKI Cloud Pool'
+  );
+  if (state.primaryCues.length >= 3) {
+    persistCurrentSubCache(true, state.primaryCues.length).catch(() => {});
+  }
+  if (!silent) showToast('⏹ Stopped AI Live Audio Subtitler');
+}
+
+async function captureNextAudioSubChunk(sessionId) {
+  if (!state.audioSubActive || sessionId !== state.audioSubSessionId) return;
+  const video = $('videoEl');
+  if (!video || !$('playerModal')?.classList.contains('open')) {
+    stopWebAiAudioSub(true);
+    return;
+  }
+  if (video.paused) {
+    state.audioSubLoopTimer = setTimeout(() => captureNextAudioSubChunk(sessionId), 1500);
+    return;
+  }
+
+  ensureWebAudioDsp(video);
+  const stream = state.audioCaptureDest?.stream || (typeof video.captureStream === 'function' ? video.captureStream() : null);
+  const audioTracks = stream?.getAudioTracks?.() || [];
+  if (!stream || !audioTracks.length || typeof MediaRecorder === 'undefined') {
+    stopWebAiAudioSub(true);
+    showToast('⚠️ Browser or video CORS blocked live audio capture — try Chrome/Edge or upload .SRT');
+    return;
+  }
+
+  const audioOnlyStream = new MediaStream(audioTracks);
+  const mimeCandidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
+  const pickedMime = mimeCandidates.find((m) => MediaRecorder.isTypeSupported?.(m)) || '';
+  const chunkStartMs = Math.round((video.currentTime || 0) * 1000);
+  const CHUNK_MS = 18000;
+  const parts = [];
+
+  try {
+    const rec = pickedMime ? new MediaRecorder(audioOnlyStream, { mimeType: pickedMime, audioBitsPerSecond: 48000 }) : new MediaRecorder(audioOnlyStream);
+    state.audioSubRecorder = rec;
+    rec.ondataavailable = (ev) => {
+      if (ev.data && ev.data.size > 0) parts.push(ev.data);
+    };
+    rec.onstop = async () => {
+      if (sessionId !== state.audioSubSessionId) return;
+      const blob = new Blob(parts, { type: rec.mimeType || pickedMime || 'audio/webm' });
+      // Schedule next rolling chunk immediately so continuous speech isn't missed!
+      if (state.audioSubActive && sessionId === state.audioSubSessionId) {
+        captureNextAudioSubChunk(sessionId);
+      }
+      if (blob.size < 1200) return;
+
+      const targetLang = resolveLanguage(state.prefs.primaryLang);
+      syncAudioSubUi(`🎙 AI transcribing → ${targetLang.badge} (${state.primaryCues.length} cues)...`);
+      updateSubStatusBadge(`🎙 AI Listening → ${targetLang.badge} (${state.primaryCues.length})...`);
+
+      try {
+        const audioBase64 = await blobToBase64(blob);
+        const cleanMime = (blob.type || 'audio/webm').split(';')[0];
+        let cues = [];
+        if (isCloudSignedIn()) {
+          const resp = await cloudTranscribeAudioChunk({
+            audioBase64,
+            mimeType: cleanMime,
+            chunkStartOffsetMs: chunkStartMs,
+            chunkDurationMs: CHUNK_MS,
+            targetLang: targetLang.code,
+            model: state.prefs.geminiModel,
+            movieContext: getCurrentMovieContext(),
+          });
+          cues = Array.isArray(resp?.cues) ? resp.cues : [];
+        } else {
+          cues = await transcribeAudioChunkDirect({
+            audioBase64,
+            mimeType: cleanMime,
+            chunkStartOffsetMs: chunkStartMs,
+            chunkDurationMs: CHUNK_MS,
+            targetLang: targetLang.code,
+            apiKey: state.prefs.geminiApiKey,
+            modelId: state.prefs.geminiModel,
+            movieContext: getCurrentMovieContext(),
+          });
+        }
+        if (sessionId !== state.audioSubSessionId) return;
+        state.audioSubChunksDone += 1;
+        mergeAudioSubCues(cues);
+        updateSubStatusBadge(`🎙 AI Audio ${targetLang.badge} • ${state.primaryCues.length} cues`);
+        syncAudioSubUi(`🎙 Listening live • ${state.primaryCues.length} cues saved`);
+      } catch (err) {
+        console.warn('[AI Audio Sub] chunk failed:', err?.message || err);
+        syncAudioSubUi(`⚠️ AI Audio chunk error: ${String(err?.message || 'retry next chunk').slice(0, 50)}`);
+      }
+    };
+
+    rec.start();
+    state.audioSubLoopTimer = setTimeout(() => {
+      if (rec.state === 'recording') {
+        try { rec.stop(); } catch { /* ignore */ }
+      }
+    }, CHUNK_MS);
+  } catch (err) {
+    stopWebAiAudioSub(true);
+    showToast(`⚠️ Live Audio Sub unavailable: ${err?.message || 'unsupported'}`);
+  }
+}
+
+function startWebAiAudioSub() {
+  if (state.audioSubActive) {
+    stopWebAiAudioSub(false);
+    return;
+  }
+  const hasPersonalKey = (state.prefs.geminiApiKey || '').trim().length >= 15;
+  if (!isCloudSignedIn() && !hasPersonalKey) {
+    showToast('☁️ Sign in to NKI Cloud (or add a Gemini API Key in Settings) to use AI Live Audio Sub!');
+    openSettingsModal();
+    return;
+  }
+  const video = $('videoEl');
+  ensureWebAudioDsp(video);
+  if (video.paused) video.play().catch(() => {});
+
+  state.audioSubActive = true;
+  state.audioSubChunksDone = 0;
+  const sessionId = ++state.audioSubSessionId;
+  const targetLang = resolveLanguage(state.prefs.primaryLang);
+  updateSubStatusBadge(`🎙 AI Live Audio Sub (${targetLang.badge}) listening...`);
+  syncAudioSubUi(`🎙 Capturing 18s rolling audio → ${targetLang.badge}...`);
+  showToast(`🎙 AI Live Audio Sub started (${targetLang.badge}) — first cues arrive in ~18s!`);
+  captureNextAudioSubChunk(sessionId);
+}
+
+function openPlayer(movie, episode, startSec = 0, { preserveFailover = false } = {}) {
   // Save previous episode position if switching mid-session
   if (state.currentMovie && state.currentEpisode && $('playerModal').classList.contains('open')) {
     persistCurrentPlaybackProgress();
   }
 
+  stopWebAiAudioSub(true);
+  cancelAutoNext(false);
+  clearStallWatchdog();
+
   state.currentMovie = movie;
   state.currentEpisode = episode;
+  state.skipIntroDismissed = false;
+  state.autoNextCancelled = false;
+  state.hlsNetworkRetries = 0;
+  if (!preserveFailover) {
+    state.failoverTriedServers = new Set();
+  }
+  if ($('skipIntroBtn')) $('skipIntroBtn').style.display = 'none';
+  if ($('streamFailoverBar')) $('streamFailoverBar').style.display = 'none';
+  if ($('hudAudioSubPrompt')) $('hudAudioSubPrompt').style.display = 'none';
+  closePlayerDrawer();
+
+  // Detect active server index cleanly
+  if (Array.isArray(movie.servers) && movie.servers.length) {
+    const foundSrv = movie.servers.findIndex((s) => (s.episodes || []).some((e) => e.link_m3u8 === episode.link_m3u8));
+    if (foundSrv >= 0) {
+      state.currentServerIdx = foundSrv;
+      state.episodesFlat = movie.servers[foundSrv].episodes || state.episodesFlat;
+    }
+  }
+  renderPlayerDrawer();
+  updateMediaSession(movie, episode);
+
   const resolvedStartSec = startSec > 2 ? Math.floor(startSec) : getSavedEpisodePosition(movie.slug, episode);
   state.pendingSeekSec = resolvedStartSec;
   state.lastSavedPosTs = Date.now();
@@ -1422,8 +2000,16 @@ function openPlayer(movie, episode, startSec = 0) {
       startPlayback();
     });
     hls.on(window.Hls.Events.ERROR, (_, data) => {
-      if (data.fatal && data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
-        hls.startLoad();
+      if (data.fatal) {
+        if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR && state.hlsNetworkRetries < 1) {
+          state.hlsNetworkRetries += 1;
+          hls.startLoad();
+        } else if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR && state.hlsNetworkRetries < 1) {
+          state.hlsNetworkRetries += 1;
+          hls.recoverMediaError();
+        } else {
+          triggerAutoFailover('HLS stream error');
+        }
       }
     });
     state.hls = hls;
@@ -1507,6 +2093,13 @@ function closePlayer(e) {
   if (e && typeof e.stopPropagation === 'function') {
     e.stopPropagation();
   }
+  stopWebAiAudioSub(true);
+  cancelAutoNext(false);
+  clearStallWatchdog();
+  closePlayerDrawer();
+  if ($('skipIntroBtn')) $('skipIntroBtn').style.display = 'none';
+  if ($('streamFailoverBar')) $('streamFailoverBar').style.display = 'none';
+  if ($('hudAudioSubPrompt')) $('hudAudioSubPrompt').style.display = 'none';
   const video = $('videoEl');
   persistCurrentPlaybackProgress({ immediate: true });
   renderHistorySection();
@@ -1677,7 +2270,11 @@ async function autoLoadSubtitlesForMovie(movie, episode) {
   }
 
   if (!movie.imdbId) {
-    updateSubStatusBadge('Chưa có mã IMDb • Bấm CC để nạp file .SRT');
+    updateSubStatusBadge('Chưa có SRT • Bấm 🎙 AI Audio Sub hoặc nạp .SRT');
+    if ($('hudAudioSubPrompt') && !state.audioSubActive) {
+      $('hudAudioSubPrompt').style.display = 'inline-flex';
+      syncAudioSubUi();
+    }
     return;
   }
 
@@ -1686,7 +2283,11 @@ async function autoLoadSubtitlesForMovie(movie, episode) {
   if (runId !== state.subTranslationRunId) return;
   state.subTracks = tracks;
   if (!tracks.length) {
-    updateSubStatusBadge('Không thấy Sub rời • Bấm CC để tải file .SRT lên');
+    updateSubStatusBadge('Không thấy SRT • Bấm 🎙 AI Audio Sub hoặc nạp .SRT');
+    if ($('hudAudioSubPrompt') && !state.audioSubActive) {
+      $('hudAudioSubPrompt').style.display = 'inline-flex';
+      syncAudioSubUi();
+    }
     return;
   }
 
@@ -1738,6 +2339,7 @@ async function translateSecondaryInBackground(runId, cues, sourceLangCode) {
       geminiApiKey: state.prefs.geminiApiKey,
       geminiModel: state.prefs.geminiModel,
       cloudTranslator: isCloudSignedIn() ? cloudTranslateCueBatch : null,
+      movieContext: getCurrentMovieContext(),
     });
     if (runId !== state.subTranslationRunId) return;
     for (let j = 0; j < translated.length; j++) workingSec[i + j] = translated[j];
@@ -1796,6 +2398,7 @@ async function applyLoadedSourceCues(cues, sourceLangCode = 'auto', opts = {}) {
         geminiApiKey: state.prefs.geminiApiKey,
         geminiModel: state.prefs.geminiModel,
         cloudTranslator: isCloudSignedIn() ? cloudTranslateCueBatch : null,
+        movieContext: getCurrentMovieContext(),
       });
       if (runId !== state.subTranslationRunId) return;
       for (let j = 0; j < translated.length; j++) {
@@ -1974,6 +2577,7 @@ function renderLanguagePickers() {
 function openMoreModal() {
   applyVolumeBoost(state.volumeScale);
   applyEqPreset(state.eqPreset);
+  syncSkipIntroSettingsUi();
   $('moreModal').classList.add('open');
 }
 
@@ -2702,13 +3306,39 @@ function init() {
   document.addEventListener('fullscreenchange', onFsChange);
   document.addEventListener('webkitfullscreenchange', onFsChange);
 
-  // Seekbar, timeupdate (auto-save every 3s) & lifecycle save
+  // Seekbar, timeupdate (auto-save every 3s), Skip Intro, Auto-Next, Failover & Hover Tooltip
   video.addEventListener('play', () => {
     syncPlayIcons(false);
+    clearStallWatchdog();
     setControlsVisible(true, 1600);
+  });
+  video.addEventListener('playing', () => {
+    clearStallWatchdog();
+    if ($('streamFailoverBar')) $('streamFailoverBar').style.display = 'none';
+  });
+  video.addEventListener('waiting', () => armStallWatchdog());
+  video.addEventListener('stalled', () => armStallWatchdog());
+  video.addEventListener('error', () => {
+    if ($('playerModal')?.classList.contains('open') && video.getAttribute('src')) {
+      triggerAutoFailover('Video stream failed');
+    }
+  });
+  video.addEventListener('ended', () => {
+    clearStallWatchdog();
+    const nextEp = getNextEpisode();
+    if (nextEp && !state.autoNextCancelled) {
+      startAutoNextCountdown(nextEp, 5);
+    }
+  });
+  video.addEventListener('seeked', () => {
+    if (state.audioSubActive && state.audioSubRecorder?.state === 'recording') {
+      // Restart rolling 18s AI audio capture cleanly at the new seeked timestamp
+      try { state.audioSubRecorder.stop(); } catch { /* ignore */ }
+    }
   });
   video.addEventListener('pause', () => {
     syncPlayIcons(true);
+    clearStallWatchdog();
     persistCurrentPlaybackProgress({ immediate: true });
     setControlsVisible(true);
   });
@@ -2724,10 +3354,94 @@ function init() {
       seekEl.style.setProperty('--pct', `${(ratio * 100).toFixed(2)}%`);
     }
     renderActiveSubtitle(cur * 1000);
+    updateSkipIntroUi(cur, dur);
+    checkAutoNext(cur, dur);
     if (!video.paused && cur > 2 && Date.now() - state.lastSavedPosTs >= 3000) {
       persistCurrentPlaybackProgress({ immediate: false });
     }
   });
+
+  // Hover Seekbar Time Tooltip
+  const seekWrap = $('seekRowWrap');
+  const seekTip = $('seekTooltip');
+  if (seekWrap && seekTip) {
+    const updateTip = (clientX) => {
+      const dur = video.duration || 0;
+      if (!dur || !Number.isFinite(dur)) {
+        seekTip.classList.remove('visible');
+        return;
+      }
+      const rect = seekWrap.getBoundingClientRect();
+      const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
+      seekTip.textContent = formatTime(ratio * dur);
+      seekTip.style.left = `${Math.max(24, Math.min(rect.width - 24, clientX - rect.left))}px`;
+      seekTip.classList.add('visible');
+    };
+    seekWrap.addEventListener('mousemove', (e) => updateTip(e.clientX));
+    seekWrap.addEventListener('mouseleave', () => seekTip.classList.remove('visible'));
+  }
+
+  // Phase 1 Player Pro Actions (Episodes Drawer, Skip Intro, Auto-Next, Failover, AI Audio Sub)
+  if ($('hudEpisodesBtn')) {
+    $('hudEpisodesBtn').onclick = () => {
+      if ($('playerDrawer')?.classList.contains('open')) closePlayerDrawer();
+      else openPlayerDrawer();
+    };
+  }
+  if ($('closePlayerDrawerBtn')) $('closePlayerDrawerBtn').onclick = closePlayerDrawer;
+  if ($('playerDrawerBackdrop')) $('playerDrawerBackdrop').onclick = closePlayerDrawer;
+
+  if ($('skipIntroBtn')) {
+    $('skipIntroBtn').onclick = (e) => {
+      e.stopPropagation();
+      const skipSec = getSkipIntroSec();
+      const dur = video.duration || 0;
+      const target = dur > 10 ? Math.min(dur - 5, (video.currentTime || 0) + skipSec) : (video.currentTime || 0) + skipSec;
+      video.currentTime = target;
+      state.skipIntroDismissed = true;
+      $('skipIntroBtn').style.display = 'none';
+      showGestureToast(`⏭ +${skipSec}s`);
+    };
+  }
+
+  if ($('autoNextNowBtn')) $('autoNextNowBtn').onclick = () => playNextEpisodeNow();
+  if ($('autoNextCancelBtn')) $('autoNextCancelBtn').onclick = () => cancelAutoNext(true);
+
+  if ($('failoverRetryBtn')) {
+    $('failoverRetryBtn').onclick = () => {
+      if (state.currentMovie && state.currentEpisode) {
+        openPlayer(state.currentMovie, state.currentEpisode, Math.floor(video.currentTime || 0));
+      }
+    };
+  }
+  if ($('failoverSearchBtn')) {
+    $('failoverSearchBtn').onclick = () => {
+      const q = state.currentMovie?.name || state.currentMovie?.origin_name || '';
+      closePlayer();
+      if (q) {
+        if ($('searchInputDesktop')) $('searchInputDesktop').value = q;
+        executeSearch(q);
+        showToast(`🔍 Searching backup global sources for "${q}"...`);
+      }
+    };
+  }
+
+  if ($('aiAudioSubBtn')) $('aiAudioSubBtn').onclick = () => startWebAiAudioSub();
+  if ($('hudAudioSubPrompt')) {
+    $('hudAudioSubPrompt').onclick = (e) => {
+      e.stopPropagation();
+      startWebAiAudioSub();
+    };
+  }
+
+  document.querySelectorAll('[data-skipintro]').forEach((b) => {
+    b.onclick = () => applySkipIntroPref(Number(b.dataset.skipintro));
+  });
+  if ($('applyCustomSkipIntroBtn')) {
+    $('applyCustomSkipIntroBtn').onclick = () => {
+      applySkipIntroPref($('customSkipIntroInput')?.value);
+    };
+  }
   const onLeavePage = () => {
     persistCurrentPlaybackProgress({ immediate: true, useBeacon: true });
     flushPendingCloudProgress(true);
@@ -2875,8 +3589,15 @@ function init() {
     else if (e.key === 'ArrowDown') { e.preventDefault(); ensureWebAudioDsp(video); applyVolumeBoost(state.volumeScale - 0.1); showGestureToast(`🔊 ${Math.round(state.volumeScale * 100)}%`); }
     else if (e.key.toLowerCase() === 'f') { $('hudFsBtn').click(); }
     else if (e.key.toLowerCase() === 'm') { toggleMute(); }
+    else if (e.key.toLowerCase() === 'e') {
+      if ($('playerDrawer')?.classList.contains('open')) closePlayerDrawer();
+      else openPlayerDrawer();
+    }
     else if (e.key.toLowerCase() === 'c') { openSubModal(); }
-    else if (e.key === 'Escape') { minimizePlayer(); }
+    else if (e.key === 'Escape') {
+      if ($('playerDrawer')?.classList.contains('open')) closePlayerDrawer();
+      else minimizePlayer();
+    }
   });
 
   // Subtitle Modal Controls
