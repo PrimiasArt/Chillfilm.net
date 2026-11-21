@@ -149,8 +149,8 @@ fun DetailScreen(
                 .background(
                     Brush.verticalGradient(
                         listOf(
-                            Color(0x8806070D),
-                            Color(0xD906070D),
+                            Color(0x66141414),
+                            Color(0xCC141414),
                             CinemaObsidian
                         )
                     )
@@ -406,18 +406,18 @@ fun DetailScreen(
                 }
             } else if (firstEp != null) {
                 if (!isWide) {
-                    // Mobile portrait: Clean full-width Primary Play CTA + compact secondary Cast chip if TV configured
+                    // Mobile portrait: Crisp Netflix Pure White Primary Play CTA + sleek gray Cast button
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .focusRequester(playFocusRequester)
                             .tvFocusableClickable(
-                                shape = RoundedCornerShape(16.dp),
-                                focusedBorderColor = Color.White,
-                                unfocusedBorderColor = EmeraldNeon,
+                                shape = RoundedCornerShape(6.dp),
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = Color.Transparent,
                                 onClick = { onPlayOnPhone(firstEp) }
                             )
-                            .background(BrandEmeraldVioletBrush)
+                            .background(Color.White)
                             .padding(vertical = 13.dp, horizontal = 18.dp),
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically
@@ -425,15 +425,15 @@ fun DetailScreen(
                         Icon(
                             Icons.Default.PlayArrow,
                             contentDescription = null,
-                            tint = Color.White,
+                            tint = Color.Black,
                             modifier = Modifier.size(22.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = primaryCtaLabel,
-                            color = Color.White,
+                            color = Color.Black,
                             fontSize = 15.sp,
-                            fontWeight = FontWeight.ExtraBold,
+                            fontWeight = FontWeight.Black,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -481,22 +481,22 @@ fun DetailScreen(
                             modifier = Modifier
                                 .focusRequester(playFocusRequester)
                                 .tvFocusableClickable(
-                                    shape = RoundedCornerShape(99.dp),
-                                    focusedBorderColor = Color.White,
-                                    unfocusedBorderColor = EmeraldNeon,
+                                    shape = RoundedCornerShape(6.dp),
+                                    focusedBorderColor = EmeraldNeon,
+                                    unfocusedBorderColor = Color.Transparent,
                                     onClick = { onPlayOnPhone(firstEp) }
                                 )
-                                .background(BrandEmeraldVioletBrush)
+                                .background(Color.White)
                                 .padding(horizontal = 24.dp, vertical = 12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(Icons.Default.PlayArrow, null, tint = Color.White, modifier = Modifier.size(22.dp))
+                            Icon(Icons.Default.PlayArrow, null, tint = Color.Black, modifier = Modifier.size(22.dp))
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
                                 text = primaryCtaLabel,
-                                color = Color.White,
+                                color = Color.Black,
                                 fontSize = 15.sp,
-                                fontWeight = FontWeight.ExtraBold
+                                fontWeight = FontWeight.Black
                             )
                         }
 

@@ -48,6 +48,7 @@ const state = {
   prefs: loadPrefs(),
   activeCategory: 'hot',
   movies: [],
+  homeRows: [],
   currentMovie: null,
   currentEpisode: null,
   episodesFlat: [],
@@ -114,6 +115,9 @@ function setUiLanguage(code) {
   applyUiTranslations();
   renderCategories();
   if (state.movies.length) renderHero(state.movies[0]);
+  if (state.activeCategory === 'hot' && state.homeRows.length) {
+    renderHomeSwimlanes();
+  }
   if ($('detailView').classList.contains('active') && state.currentMovie) {
     renderDetailView(state.currentMovie);
   }
@@ -338,34 +342,148 @@ function formatTime(sec) {
   return h > 0 ? `${h}:${pad(m)}:${pad(r)}` : `${pad(m)}:${pad(r)}`;
 }
 
-/* ==================== CATALOG & SEARCH ==================== */
+/* ==================== CATALOG, NETFLIX SWIMLANES & SEARCH ==================== */
+function mapPhimItems(json) {
+  const rawItems = json?.items || json?.data?.items || [];
+  return rawItems.map((m) => ({
+    slug: m.slug,
+    name: m.name,
+    origin_name: m.origin_name || '',
+    year: m.year ? String(m.year) : '',
+    quality: m.quality || 'HD',
+    episode_current: m.episode_current || '',
+    poster: normalizeImage(m.poster_url || m.thumb_url),
+    backdrop: normalizeImage(m.thumb_url || m.poster_url),
+  }));
+}
+
+async function fetchCategoryList(cat) {
+  try {
+    const res = await fetch(cat.url);
+    const json = await res.json();
+    return mapPhimItems(json);
+  } catch {
+    return [];
+  }
+}
+
 async function loadCategory(catId) {
   state.activeCategory = catId;
   renderCategories();
   closeDetailView();
-  $('catalogGrid').innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:42px;color:#9ca3af;">${escapeHtml(tr('loadingCatalog'))}</div>`;
+
+  const liftEl = document.querySelector('.content-lift');
+  const swimWrap = $('homeSwimlanes');
+  const gridSec = $('catalogGridSection');
+
+  // HOME ("hot"): Authentic Netflix Multi-Row Swimlanes + Top 10 Ranked Row!
+  if (catId === 'hot') {
+    if (liftEl) liftEl.classList.remove('no-hero');
+    $('topbar')?.classList.remove('solid');
+    gridSec.style.display = 'none';
+    swimWrap.style.display = 'block';
+    swimWrap.innerHTML = `<div style="text-align:center;padding:42px;color:#b3b3b3;">${escapeHtml(tr('loadingCatalog'))}</div>`;
+
+    const rowCatIds = ['hot', 'phim-le', 'phim-bo', 'han-quoc', 'au-my', 'hoat-hinh', 'thai-lan'];
+    const rowCats = rowCatIds.map((id) => CATEGORIES.find((c) => c.id === id)).filter(Boolean);
+    const results = await Promise.all(rowCats.map((c) => fetchCategoryList(c)));
+
+    state.movies = results[0] || [];
+    state.homeRows = rowCats
+      .map((c, idx) => ({ id: c.id, isTopTen: idx === 0, movies: results[idx] || [] }))
+      .filter((r) => r.movies.length > 0);
+
+    if (state.movies.length) {
+      renderHero(state.movies[0]);
+      renderHistorySection();
+      renderHomeSwimlanes();
+    } else {
+      swimWrap.innerHTML = `<div style="text-align:center;padding:36px;color:#fca5a5;">${escapeHtml(tr('loadError'))}</div>`;
+    }
+    return;
+  }
+
+  // Dedicated Category Grid View
+  if (liftEl) liftEl.classList.remove('no-hero');
+  $('topbar')?.classList.remove('solid');
+  swimWrap.style.display = 'none';
+  gridSec.style.display = 'block';
+  $('catalogGrid').innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:42px;color:#b3b3b3;">${escapeHtml(tr('loadingCatalog'))}</div>`;
 
   const cat = CATEGORIES.find((c) => c.id === catId) || CATEGORIES[0];
-  try {
-    const res = await fetch(cat.url);
-    const json = await res.json();
-    const rawItems = json.items || json.data?.items || [];
-    state.movies = rawItems.map((m) => ({
-      slug: m.slug,
-      name: m.name,
-      origin_name: m.origin_name || '',
-      year: m.year ? String(m.year) : '',
-      quality: m.quality || 'HD',
-      episode_current: m.episode_current || '',
-      poster: normalizeImage(m.poster_url || m.thumb_url),
-      backdrop: normalizeImage(m.thumb_url || m.poster_url),
-    }));
+  const list = await fetchCategoryList(cat);
+  if (list.length) {
+    state.movies = list;
     renderHero(state.movies[0]);
     renderHistorySection();
     renderMovieGrid(state.movies, getCategoryLabel(cat.id));
-  } catch (e) {
+  } else {
     $('catalogGrid').innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:36px;color:#fca5a5;">${escapeHtml(tr('loadError'))}</div>`;
   }
+}
+
+function renderHomeSwimlanes() {
+  const wrap = $('homeSwimlanes');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+
+  state.homeRows.forEach((row) => {
+    const sec = document.createElement('section');
+    sec.className = 'nf-row-section';
+
+    const head = document.createElement('div');
+    head.className = 'section-head';
+    head.innerHTML = `
+      <div class="section-title">
+        ${row.isTopTen ? '<span class="top10-pill">TOP 10</span>' : ''}
+        <span>${escapeHtml(getCategoryLabel(row.id))}</span>
+      </div>
+    `;
+    sec.appendChild(head);
+
+    const railWrap = document.createElement('div');
+    railWrap.className = 'row-rail-wrap';
+
+    const leftBtn = document.createElement('button');
+    leftBtn.className = 'rail-arrow left';
+    leftBtn.innerHTML = '‹';
+    leftBtn.setAttribute('aria-label', 'Scroll left');
+
+    const rightBtn = document.createElement('button');
+    rightBtn.className = 'rail-arrow right';
+    rightBtn.innerHTML = '›';
+    rightBtn.setAttribute('aria-label', 'Scroll right');
+
+    const rail = document.createElement('div');
+    rail.className = 'row-rail';
+
+    const displayList = row.isTopTen ? row.movies.slice(0, 10) : row.movies.slice(0, 18);
+    displayList.forEach((movie, idx) => {
+      const card = createMovieCardElement(movie);
+      card.onclick = () => openMovieDetail(movie.slug, false);
+      if (row.isTopTen) {
+        const rankWrap = document.createElement('div');
+        rankWrap.className = 'rank-card-wrap';
+        const num = document.createElement('span');
+        num.className = 'rank-num';
+        num.textContent = String(idx + 1);
+        rankWrap.appendChild(num);
+        rankWrap.appendChild(card);
+        rail.appendChild(rankWrap);
+      } else {
+        rail.appendChild(card);
+      }
+    });
+
+    leftBtn.onclick = () => rail.scrollBy({ left: -Math.max(420, rail.clientWidth * 0.78), behavior: 'smooth' });
+    rightBtn.onclick = () => rail.scrollBy({ left: Math.max(420, rail.clientWidth * 0.78), behavior: 'smooth' });
+
+    railWrap.appendChild(leftBtn);
+    railWrap.appendChild(rail);
+    railWrap.appendChild(rightBtn);
+    sec.appendChild(railWrap);
+    wrap.appendChild(sec);
+  });
 }
 
 async function executeSearch(keyword) {
@@ -377,23 +495,17 @@ async function executeSearch(keyword) {
   closeDetailView();
   $('heroBox').style.display = 'none';
   $('historySection').style.display = 'none';
+  $('homeSwimlanes').style.display = 'none';
+  $('catalogGridSection').style.display = 'block';
+  document.querySelector('.content-lift')?.classList.add('no-hero');
+  $('topbar')?.classList.add('solid');
   $('catalogTitle').textContent = tr('searchResultsTitle', { q, n: '...' });
-  $('catalogGrid').innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:42px;color:#9ca3af;">${escapeHtml(tr('loadingCatalog'))}</div>`;
+  $('catalogGrid').innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:42px;color:#b3b3b3;">${escapeHtml(tr('loadingCatalog'))}</div>`;
 
   try {
     const res = await fetch(`${PHIM_API}/v1/api/tim-kiem?keyword=${encodeURIComponent(q)}&limit=24`);
     const json = await res.json();
-    const rawItems = json.data?.items || json.items || [];
-    const list = rawItems.map((m) => ({
-      slug: m.slug,
-      name: m.name,
-      origin_name: m.origin_name || '',
-      year: m.year ? String(m.year) : '',
-      quality: m.quality || 'HD',
-      episode_current: m.episode_current || '',
-      poster: normalizeImage(m.poster_url || m.thumb_url),
-      backdrop: normalizeImage(m.thumb_url || m.poster_url),
-    }));
+    const list = mapPhimItems(json);
     renderMovieGrid(list, tr('searchResultsTitle', { q, n: list.length }));
   } catch {
     showToast(tr('loadError'));
@@ -402,17 +514,32 @@ async function executeSearch(keyword) {
 
 function renderCategories() {
   const strip = $('catStrip');
+  const nav = $('desktopNavLinks');
   strip.innerHTML = '';
+  if (nav) nav.innerHTML = '';
+
+  const desktopFeatured = ['hot', 'phim-bo', 'phim-le', 'hoat-hinh', 'han-quoc', 'au-my'];
+
   CATEGORIES.forEach((c) => {
-    const btn = document.createElement('button');
-    btn.className = `cat-chip ${state.activeCategory === c.id ? 'active' : ''}`;
-    btn.textContent = getCategoryLabel(c.id);
-    btn.onclick = () => {
+    const onPick = () => {
       $('searchInputDesktop').value = '';
       $('searchInputMobile').value = '';
       loadCategory(c.id);
     };
+
+    const btn = document.createElement('button');
+    btn.className = `cat-chip ${state.activeCategory === c.id ? 'active' : ''}`;
+    btn.textContent = getCategoryLabel(c.id);
+    btn.onclick = onPick;
     strip.appendChild(btn);
+
+    if (nav && desktopFeatured.includes(c.id)) {
+      const link = document.createElement('button');
+      link.className = `nav-link-btn ${state.activeCategory === c.id ? 'active' : ''}`;
+      link.textContent = getCategoryLabel(c.id);
+      link.onclick = onPick;
+      nav.appendChild(link);
+    }
   });
 }
 
@@ -428,15 +555,22 @@ function renderHero(movie) {
     <img class="hero-bg" src="${movie.backdrop || movie.poster}" alt="${escapeHtml(movie.name)}" />
     <div class="hero-overlay"></div>
     <div class="hero-content">
-      <div class="hero-meta">
-        <span class="badge-ai">${escapeHtml(tr('heroBadge', { lang: lang.badge }))}</span>
-        <span style="font-size:12px;color:#c084fc;font-weight:700;">${escapeHtml(movie.year || '2026')} • ${escapeHtml(movie.quality)}</span>
-      </div>
-      <h1 class="hero-title">${escapeHtml(movie.name)}</h1>
-      <p class="hero-sub">${escapeHtml(movie.origin_name || tr('heroDefaultDesc'))}</p>
-      <div class="hero-actions">
-        <button class="btn-grad" id="heroPlayBtn">${escapeHtml(tr('watchNow'))}</button>
-        <button class="btn-glass" id="heroDetailBtn">${escapeHtml(tr('detailsBtn'))}</button>
+      <div class="hero-inner">
+        <div class="hero-eyebrow">
+          <div class="nf-series-mark"><span class="nki-tag">NKI</span><span>AI CINEMA</span></div>
+        </div>
+        <h1 class="hero-title">${escapeHtml(movie.name)}</h1>
+        <div class="hero-meta">
+          <span class="match-score">98% Match</span>
+          <span style="color:#e5e5e5;">${escapeHtml(movie.year || '2026')}</span>
+          <span class="badge-ai">${escapeHtml(tr('heroBadge', { lang: lang.badge }))}</span>
+          <span style="border:1px solid rgba(255,255,255,0.35);padding:1px 6px;border-radius:3px;font-size:10.5px;">${escapeHtml(movie.quality)}</span>
+        </div>
+        <p class="hero-sub">${escapeHtml(movie.origin_name || tr('heroDefaultDesc'))}</p>
+        <div class="hero-actions">
+          <button class="btn-nf-play" id="heroPlayBtn">${escapeHtml(tr('watchNow'))}</button>
+          <button class="btn-nf-info" id="heroDetailBtn">ⓘ ${escapeHtml(tr('detailsBtn'))}</button>
+        </div>
       </div>
     </div>
   `;
@@ -454,12 +588,12 @@ function renderHistorySection() {
   sec.style.display = 'block';
   const grid = $('historyGrid');
   grid.innerHTML = '';
-  history.slice(0, 6).forEach((item) => {
+  history.slice(0, 12).forEach((item) => {
     const card = createMovieCardElement({
       slug: item.slug,
       name: item.name,
       year: `${item.epName} • ${formatTime(item.position)}`,
-      quality: 'TIẾP TỤC',
+      quality: formatTime(item.position),
       poster: item.poster,
       progress: item.progress,
     });
@@ -473,7 +607,7 @@ function renderMovieGrid(list, title) {
   const grid = $('catalogGrid');
   grid.innerHTML = '';
   if (!list.length) {
-    grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:42px;color:#9ca3af;">Không có phim nào phù hợp.</div>';
+    grid.innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:42px;color:#b3b3b3;">${escapeHtml(tr('noResults'))}</div>`;
     return;
   }
   list.forEach((movie) => {
@@ -489,13 +623,15 @@ function createMovieCardElement(movie) {
   el.innerHTML = `
     <div class="poster-wrap">
       <img loading="lazy" src="${movie.poster}" alt="${escapeHtml(movie.name)}" />
-      <span class="card-badge">AI SUB</span>
+      <span class="card-nki-mark">NKI</span>
+      <span class="card-badge">AI</span>
       <span class="card-quality">${escapeHtml((movie.episode_current || movie.quality || 'HD').slice(0, 12))}</span>
+      <div class="card-hover-play"><span>▶</span></div>
       ${movie.progress ? `<div class="card-progress"><div class="card-progress-fill" style="width:${Math.round(movie.progress * 100)}%"></div></div>` : ''}
     </div>
     <div class="card-info">
       <div class="card-title">${escapeHtml(movie.name)}</div>
-      <div class="card-meta">${escapeHtml(movie.year || movie.origin_name || 'ChillFilm')}</div>
+      <div class="card-meta">${escapeHtml(movie.year || movie.origin_name || 'HD • AI Sub')}</div>
     </div>
   `;
   return el;
@@ -551,6 +687,7 @@ async function openMovieDetail(slug, autoPlayFirst = false, resumeSec = 0, resum
 
 function renderDetailView(detail) {
   $('homeView').style.display = 'none';
+  $('topbar')?.classList.add('solid');
   const dv = $('detailView');
   dv.classList.add('active');
   const allEps = detail.servers.flatMap((s) => s.episodes);
@@ -572,20 +709,21 @@ function renderDetailView(detail) {
     </div>
     <div class="detail-hero">
       <img class="detail-poster" src="${detail.poster}" alt="${escapeHtml(detail.name)}" />
-      <div style="display:flex;flex-direction:column;gap:8px;min-width:0;">
+      <div style="display:flex;flex-direction:column;gap:10px;min-width:0;">
         <div class="hero-meta">
+          <span class="match-score">98% Match</span>
           <span class="badge-ai">AI SUB (${lang.badge})</span>
-          <span style="font-size:12px;color:#c084fc;font-weight:700;">${escapeHtml(detail.year)} • ${escapeHtml(detail.time || detail.quality)}</span>
+          <span style="font-size:12px;color:#b3b3b3;font-weight:700;">${escapeHtml(detail.year)} • ${escapeHtml(detail.time || detail.quality)}</span>
         </div>
-        <h2 style="font-size:clamp(18px,3vw,28px);font-weight:900;">${escapeHtml(detail.name)}</h2>
-        ${detail.origin_name ? `<div style="font-size:13px;color:#9ca3af;">${escapeHtml(detail.origin_name)}</div>` : ''}
-        <p style="font-size:13px;color:#cbd5e1;line-height:1.6;">${escapeHtml(detail.content || tr('heroDefaultDesc'))}</p>
+        <h2 style="font-size:clamp(20px,3.2vw,32px);font-weight:900;">${escapeHtml(detail.name)}</h2>
+        ${detail.origin_name ? `<div style="font-size:13px;color:#b3b3b3;">${escapeHtml(detail.origin_name)}</div>` : ''}
+        <p style="font-size:13.5px;color:#e5e5e5;line-height:1.6;">${escapeHtml(detail.content || tr('heroDefaultDesc'))}</p>
         <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:6px;">
-          ${resumeEp ? `<button class="btn-grad" id="detailPlayPrimary">${escapeHtml(primaryBtnLabel)}</button>` : `<span style="color:#fca5a5;font-size:13px;">${escapeHtml(tr('noStream'))}</span>`}
+          ${resumeEp ? `<button class="btn-nf-play" id="detailPlayPrimary">${escapeHtml(primaryBtnLabel)}</button>` : `<span style="color:#fca5a5;font-size:13px;">${escapeHtml(tr('noStream'))}</span>`}
         </div>
       </div>
     </div>
-    <div id="detailServersWrap" style="margin-top:20px;"></div>
+    <div id="detailServersWrap" style="margin-top:22px;"></div>
   `;
 
   $('detailBackBtn').onclick = closeDetailView;
@@ -623,6 +761,9 @@ function renderDetailView(detail) {
 function closeDetailView() {
   $('detailView').classList.remove('active');
   $('homeView').style.display = 'block';
+  if ($('heroBox').style.display !== 'none') {
+    $('topbar')?.classList.remove('solid');
+  }
 }
 
 /* ==================== CHILL-PLAYER ENGINE (HLS + WEB AUDIO 200% BOOST + EQ) ==================== */
@@ -1332,6 +1473,13 @@ function init() {
   applyUiTranslations();
   renderCategories();
   loadCategory('hot');
+
+  // Netflix transparent-to-solid sticky navbar on scroll
+  const syncTopbarScroll = () => {
+    $('topbar')?.classList.toggle('scrolled', window.scrollY > 24);
+  };
+  window.addEventListener('scroll', syncTopbarScroll, { passive: true });
+  syncTopbarScroll();
 
   // Topbar Language Switcher Dropdown (EN / VI / TH / ZH / KO)
   $('langSwitchBtn').onclick = (e) => {

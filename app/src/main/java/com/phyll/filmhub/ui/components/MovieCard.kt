@@ -54,199 +54,230 @@ import com.phyll.filmhub.ui.theme.tvFocusableClickable
 fun MovieCard(
     movie: MovieItem,
     progressFraction: Float = 0f,
+    rankNumber: Int? = null,
     onFocused: (() -> Unit)? = null,
     onClick: () -> Unit
 ) {
     val isTv = LocalIsTvMode.current
     val screenWidthDp = LocalConfiguration.current.screenWidthDp
     val cardWidth = when {
-        isTv || screenWidthDp >= 840 -> 166.dp
-        screenWidthDp >= 520 -> 142.dp
-        else -> 122.dp
+        isTv || screenWidthDp >= 840 -> 162.dp
+        screenWidthDp >= 520 -> 136.dp
+        else -> 114.dp
     }
     val posterHeight = when {
-        isTv || screenWidthDp >= 840 -> 232.dp
-        screenWidthDp >= 520 -> 198.dp
-        else -> 172.dp
+        isTv || screenWidthDp >= 840 -> 236.dp
+        screenWidthDp >= 520 -> 196.dp
+        else -> 166.dp
     }
-    val cardShape = RoundedCornerShape(16.dp)
+    // Crisp Netflix-style tight poster corners
+    val cardShape = RoundedCornerShape(8.dp)
 
-    Column(
-        modifier = Modifier
-            .width(cardWidth)
-            .tvFocusableClickable(
-                shape = cardShape,
-                focusedBorderColor = EmeraldNeon,
-                unfocusedBorderColor = CinemaGlassBorder,
-                borderWidth = 1.5.dp,
-                focusedScale = 1.04f,
-                onFocused = onFocused,
-                onClick = onClick
+    Row(verticalAlignment = Alignment.Bottom) {
+        // Netflix Iconic Top 10 Rank Number beside poster
+        if (rankNumber != null && rankNumber in 1..10) {
+            Text(
+                text = rankNumber.toString(),
+                color = EmeraldNeon.copy(alpha = 0.88f),
+                fontSize = if (isTv) 68.sp else 54.sp,
+                fontWeight = FontWeight.Black,
+                letterSpacing = (-3).sp,
+                modifier = Modifier.padding(end = 2.dp, bottom = 18.dp)
             )
-            .background(CinemaGlass)
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(posterHeight)
-                .background(
-                    Brush.verticalGradient(
-                        listOf(CinemaSurfaceElevated, Color(0xFF090C12))
-                    )
-                )
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(12.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Movie,
-                    contentDescription = null,
-                    tint = TextSecondary.copy(alpha = 0.35f),
-                    modifier = Modifier.size(26.dp)
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = movie.title.take(24),
-                    color = TextSecondary.copy(alpha = 0.7f),
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Medium,
-                    textAlign = TextAlign.Center,
-                    maxLines = 2
-                )
-            }
-
-            if (movie.posterUrl.isNotBlank()) {
-                AsyncImage(
-                    model = movie.posterUrl,
-                    contentDescription = movie.title,
-                    contentScale = if (movie.contentType == ContentType.LIVE_CHANNEL) {
-                        ContentScale.Fit
-                    } else {
-                        ContentScale.Crop
-                    },
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
-
-            // Smooth cinema bottom vignette
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .height(68.dp)
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(
-                                Color.Transparent,
-                                Color(0x9906080D),
-                                Color(0xEE06080D)
-                            )
-                        )
-                    )
-            )
-
-            // Single clean top-right AI SUB / LIVE badge
-            val isLive = movie.contentType == ContentType.LIVE_CHANNEL
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(6.dp)
-                    .clip(RoundedCornerShape(7.dp))
-                    .background(
-                        if (isLive) LiveRed
-                        else Color(0xD9101526)
-                    )
-                    .border(
-                        width = 0.7.dp,
-                        color = if (isLive) Color.Transparent else EmeraldPrimary.copy(alpha = 0.65f),
-                        shape = RoundedCornerShape(7.dp)
-                    )
-                    .padding(horizontal = 6.dp, vertical = 2.dp)
-            ) {
-                Text(
-                    text = if (isLive) "LIVE" else "AI SUB",
-                    color = if (isLive) Color.White else EmeraldNeon,
-                    fontSize = 8.5.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    letterSpacing = 0.3.sp
-                )
-            }
-
-            // Bottom-left Quality / Episode tag
-            if (movie.quality.isNotBlank()) {
-                val cleanQuality = movie.quality
-                    .replace("Sub ไทย Gốc", "FHD", ignoreCase = true)
-                    .replace("AI Sub ไทย", "AI", ignoreCase = true)
-                    .replace("Sub ไทย", "HD", ignoreCase = true)
-                    .trim()
-                    .take(10)
-                    .ifBlank { "HD" }
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(horizontal = 7.dp, vertical = if (progressFraction > 0.01f) 8.dp else 6.dp)
-                        .clip(RoundedCornerShape(5.dp))
-                        .background(Color(0xB806080D))
-                        .padding(horizontal = 5.dp, vertical = 1.dp)
-                ) {
-                    Text(
-                        text = cleanQuality.uppercase(),
-                        color = TextPrimary,
-                        fontSize = 8.5.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1
-                    )
-                }
-            }
-
-            // Watch progress bar
-            if (progressFraction > 0.01f) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .fillMaxWidth()
-                        .height(3.dp)
-                        .background(Color.White.copy(alpha = 0.20f))
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth(progressFraction.coerceIn(0.05f, 1f))
-                            .height(3.dp)
-                            .background(BrandEmeraldVioletBrush)
-                    )
-                }
-            }
         }
 
         Column(
             modifier = Modifier
-                .fillMaxWidth()
+                .width(cardWidth)
+                .tvFocusableClickable(
+                    shape = cardShape,
+                    focusedBorderColor = Color.White,
+                    unfocusedBorderColor = Color(0x18FFFFFF),
+                    borderWidth = if (isTv) 2.dp else 1.dp,
+                    focusedScale = 1.06f,
+                    onFocused = onFocused,
+                    onClick = onClick
+                )
                 .background(CinemaSurface)
-                .padding(horizontal = 8.dp, vertical = 7.dp)
         ) {
-            Text(
-                text = movie.title,
-                color = TextPrimary,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = listOfNotNull(
-                    movie.year.takeIf { it.isNotBlank() },
-                    movie.country.displayName.takeIf { it.isNotBlank() }
-                ).joinToString(" • "),
-                color = TextSecondary,
-                fontSize = 10.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(posterHeight)
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(CinemaSurfaceElevated, Color(0xFF0E0E0E))
+                        )
+                    )
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(10.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Movie,
+                        contentDescription = null,
+                        tint = TextSecondary.copy(alpha = 0.35f),
+                        modifier = Modifier.size(26.dp)
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = movie.title.take(24),
+                        color = TextSecondary.copy(alpha = 0.7f),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Medium,
+                        textAlign = TextAlign.Center,
+                        maxLines = 2
+                    )
+                }
+
+                if (movie.posterUrl.isNotBlank()) {
+                    AsyncImage(
+                        model = movie.posterUrl,
+                        contentDescription = movie.title,
+                        contentScale = if (movie.contentType == ContentType.LIVE_CHANNEL) {
+                            ContentScale.Fit
+                        } else {
+                            ContentScale.Crop
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+
+                // Clean Netflix bottom gradient scrim
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .height(62.dp)
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(
+                                    Color.Transparent,
+                                    Color(0x99141414),
+                                    Color(0xF0141414)
+                                )
+                            )
+                        )
+                )
+
+                // Signature Netflix-Green "NKI" Top-Left Corner Emblem (replaces Netflix red N!)
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(6.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color(0xCC0A0A0A))
+                        .padding(horizontal = 5.dp, vertical = 1.5.dp)
+                ) {
+                    Text(
+                        text = "NKI",
+                        color = EmeraldNeon,
+                        fontSize = 8.5.sp,
+                        fontWeight = FontWeight.Black,
+                        letterSpacing = 0.6.sp
+                    )
+                }
+
+                // Subtle Top-Right LIVE / AI SUB pill
+                val isLive = movie.contentType == ContentType.LIVE_CHANNEL
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(6.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(if (isLive) LiveRed else Color(0xCC141414))
+                        .border(
+                            width = 0.6.dp,
+                            color = if (isLive) Color.Transparent else EmeraldPrimary.copy(alpha = 0.7f),
+                            shape = RoundedCornerShape(4.dp)
+                        )
+                        .padding(horizontal = 5.dp, vertical = 1.5.dp)
+                ) {
+                    Text(
+                        text = if (isLive) "LIVE" else "AI",
+                        color = if (isLive) Color.White else EmeraldNeon,
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        letterSpacing = 0.3.sp
+                    )
+                }
+
+                // Bottom-left Quality / Episode tag
+                if (movie.quality.isNotBlank()) {
+                    val cleanQuality = movie.quality
+                        .replace("Sub ไทย Gốc", "FHD", ignoreCase = true)
+                        .replace("AI Sub ไทย", "AI", ignoreCase = true)
+                        .replace("Sub ไทย", "HD", ignoreCase = true)
+                        .trim()
+                        .take(10)
+                        .ifBlank { "HD" }
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(horizontal = 6.dp, vertical = if (progressFraction > 0.01f) 8.dp else 6.dp)
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(Color(0xCC0A0A0A))
+                            .padding(horizontal = 5.dp, vertical = 1.dp)
+                    ) {
+                        Text(
+                            text = cleanQuality.uppercase(),
+                            color = Color(0xFFE5E5E5),
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1
+                        )
+                    }
+                }
+
+                // Authentic Netflix-style Watch Progress Bar (Signature Green!)
+                if (progressFraction > 0.01f) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .fillMaxWidth()
+                            .height(3.5.dp)
+                            .background(Color.White.copy(alpha = 0.28f))
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(progressFraction.coerceIn(0.05f, 1f))
+                                .height(3.5.dp)
+                                .background(EmeraldNeon)
+                        )
+                    }
+                }
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(CinemaSurface)
+                    .padding(horizontal = 7.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    text = movie.title,
+                    color = TextPrimary,
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(1.dp))
+                Text(
+                    text = listOfNotNull(
+                        movie.year.takeIf { it.isNotBlank() },
+                        movie.providerName.takeIf { it.isNotBlank() && it != "KKPhim" }
+                    ).joinToString(" • ").ifBlank { "HD • AI Sub" },
+                    color = TextSecondary,
+                    fontSize = 9.5.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
     }
 }

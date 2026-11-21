@@ -3,39 +3,42 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover" />
-  <meta name="theme-color" content="#06070D" />
+  <meta name="theme-color" content="#141414" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>ChillFilm — NKI AI Cinema</title>
-  <meta name="description" content="Standalone NKI Cinema Web App with Chill-Player 200% Audio Boost, universal multi-language AI subtitles, pop-out mini-player, and optional TV casting." />
-  <link rel="icon" type="image/png" href="./assets/favicon.png" />
-  <link rel="apple-touch-icon" href="./assets/icon-192.png" />
-  <link rel="manifest" href="./manifest.json" />
+  <meta name="description" content="Standalone NKI Cinema Web App with Netflix-inspired dark emerald interface, Chill-Player 200% Audio Boost, universal multi-language AI subtitles, pop-out mini-player, and optional TV casting." />
+  <link rel="icon" type="image/png" href="./assets/favicon.png?v=2" />
+  <link rel="apple-touch-icon" href="./assets/icon-192.png?v=2" />
+  <link rel="manifest" href="./manifest.json?v=2" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Sarabun:wght@500;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Sarabun:wght@500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css?v=2" />
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js" defer></script>
 </head>
 <body>
 
-  <!-- MINIMALIST TOP NAVIGATION -->
-  <header class="topbar">
-    <div class="brand" id="brandHome" title="ChillFilm • NKI Ecosystem">
-      <img src="./assets/icon-192.png" alt="NKI ChillFilm Logo" />
-      <div class="brand-wordmark">
-        <span class="c1">CHILL</span><span class="c2">FILM</span>
-        <span class="nki-pill">NKI</span>
+  <!-- NETFLIX-STYLE TRANSPARENT-TO-SOLID TOP NAVIGATION -->
+  <header class="topbar" id="topbar">
+    <div class="nav-left">
+      <div class="brand" id="brandHome" title="ChillFilm • NKI Ecosystem">
+        <img src="./assets/icon-192.png?v=2" alt="NKI ChillFilm Logo" />
+        <div class="brand-wordmark">
+          <span class="c1">CHILLFILM</span>
+          <span class="nki-pill">NKI</span>
+        </div>
       </div>
-    </div>
-
-    <div class="search-desktop">
-      <input id="searchInputDesktop" type="search" placeholder="Search movies, series, actors..." />
-      <button class="btn-grad" id="searchBtnDesktop" style="padding:6px 14px;font-size:12px;">Search</button>
+      <nav class="nav-links" id="desktopNavLinks"></nav>
     </div>
 
     <div class="top-actions">
+      <div class="search-desktop">
+        <span style="font-size:13px;opacity:.75;">🔍</span>
+        <input id="searchInputDesktop" type="search" placeholder="Search movies, series, actors..." />
+        <button class="btn-green-sm" id="searchBtnDesktop">Search</button>
+      </div>
       <div class="lang-switcher">
         <button class="lang-pill-btn" id="langSwitchBtn" title="Interface Language (EN / VI / TH / ZH / KO)">
           <span>🌐</span>
@@ -60,37 +63,51 @@
   </div>
 
   <!-- MAIN CONTENT -->
-  <main class="container">
+  <main class="main-shell">
     <div id="homeView">
-      <nav class="cat-strip" id="catStrip"></nav>
+      <!-- FULL-BLEED NETFLIX-STYLE BILLBOARD HERO -->
       <section class="hero" id="heroBox" style="display:none;"></section>
 
-      <section id="historySection" style="display:none;">
-        <div class="section-head">
-          <div class="section-title" id="continueSectionTitle">Continue Watching</div>
-        </div>
-        <div class="movie-grid" id="historyGrid"></div>
-      </section>
+      <div class="container content-lift">
+        <!-- Mobile / Quick Genre Strip -->
+        <nav class="cat-strip" id="catStrip"></nav>
 
-      <section>
-        <div class="section-head">
-          <div class="section-title" id="catalogTitle">Trending</div>
-        </div>
-        <div class="movie-grid" id="catalogGrid"></div>
-      </section>
+        <!-- Continue Watching Swimlane -->
+        <section id="historySection" style="display:none;" class="nf-row-section">
+          <div class="section-head">
+            <div class="section-title" id="continueSectionTitle">Continue Watching</div>
+          </div>
+          <div class="row-rail-wrap">
+            <div class="row-rail" id="historyGrid"></div>
+          </div>
+        </section>
+
+        <!-- Multi-Row Netflix Home Swimlanes (Active on Home/Trending) -->
+        <div id="homeSwimlanes"></div>
+
+        <!-- Category / Search Grid Section (Active on Category Filter or Search) -->
+        <section id="catalogGridSection" style="display:none;">
+          <div class="section-head">
+            <div class="section-title" id="catalogTitle">Trending</div>
+          </div>
+          <div class="movie-grid" id="catalogGrid"></div>
+        </section>
+      </div>
     </div>
 
-    <section class="detail-view" id="detailView"></section>
+    <div class="container detail-container">
+      <section class="detail-view" id="detailView"></section>
 
-    <footer class="footer">
-      <div style="display:flex;align-items:center;gap:8px;">
-        <img src="./assets/favicon.png" alt="NKI" style="width:20px;height:20px;border-radius:5px;" />
-        <span id="footerTagline"><strong>ChillFilm</strong> • <strong>NKI</strong> Ecosystem • Standalone Cinema Web App</span>
-      </div>
-      <div style="display:flex;gap:12px;align-items:center;">
-        <a id="footerApkLink" href="https://github.com/PrimiasArt/Chillfilm.net/releases/download/android-apk-latest/ChillFilm-latest.apk" style="color:#34d399;text-decoration:none;font-weight:700;">📱 Download Android &amp; TV App (.APK)</a>
-      </div>
-    </footer>
+      <footer class="footer">
+        <div style="display:flex;align-items:center;gap:8px;">
+          <img src="./assets/favicon.png" alt="NKI" style="width:20px;height:20px;border-radius:4px;" />
+          <span id="footerTagline"><strong>ChillFilm</strong> • <strong>NKI</strong> Ecosystem • Standalone Cinema Web App</span>
+        </div>
+        <div style="display:flex;gap:12px;align-items:center;">
+          <a id="footerApkLink" href="https://github.com/PrimiasArt/Chillfilm.net/releases/download/android-apk-latest/ChillFilm-latest.apk" style="color:#00e676;text-decoration:none;font-weight:700;">📱 Download Android &amp; TV App (.APK)</a>
+        </div>
+      </footer>
+    </div>
   </main>
 
   <!-- FULLSCREEN / FLOATING POP-OUT CHILL-PLAYER OVERLAY -->
@@ -394,6 +411,6 @@
 
   <div class="toast" id="toast"></div>
 
-  <script type="module" src="./app.js"></script>
+  <script type="module" src="./app.js?v=2"></script>
 </body>
 </html>

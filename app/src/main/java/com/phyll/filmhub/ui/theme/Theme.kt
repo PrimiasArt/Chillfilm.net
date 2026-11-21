@@ -21,43 +21,44 @@ import com.phyll.filmhub.model.DeviceUiMode
 import com.phyll.filmhub.model.SubtitleFontChoice
 
 // ============================================================================================
-// 2026 Spatial Cinema Palette — Emerald Green x Royal Violet over Midnight Glass
+// Netflix-Inspired Cinema Palette — Pitch Obsidian (#141414) x Signature Emerald Green (#00E676)
+// Replaces Netflix Red (#E50914) 1-for-1 with vivid NKI Cinema Green while keeping pure dark contrast
 // ============================================================================================
-val CinemaObsidian = Color(0xFF06070D)
-val CinemaSurface = Color(0xFF0F1220)
-val CinemaSurfaceElevated = Color(0xFF171B30)
-val CinemaGlass = Color(0xBF121628)
+val CinemaObsidian = Color(0xFF141414)
+val CinemaSurface = Color(0xFF181818)
+val CinemaSurfaceElevated = Color(0xFF262626)
+val CinemaGlass = Color(0xD9141414)
 val CinemaGlassBorder = Color(0x26FFFFFF)
 
-val EmeraldPrimary = Color(0xFF10B981)
-val EmeraldNeon = Color(0xFF34D399)
-val VioletPrimary = Color(0xFF8B5CF6)
-val VioletGlow = Color(0xFFA855F7)
-val VioletSoft = Color(0xFFC084FC)
+val EmeraldPrimary = Color(0xFF00C853)
+val EmeraldNeon = Color(0xFF00E676)
+val VioletPrimary = Color(0xFF00A844)
+val VioletGlow = Color(0xFF00E676)
+val VioletSoft = Color(0xFF46D369)
 val AmberBoost = Color(0xFFFBBF24)
 
-// Unified palette aliases across screens so every highlight balances Emerald & Violet
-val ThaiGold = EmeraldPrimary
+// Unified palette aliases across all screens — 100% cohesive Netflix-Green cinema system
+val ThaiGold = EmeraldNeon
 val ElectricCyan = VioletSoft
 
-val TextPrimary = Color(0xFFF8FAFC)
-val TextSecondary = Color(0xFFA1A7B8)
-val LiveRed = Color(0xFFEF4444)
+val TextPrimary = Color(0xFFFFFFFF)
+val TextSecondary = Color(0xFFB3B3B3)
+val LiveRed = Color(0xFFE50914)
 val SuccessGreen = EmeraldNeon
 
 val BrandEmeraldVioletBrush = Brush.horizontalGradient(
-    listOf(EmeraldPrimary, VioletPrimary)
+    listOf(EmeraldPrimary, EmeraldNeon)
 )
 
 val BrandNeonGlassBorderBrush = Brush.horizontalGradient(
-    listOf(EmeraldNeon.copy(alpha = 0.65f), VioletGlow.copy(alpha = 0.65f))
+    listOf(EmeraldNeon.copy(alpha = 0.72f), Color(0x44FFFFFF))
 )
 
 val AmbientCinemaBackdropBrush = Brush.verticalGradient(
     listOf(
-        Color(0xFF091418),
+        Color(0xFF0E1410),
         CinemaObsidian,
-        Color(0xFF100B1D)
+        Color(0xFF0B0B0B)
     )
 )
 

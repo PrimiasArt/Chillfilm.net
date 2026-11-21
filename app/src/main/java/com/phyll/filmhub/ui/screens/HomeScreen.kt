@@ -34,6 +34,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -205,35 +206,26 @@ fun HomeScreen(
                     Column {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                text = "CHILL",
+                                text = "CHILLFILM",
                                 color = EmeraldNeon,
-                                fontSize = if (isWide) 18.sp else 16.sp,
+                                fontSize = if (isWide) 20.sp else 17.5.sp,
                                 fontWeight = FontWeight.Black,
-                                letterSpacing = 1.sp,
-                                maxLines = 1
-                            )
-                            Text(
-                                text = "FILM",
-                                color = VioletSoft,
-                                fontSize = if (isWide) 18.sp else 16.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                letterSpacing = 1.sp,
+                                letterSpacing = 1.6.sp,
                                 maxLines = 1
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Box(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(EmeraldPrimary.copy(alpha = 0.16f))
-                                    .border(0.75.dp, EmeraldNeon.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(EmeraldPrimary)
                                     .padding(horizontal = 5.dp, vertical = 1.dp)
                             ) {
                                 Text(
                                     text = "NKI",
-                                    color = EmeraldNeon,
+                                    color = Color(0xFF0A0A0A),
                                     fontSize = 8.5.sp,
                                     fontWeight = FontWeight.Black,
-                                    letterSpacing = 0.6.sp
+                                    letterSpacing = 0.7.sp
                                 )
                             }
                         }
@@ -584,10 +576,11 @@ fun HomeScreen(
                         }
                     }
 
-                    items(sections, key = { it.id }) { section ->
+                    itemsIndexed(sections, key = { _, sec -> sec.id }) { idx, section ->
                         CatalogSectionRow(
                             section = section,
                             horizPad = horizPad,
+                            showTopTenRanks = (idx == 0 && selectedCountry == CountryCategory.ALL),
                             onMovieFocused = { focused -> spotlightMovie = focused },
                             onMovieClick = onMovieClick
                         )
@@ -685,9 +678,9 @@ private fun FloatingBottomNavBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(60.dp)
-                .clip(RoundedCornerShape(24.dp))
-                .background(Color(0xE80D1120))
-                .border(1.dp, BrandNeonGlassBorderBrush, RoundedCornerShape(24.dp))
+                .clip(RoundedCornerShape(16.dp))
+                .background(Color(0xF5121212))
+                .border(1.dp, Color(0x22FFFFFF), RoundedCornerShape(16.dp))
                 .padding(horizontal = 6.dp, vertical = 5.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -795,9 +788,9 @@ private fun HeroSpotlightBanner(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = horizPad)
-            .height(if (isWide) 252.dp else 218.dp)
-            .clip(RoundedCornerShape(22.dp))
-            .border(1.dp, BrandNeonGlassBorderBrush, RoundedCornerShape(22.dp))
+            .height(if (isWide) 308.dp else 284.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .border(1.dp, Color(0x28FFFFFF), RoundedCornerShape(12.dp))
             .background(CinemaObsidian)
     ) {
         val heroArt = movie.backdropUrl.ifBlank { movie.posterUrl }
@@ -810,16 +803,16 @@ private fun HeroSpotlightBanner(
             )
         }
 
-        // Smooth bottom + left cinematic vignette
+        // Authentic Netflix bottom & side obsidian fade into #141414
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(
                     Brush.verticalGradient(
                         listOf(
-                            Color(0x3306070D),
-                            Color(0x9906070D),
-                            Color(0xF206070D)
+                            Color(0x22141414),
+                            Color(0x88141414),
+                            Color(0xF5141414)
                         )
                     )
                 )
@@ -831,8 +824,8 @@ private fun HeroSpotlightBanner(
                     .background(
                         Brush.horizontalGradient(
                             listOf(
-                                Color(0xEC06070D),
-                                Color(0x9906070D),
+                                Color(0xF0141414),
+                                Color(0x99141414),
                                 Color.Transparent
                             )
                         )
@@ -843,35 +836,36 @@ private fun HeroSpotlightBanner(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(if (isWide) 22.dp else 14.dp),
+                .padding(if (isWide) 24.dp else 16.dp),
             verticalArrangement = Arrangement.Bottom
         ) {
-            // Concise Metadata Line
+            // Netflix-Green "NKI SERIES / AI CINEMA" eyebrow tag
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Box(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
+                        .clip(RoundedCornerShape(4.dp))
                         .background(EmeraldPrimary)
                         .padding(horizontal = 7.dp, vertical = 2.dp)
                 ) {
                     Text(
-                        text = s.aiSubMultiBadge,
-                        color = CinemaObsidian,
+                        text = "NKI • ${s.aiSubMultiBadge}",
+                        color = Color(0xFF0A0A0A),
                         fontSize = 9.sp,
                         fontWeight = FontWeight.Black,
-                        letterSpacing = 0.4.sp
+                        letterSpacing = 0.6.sp
                     )
                 }
                 Text(
                     text = listOfNotNull(
+                        "98% Match",
                         s.countryName(movie.country).takeIf { it.isNotBlank() },
                         movie.year.takeIf { it.isNotBlank() }
                     ).joinToString(" • "),
-                    color = VioletSoft,
-                    fontSize = 11.sp,
+                    color = EmeraldNeon,
+                    fontSize = 11.5.sp,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -882,58 +876,58 @@ private fun HeroSpotlightBanner(
 
             Text(
                 text = movie.title,
-                color = TextPrimary,
-                fontSize = if (isWide) 24.sp else 18.sp,
-                fontWeight = FontWeight.ExtraBold,
+                color = Color.White,
+                fontSize = if (isWide) 28.sp else 21.sp,
+                fontWeight = FontWeight.Black,
                 maxLines = if (isWide) 1 else 2,
                 overflow = TextOverflow.Ellipsis
             )
 
             if (isWide && movie.description.isNotBlank()) {
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(5.dp))
                 Text(
                     text = movie.description,
-                    color = Color(0xFFCBD5E1),
-                    fontSize = 12.sp,
-                    lineHeight = 17.sp,
+                    color = Color(0xFFE5E5E5),
+                    fontSize = 12.5.sp,
+                    lineHeight = 18.sp,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.fillMaxWidth(0.76f)
+                    modifier = Modifier.fillMaxWidth(0.74f)
                 )
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
-            // Exactly 2 clean balanced CTA buttons (never overflows on 360dp!)
+            // Authentic Netflix Button Pair: Crisp Pure White "▶ Play" + Translucent Gray "ⓘ Details"
             Row(
                 modifier = if (isWide) Modifier else Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Row(
-                    modifier = (if (isWide) Modifier else Modifier.weight(1.3f))
+                    modifier = (if (isWide) Modifier else Modifier.weight(1.25f))
                         .tvFocusableClickable(
-                            shape = RoundedCornerShape(99.dp),
-                            focusedBorderColor = Color.White,
-                            unfocusedBorderColor = EmeraldNeon,
+                            shape = RoundedCornerShape(6.dp),
+                            focusedBorderColor = EmeraldNeon,
+                            unfocusedBorderColor = Color.Transparent,
                             onClick = onPlayClick
                         )
-                        .background(BrandEmeraldVioletBrush)
-                        .padding(horizontal = 18.dp, vertical = 10.dp),
+                        .background(Color.White)
+                        .padding(horizontal = 20.dp, vertical = 10.dp),
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
                         Icons.Default.PlayArrow,
                         contentDescription = null,
-                        tint = Color.White,
-                        modifier = Modifier.size(18.dp)
+                        tint = Color.Black,
+                        modifier = Modifier.size(20.dp)
                     )
                     Spacer(modifier = Modifier.width(5.dp))
                     Text(
                         text = s.watchNow,
-                        color = Color.White,
-                        fontWeight = FontWeight.ExtraBold,
-                        fontSize = 13.sp,
+                        color = Color.Black,
+                        fontWeight = FontWeight.Black,
+                        fontSize = 13.5.sp,
                         maxLines = 1
                     )
                 }
@@ -941,28 +935,28 @@ private fun HeroSpotlightBanner(
                 Row(
                     modifier = (if (isWide) Modifier else Modifier.weight(1f))
                         .tvFocusableClickable(
-                            shape = RoundedCornerShape(99.dp),
-                            focusedBorderColor = VioletGlow,
-                            unfocusedBorderColor = CinemaGlassBorder,
+                            shape = RoundedCornerShape(6.dp),
+                            focusedBorderColor = EmeraldNeon,
+                            unfocusedBorderColor = Color(0x33FFFFFF),
                             onClick = onDetailClick
                         )
-                        .background(Color(0xCC13172B))
-                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                        .background(Color(0xB84A4A4D))
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
                         Icons.Default.Info,
                         contentDescription = null,
-                        tint = TextPrimary,
-                        modifier = Modifier.size(16.dp)
+                        tint = Color.White,
+                        modifier = Modifier.size(17.dp)
                     )
                     Spacer(modifier = Modifier.width(5.dp))
                     Text(
                         text = s.detailsBtn,
-                        color = TextPrimary,
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 13.sp,
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.5.sp,
                         maxLines = 1
                     )
                 }
@@ -1028,6 +1022,7 @@ private fun ContinueWatchingRow(
 private fun CatalogSectionRow(
     section: CatalogSection,
     horizPad: androidx.compose.ui.unit.Dp,
+    showTopTenRanks: Boolean = false,
     onMovieFocused: (MovieItem) -> Unit,
     onMovieClick: (MovieItem) -> Unit
 ) {
@@ -1040,15 +1035,33 @@ private fun CatalogSectionRow(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = section.title,
-                color = TextPrimary,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.ExtraBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
-            )
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                if (showTopTenRanks) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(EmeraldPrimary)
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = "TOP 10",
+                            color = Color(0xFF0A0A0A),
+                            fontSize = 9.5.sp,
+                            fontWeight = FontWeight.Black,
+                            letterSpacing = 0.5.sp
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                Text(
+                    text = section.title,
+                    color = TextPrimary,
+                    fontSize = 15.5.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
             Spacer(modifier = Modifier.width(8.dp))
             Text(
                 text = "${section.movies.size} ${s.moviesCountSuffix}",
@@ -1062,9 +1075,10 @@ private fun CatalogSectionRow(
             contentPadding = PaddingValues(horizontal = horizPad),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            items(section.movies, key = { it.id }) { movie ->
+            itemsIndexed(section.movies, key = { _, m -> m.id }) { idx, movie ->
                 MovieCard(
                     movie = movie,
+                    rankNumber = if (showTopTenRanks && idx < 10) idx + 1 else null,
                     onFocused = { onMovieFocused(movie) },
                     onClick = { onMovieClick(movie) }
                 )
