@@ -31,17 +31,41 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
+import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
+internal data class SavedEpisodeSubtitleBundle(
+    val movieId: String,
+    val episodeId: String,
+    val primaryLangCode: String,
+    val secondaryLangCode: String,
+    val sourceLangCode: String,
+    val sourcePlatform: String,
+    val isAiAudio: Boolean,
+    val completedAudioSlots: Set<Int>,
+    val translatedCueIds: Set<Int>,
+    val sourceCues: List<SubtitleCue>,
+    val primaryCues: List<SubtitleCue>,
+    val secondaryCues: List<SubtitleCue>,
+    val isFullyTranslated: Boolean,
+    val savedAtMs: Long
+)
+
 class ThaiSubtitleManager(
-    cacheDir: File?
+    cacheDir: File?,
+    persistentSubDir: File? = cacheDir
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val translator = SubtitleTranslator(cacheDir?.let { File(it, "phyll_sub_cache_v2") })
+    private val persistentRoot: File? = persistentSubDir ?: cacheDir
+    private val episodeSubCacheDir: File? = persistentRoot?.let { File(it, "episode_sub_cache_v1") }
+    private val episodeCacheLock = Any()
+    private val translator = SubtitleTranslator(persistentRoot?.let { File(it, "phyll_sub_cache_v2") })
     private val audioSubGenerator = GeminiAudioSubtitleGenerator(
-        cacheDir?.let { File(it, "phyll_gemini_audio_subs_v1") }
+        persistentRoot?.let { File(it, "phyll_gemini_audio_subs_v1") }
     )
     private val autoSyncEngine = SubtitleAutoSyncEngine(audioSubGenerator, cacheDir)
     private val onlineFetcher = OnlineSubtitleFetcher()
@@ -108,6 +132,18 @@ class ThaiSubtitleManager(
     @Volatile
     private var activeEpisodeRef: Episode? = null
     @Volatile
+    private var activeSourceLangCode: String = "auto"
+    @Volatile
+    private var activeSourcePlatform: String = ""
+    @Volatile
+    private var activeTranslatedCueIds: Set<Int> = emptySet()
+    @Volatile
+    private var activeIsFullyTranslated: Boolean = false
+    @Volatile
+    private var activeIsAiAudio: Boolean = false
+    @Volatile
+    private var activeCompletedAudioSlots: Set<Int> = emptySet()
+    @Volatile
     private var bilingualReferenceCues: List<SubtitleCue> = emptyList()
     private val rejectedTrackIdsForEpisode = ConcurrentHashMap.newKeySet<String>()
     private var autoSyncCallback: ((Long, Float, String, Boolean) -> Unit)? = null
@@ -119,13 +155,14 @@ class ThaiSubtitleManager(
     private var autoSyncJob: Job? = null
 
     /**
-     * PRE-FLIGHT SUBTITLE GUARANTEE (v2.3 Series-Smart):
-     * 1. If this series was locked to `preferGeminiAudioSub` (e.g. a 100-episode drama with no valid .SRT),
-     *    jumps straight to Gemini Rolling Audio-to-Thai Subtitle Generation on every episode!
+     * PRE-FLIGHT SUBTITLE GUARANTEE (v3.1.5 Persistent Sub Cache + Series-Smart):
+     * 0. Checks persistent episode subtitle storage FIRST — if this episode was already translated
+     *    in the requested language, restores instantly (<30ms) with ZERO re-download / ZERO re-translation!
+     * 1. If this series was locked to `preferGeminiAudioSub`, jumps straight to Gemini Rolling Audio
+     *    Subtitle Generation (resuming only uncompleted slots if partially saved).
      * 2. Otherwise searches OpenSubtitles.org, YIFY, OS-v3 & YouTube IN PARALLEL with stream-timeline
-     *    inspection, rejecting any wrong-length / wrong-movie .SRT candidates automatically.
-     * 3. Applies saved per-series `(syncOffsetMs, subSpeedScale)` immediately from 0:00 and verifies
-     *    via Two-Anchor Audio Alignment in the background!
+     *    inspection, rejecting wrong-length / wrong-movie .SRT candidates automatically.
+     * 3. Saves translated subtitles progressively to permanent app storage after every batch/chunk.
      */
     fun prepareForMovieBeforePlay(
         movie: MovieItem,
@@ -139,6 +176,7 @@ class ThaiSubtitleManager(
     ) {
         preFlightJob?.cancel()
         translationJob?.cancel()
+        secondaryTranslationJob?.cancel()
         liveCueJob?.cancel()
         rollingAudioJob?.cancel()
         autoSyncJob?.cancel()
@@ -147,6 +185,12 @@ class ThaiSubtitleManager(
         aiAudioSyntheticTrack = null
         activeMovieRef = movie
         activeEpisodeRef = episode
+        activeSourceLangCode = "auto"
+        activeSourcePlatform = ""
+        activeTranslatedCueIds = emptySet()
+        activeIsFullyTranslated = false
+        activeIsAiAudio = false
+        activeCompletedAudioSlots = emptySet()
         bilingualReferenceCues = emptyList()
         rejectedTrackIdsForEpisode.clear()
         autoSyncCallback = onAutoDetectedSync
@@ -168,31 +212,50 @@ class ThaiSubtitleManager(
         activeSecondaryLangCode = config.resolvedSecondaryLangCode()
         val searchDisplay = movie.originalTitle.ifBlank { movie.title }
 
-        // Fast-path for 100-episode series where viewer (or Ep 1 auto-failover) locked Gemini Audio mode!
-        if (seriesProfile?.preferGeminiAudioSub == true &&
-            geminiApiKey.isNotBlank() &&
-            movie.contentType != ContentType.LIVE_CHANNEL
-        ) {
-            startGeminiRollingAudioSubtitles(
-                movie = movie,
-                episode = episode,
-                initialPositionMs = startPositionMs,
-                config = config.copy(syncOffsetMs = 0L, subSpeedScale = 1.0f),
-                geminiApiKey = geminiApiKey,
-                onReadyToPlay = onReadyToPlay
-            )
-            return
-        }
-
-        _preFlightState.value = PreFlightSubtitleState(
-            isPreparing = true,
-            stepTitle = "🔎 Bước 1/2: Đang tìm phụ đề (${targetLang.displayName}) & khớp độ dài...",
-            stepDetail = "$searchDisplay • ${episode.name}",
-            progressFraction = 0.15f,
-            searchedQuery = searchDisplay
-        )
-
         preFlightJob = scope.launch {
+            // STEP 0: INSTANT RESTORE FROM PERSISTENT SUBTITLE STORAGE (TRANSLATE ONCE, LOAD INSTANTLY FOREVER!)
+            if (movie.contentType != ContentType.LIVE_CHANNEL) {
+                val cached = withContext(Dispatchers.IO) {
+                    loadEpisodeSubCache(movie, episode, targetLang.code)
+                }
+                if (cached != null && cached.primaryCues.size >= 3) {
+                    restoreFromSavedBundle(
+                        cached = cached,
+                        movie = movie,
+                        episode = episode,
+                        config = config,
+                        geminiApiKey = geminiApiKey,
+                        startPositionMs = startPositionMs,
+                        onReadyToPlay = onReadyToPlay
+                    )
+                    return@launch
+                }
+            }
+
+            // Fast-path for 100-episode series where viewer (or Ep 1 auto-failover) locked Gemini Audio mode!
+            if (seriesProfile?.preferGeminiAudioSub == true &&
+                geminiApiKey.isNotBlank() &&
+                movie.contentType != ContentType.LIVE_CHANNEL
+            ) {
+                startGeminiRollingAudioSubtitles(
+                    movie = movie,
+                    episode = episode,
+                    initialPositionMs = startPositionMs,
+                    config = config.copy(syncOffsetMs = 0L, subSpeedScale = 1.0f),
+                    geminiApiKey = geminiApiKey,
+                    onReadyToPlay = onReadyToPlay
+                )
+                return@launch
+            }
+
+            _preFlightState.value = PreFlightSubtitleState(
+                isPreparing = true,
+                stepTitle = "🔎 Bước 1/2: Đang tìm phụ đề (${targetLang.displayName}) & khớp độ dài...",
+                stepDetail = "$searchDisplay • ${episode.name}",
+                progressFraction = 0.15f,
+                searchedQuery = searchDisplay
+            )
+
             // 1. Discover real subtitles AND inspect stream duration IN PARALLEL (with speculative opening audio prefetch!)
             var realStreamDurationMs = 0L
             var speculativePrefetchJob: Job? = null
@@ -458,6 +521,8 @@ class ThaiSubtitleManager(
         initialPositionMs: Long = currentPositionMs,
         config: SubtitleStyleConfig,
         geminiApiKey: String,
+        preloadedSlots: Set<Int> = emptySet(),
+        preloadedCues: List<SubtitleCue> = emptyList(),
         onReadyToPlay: (() -> Unit)? = null
     ) {
         preFlightJob?.cancel()
@@ -470,6 +535,9 @@ class ThaiSubtitleManager(
         val cleanModel = config.geminiModelId.trim().removePrefix("models/").ifBlank { "gemini-3-flash-preview" }
         val targetLang = config.resolvedPrimaryLanguage()
         activePrimaryLangCode = targetLang.code
+        activeIsAiAudio = true
+        activeSourceLangCode = targetLang.code
+        activeSourcePlatform = "Gemini Audio"
         val searchDisplay = movie.originalTitle.ifBlank { movie.title }
 
         if (cleanKey.isEmpty()) {
@@ -491,7 +559,9 @@ class ThaiSubtitleManager(
         val startMs = initialPositionMs.coerceAtLeast(0L)
         currentPositionMs = startMs
         isTranslatingFlag = true
-        secondaryCues = emptyList()
+        if (preloadedCues.isEmpty()) {
+            secondaryCues = emptyList()
+        }
 
         if (onReadyToPlay != null) {
             _preFlightState.value = PreFlightSubtitleState(
@@ -502,7 +572,11 @@ class ThaiSubtitleManager(
                 searchedQuery = searchDisplay
             )
         } else {
-            currentBadge = "🎙️ Gemini ($cleanModel) đang tạo Sub ${targetLang.shortBadge}..."
+            currentBadge = if (preloadedCues.isNotEmpty()) {
+                "💾 Sub ${targetLang.shortBadge} • Đã lưu (${preloadedCues.size} câu)"
+            } else {
+                "🎙️ Gemini ($cleanModel) đang tạo Sub ${targetLang.shortBadge}..."
+            }
             refreshOverlayAt(currentPositionMs, config)
         }
 
@@ -510,8 +584,10 @@ class ThaiSubtitleManager(
             val timeline = audioSubGenerator.inspectStreamTimeline(episode)
             if (timeline == null) {
                 isTranslatingFlag = false
-                currentBadge = "⚠️ Luồng phim này không hỗ trợ tách Audio tạo Sub AI"
-                refreshOverlayAt(currentPositionMs, config)
+                if (preloadedCues.isEmpty()) {
+                    currentBadge = "⚠️ Luồng phim này không hỗ trợ tách Audio tạo Sub AI"
+                    refreshOverlayAt(currentPositionMs, config)
+                }
                 if (onReadyToPlay != null) {
                     _preFlightState.value = PreFlightSubtitleState(
                         isPreparing = false,
@@ -528,11 +604,19 @@ class ThaiSubtitleManager(
             val halfSprintMs = 30_000L // 30-second micro-sprint for ~3s instant startup & seek!
             val totalDurationMs = timeline.totalDurationMs.coerceAtLeast(slotSizeMs)
             val totalSlots = ((totalDurationMs + slotSizeMs - 1L) / slotSizeMs).toInt().coerceIn(1, 480)
-            val completedSlots = HashSet<Int>()
+            val completedSlots = HashSet<Int>(preloadedSlots)
             val failedSlotCounts = HashMap<Int, Int>()
             val inFlightJobs = HashMap<Int, Job>()
             val prefetchedSlots = HashSet<Int>()
             val accumulatedCuesBySlot = ConcurrentHashMap<Int, List<SubtitleCue>>()
+            if (preloadedCues.isNotEmpty()) {
+                val grouped = preloadedCues.groupBy { cue ->
+                    (cue.startMs.coerceAtLeast(0L) / slotSizeMs).toInt().coerceIn(0, totalSlots - 1)
+                }
+                for ((slotIdx, slotList) in grouped) {
+                    accumulatedCuesBySlot[slotIdx] = slotList
+                }
+            }
             val cacheNamespace = "${movie.id}_${episode.id}"
                 .replace(Regex("[^A-Za-z0-9_]"), "_")
                 .takeLast(48)
@@ -548,7 +632,7 @@ class ThaiSubtitleManager(
             _availableTracks.value = buildCombinedTracks()
             _selectedTrackId.value = synthTrack.id
 
-            fun rebuildMergedAiCues() {
+            fun rebuildMergedAiCues(persistToDisk: Boolean = true) {
                 val merged = accumulatedCuesBySlot.entries
                     .sortedBy { it.key }
                     .flatMap { it.value }
@@ -556,142 +640,151 @@ class ThaiSubtitleManager(
                     .mapIndexed { idx, cue -> cue.copy(id = idx + 1) }
                 sourceCues = merged
                 primaryThaiCues = merged
+                activeCompletedAudioSlots = completedSlots.toSet()
+                activeIsFullyTranslated = completedSlots.size >= totalSlots
+                activeTranslatedCueIds = merged.mapTo(HashSet()) { it.id }
                 refreshOverlayAt(currentPositionMs, config)
+                if (persistToDisk && merged.size >= 3) {
+                    persistActiveEpisodeSubtitleCacheAsync(config)
+                }
             }
 
             // 1. 30-SECOND FAST-BOOT MICRO-SPRINT:
-            // Splits initial 60s slot into Part A (0..30s) + Part B (30..60s) IN PARALLEL!
-            // Releases video playback the instant the viewer's 30s half finishes (~3-4 seconds!)
+            // Skip completely if initialSlot is ALREADY cached on disk from a previous viewing!
             val initialSlot = (startMs / slotSizeMs).toInt().coerceIn(0, totalSlots - 1)
-            val initialSlotStartMs = initialSlot * slotSizeMs
-            val initialSlotDurMs = minOf(slotSizeMs, (totalDurationMs - initialSlotStartMs).coerceAtLeast(10_000L))
-            val viewerInSecondHalf = (startMs - initialSlotStartMs) >= 26_000L && initialSlotDurMs > 36_000L
+            if (initialSlot !in completedSlots) {
+                val initialSlotStartMs = initialSlot * slotSizeMs
+                val initialSlotDurMs = minOf(slotSizeMs, (totalDurationMs - initialSlotStartMs).coerceAtLeast(10_000L))
+                val viewerInSecondHalf = (startMs - initialSlotStartMs) >= 26_000L && initialSlotDurMs > 36_000L
 
-            val sprintStartSec = ((if (viewerInSecondHalf) initialSlotStartMs + halfSprintMs else initialSlotStartMs) / 1000L)
-            val sprintEndSec = sprintStartSec + 30L
-            val sprintRangeLabel = "%02d:%02d-%02d:%02d".format(
-                sprintStartSec / 60L,
-                sprintStartSec % 60L,
-                sprintEndSec / 60L,
-                sprintEndSec % 60L
-            )
-
-            if (onReadyToPlay != null) {
-                _preFlightState.value = PreFlightSubtitleState(
-                    isPreparing = true,
-                    stepTitle = "⚡ Gemini Turbo đang tạo nhanh 30s Sub ${targetLang.displayName} ($sprintRangeLabel)...",
-                    stepDetail = "Chế độ Siêu Tốc (~3-4 giây là chiếu ngay • Các phút tiếp theo tự dịch song song ngầm)...",
-                    progressFraction = 0.76f,
-                    searchedQuery = searchDisplay
+                val sprintStartSec = ((if (viewerInSecondHalf) initialSlotStartMs + halfSprintMs else initialSlotStartMs) / 1000L)
+                val sprintEndSec = sprintStartSec + 30L
+                val sprintRangeLabel = "%02d:%02d-%02d:%02d".format(
+                    sprintStartSec / 60L,
+                    sprintStartSec % 60L,
+                    sprintEndSec / 60L,
+                    sprintEndSec % 60L
                 )
-            }
-            currentBadge = "⚡ Gemini Turbo (${targetLang.shortBadge}) $sprintRangeLabel..."
-            refreshOverlayAt(currentPositionMs, config)
-
-            // Speculatively pre-download next minute's audio while Gemini processes the opening 30s!
-            if (initialSlot + 1 < totalSlots) {
-                prefetchedSlots.add(initialSlot + 1)
-                launch(Dispatchers.IO) {
-                    audioSubGenerator.prefetchAudioWindow(
-                        timeline = timeline,
-                        windowStartMs = (initialSlot + 1) * slotSizeMs,
-                        windowDurationMs = slotSizeMs
-                    )
-                }
-            }
-
-            val firstBlockingResult: Result<GeminiAudioSubtitleGenerator.ChunkSubtitleResult>
-            if (initialSlotDurMs > 36_000L) {
-                val partADef = async(Dispatchers.IO) {
-                    audioSubGenerator.generateThaiCuesForWindow(
-                        cacheNamespace = cacheNamespace,
-                        timeline = timeline,
-                        windowStartMs = initialSlotStartMs,
-                        windowDurationMs = halfSprintMs,
-                        apiKey = cleanKey,
-                        modelId = cleanModel,
-                        preferTurboFlash = true,
-                        targetLangCode = targetLang.code
-                    )
-                }
-                val partBDef = async(Dispatchers.IO) {
-                    audioSubGenerator.generateThaiCuesForWindow(
-                        cacheNamespace = cacheNamespace,
-                        timeline = timeline,
-                        windowStartMs = initialSlotStartMs + halfSprintMs,
-                        windowDurationMs = initialSlotDurMs - halfSprintMs,
-                        apiKey = cleanKey,
-                        modelId = cleanModel,
-                        preferTurboFlash = true,
-                        targetLangCode = targetLang.code
-                    )
-                }
-
-                // Wait ONLY for the 30s half where the viewer's playhead sits!
-                firstBlockingResult = if (viewerInSecondHalf) partBDef.await() else partADef.await()
-                val firstHalfChunk = firstBlockingResult.getOrNull()
-                if (firstHalfChunk != null) {
-                    accumulatedCuesBySlot[initialSlot] = firstHalfChunk.cues
-                    rebuildMergedAiCues()
-
-                    // Complete the companion 30s half asynchronously without blocking video start!
-                    val otherDef = if (viewerInSecondHalf) partADef else partBDef
-                    inFlightJobs[initialSlot] = launch {
-                        val secondHalf = otherDef.await().getOrNull()
-                        val combinedSlotCues = (firstHalfChunk.cues + (secondHalf?.cues ?: emptyList()))
-                            .sortedBy { it.startMs }
-                        accumulatedCuesBySlot[initialSlot] = combinedSlotCues
-                        completedSlots.add(initialSlot)
-                        inFlightJobs.remove(initialSlot)
-                        rebuildMergedAiCues()
-                    }
-                } else {
-                    partADef.cancel()
-                    partBDef.cancel()
-                }
-            } else {
-                firstBlockingResult = audioSubGenerator.generateThaiCuesForWindow(
-                    cacheNamespace = cacheNamespace,
-                    timeline = timeline,
-                    windowStartMs = initialSlotStartMs,
-                    windowDurationMs = initialSlotDurMs,
-                    apiKey = cleanKey,
-                    modelId = cleanModel,
-                    preferTurboFlash = true,
-                    targetLangCode = targetLang.code
-                )
-                firstBlockingResult.getOrNull()?.let { chunk ->
-                    completedSlots.add(initialSlot)
-                    accumulatedCuesBySlot[initialSlot] = chunk.cues
-                    rebuildMergedAiCues()
-                }
-            }
-
-            if (firstBlockingResult.getOrNull() == null) {
-                isTranslatingFlag = false
-                val errMsg = firstBlockingResult.exceptionOrNull()?.message ?: "Không kết nối được Gemini API"
-                val isAuthErr = errMsg.contains("401") ||
-                    errMsg.contains("403") ||
-                    errMsg.contains("API key not valid", ignoreCase = true) ||
-                    errMsg.contains("API_KEY_INVALID", ignoreCase = true)
-                currentBadge = "⚠️ Gemini lỗi: ${errMsg.take(52)}"
-                refreshOverlayAt(currentPositionMs, config)
 
                 if (onReadyToPlay != null) {
                     _preFlightState.value = PreFlightSubtitleState(
-                        isPreparing = false,
-                        noSubtitleFound = true,
-                        needsGeminiKeyQr = isAuthErr,
-                        searchedQuery = searchDisplay,
-                        stepTitle = "⚠️ Gemini ($cleanModel) báo lỗi: ${errMsg.take(90)}",
-                        stepDetail = if (isAuthErr) {
-                            "API Key hiện tại bị từ chối (401/403). Vui lòng kiểm tra lại Gemini API Key hoặc bấm Phát luôn."
-                        } else {
-                            "Thử đổi Model khác (VD: gemini-2.5-flash) hoặc tìm Sub online theo tên tiếng Anh, hoặc bấm Phát luôn."
-                        }
+                        isPreparing = true,
+                        stepTitle = "⚡ Gemini Turbo đang tạo nhanh 30s Sub ${targetLang.displayName} ($sprintRangeLabel)...",
+                        stepDetail = "Chế độ Siêu Tốc (~3-4 giây là chiếu ngay • Các phút tiếp theo tự dịch song song ngầm)...",
+                        progressFraction = 0.76f,
+                        searchedQuery = searchDisplay
                     )
                 }
-                return@launch
+                currentBadge = "⚡ Gemini Turbo (${targetLang.shortBadge}) $sprintRangeLabel..."
+                refreshOverlayAt(currentPositionMs, config)
+
+                // Speculatively pre-download next minute's audio while Gemini processes the opening 30s!
+                if (initialSlot + 1 < totalSlots && (initialSlot + 1) !in completedSlots) {
+                    prefetchedSlots.add(initialSlot + 1)
+                    launch(Dispatchers.IO) {
+                        audioSubGenerator.prefetchAudioWindow(
+                            timeline = timeline,
+                            windowStartMs = (initialSlot + 1) * slotSizeMs,
+                            windowDurationMs = slotSizeMs
+                        )
+                    }
+                }
+
+                val firstBlockingResult: Result<GeminiAudioSubtitleGenerator.ChunkSubtitleResult>
+                if (initialSlotDurMs > 36_000L) {
+                    val partADef = async(Dispatchers.IO) {
+                        audioSubGenerator.generateThaiCuesForWindow(
+                            cacheNamespace = cacheNamespace,
+                            timeline = timeline,
+                            windowStartMs = initialSlotStartMs,
+                            windowDurationMs = halfSprintMs,
+                            apiKey = cleanKey,
+                            modelId = cleanModel,
+                            preferTurboFlash = true,
+                            targetLangCode = targetLang.code
+                        )
+                    }
+                    val partBDef = async(Dispatchers.IO) {
+                        audioSubGenerator.generateThaiCuesForWindow(
+                            cacheNamespace = cacheNamespace,
+                            timeline = timeline,
+                            windowStartMs = initialSlotStartMs + halfSprintMs,
+                            windowDurationMs = initialSlotDurMs - halfSprintMs,
+                            apiKey = cleanKey,
+                            modelId = cleanModel,
+                            preferTurboFlash = true,
+                            targetLangCode = targetLang.code
+                        )
+                    }
+
+                    // Wait ONLY for the 30s half where the viewer's playhead sits!
+                    firstBlockingResult = if (viewerInSecondHalf) partBDef.await() else partADef.await()
+                    val firstHalfChunk = firstBlockingResult.getOrNull()
+                    if (firstHalfChunk != null) {
+                        accumulatedCuesBySlot[initialSlot] = firstHalfChunk.cues
+                        rebuildMergedAiCues(persistToDisk = true)
+
+                        // Complete the companion 30s half asynchronously without blocking video start!
+                        val otherDef = if (viewerInSecondHalf) partADef else partBDef
+                        inFlightJobs[initialSlot] = launch {
+                            val secondHalf = otherDef.await().getOrNull()
+                            val combinedSlotCues = (firstHalfChunk.cues + (secondHalf?.cues ?: emptyList()))
+                                .sortedBy { it.startMs }
+                            accumulatedCuesBySlot[initialSlot] = combinedSlotCues
+                            completedSlots.add(initialSlot)
+                            inFlightJobs.remove(initialSlot)
+                            rebuildMergedAiCues(persistToDisk = true)
+                        }
+                    } else {
+                        partADef.cancel()
+                        partBDef.cancel()
+                    }
+                } else {
+                    firstBlockingResult = audioSubGenerator.generateThaiCuesForWindow(
+                        cacheNamespace = cacheNamespace,
+                        timeline = timeline,
+                        windowStartMs = initialSlotStartMs,
+                        windowDurationMs = initialSlotDurMs,
+                        apiKey = cleanKey,
+                        modelId = cleanModel,
+                        preferTurboFlash = true,
+                        targetLangCode = targetLang.code
+                    )
+                    firstBlockingResult.getOrNull()?.let { chunk ->
+                        completedSlots.add(initialSlot)
+                        accumulatedCuesBySlot[initialSlot] = chunk.cues
+                        rebuildMergedAiCues(persistToDisk = true)
+                    }
+                }
+
+                if (firstBlockingResult.getOrNull() == null && preloadedCues.isEmpty()) {
+                    isTranslatingFlag = false
+                    val errMsg = firstBlockingResult.exceptionOrNull()?.message ?: "Không kết nối được Gemini API"
+                    val isAuthErr = errMsg.contains("401") ||
+                        errMsg.contains("403") ||
+                        errMsg.contains("API key not valid", ignoreCase = true) ||
+                        errMsg.contains("API_KEY_INVALID", ignoreCase = true)
+                    currentBadge = "⚠️ Gemini lỗi: ${errMsg.take(52)}"
+                    refreshOverlayAt(currentPositionMs, config)
+
+                    if (onReadyToPlay != null) {
+                        _preFlightState.value = PreFlightSubtitleState(
+                            isPreparing = false,
+                            noSubtitleFound = true,
+                            needsGeminiKeyQr = isAuthErr,
+                            searchedQuery = searchDisplay,
+                            stepTitle = "⚠️ Gemini ($cleanModel) báo lỗi: ${errMsg.take(90)}",
+                            stepDetail = if (isAuthErr) {
+                                "API Key hiện tại bị từ chối (401/403). Vui lòng kiểm tra lại Gemini API Key hoặc bấm Phát luôn."
+                            } else {
+                                "Thử đổi Model khác (VD: gemini-2.5-flash) hoặc tìm Sub online theo tên tiếng Anh, hoặc bấm Phát luôn."
+                            }
+                        )
+                    }
+                    return@launch
+                }
+            } else {
+                rebuildMergedAiCues(persistToDisk = false)
             }
 
             val hasMoreSlots = completedSlots.size < totalSlots
@@ -967,6 +1060,10 @@ class ThaiSubtitleManager(
         val ref = track.externalRef ?: return
         _selectedTrackId.value = track.id
         sourceCues = loadedCues
+        activeSourceLangCode = ref.languageCode
+        activeSourcePlatform = ref.sourcePlatform
+        activeIsAiAudio = false
+        activeCompletedAudioSlots = emptySet()
 
         val targetLang = config.resolvedPrimaryLanguage()
         activePrimaryLangCode = targetLang.code
@@ -980,6 +1077,8 @@ class ThaiSubtitleManager(
         if (alreadyInTarget || !config.autoTranslateEnabled) {
             primaryThaiCues = loadedCues
             isTranslatingFlag = false
+            activeTranslatedCueIds = loadedCues.mapTo(HashSet()) { it.id }
+            activeIsFullyTranslated = true
             currentBadge = buildBadgeText(
                 isNativeTarget = alreadyInTarget,
                 cueCount = loadedCues.size,
@@ -992,6 +1091,7 @@ class ThaiSubtitleManager(
                 firstCueTimeMs = loadedCues.first().startMs
             )
             refreshOverlayAt(currentPositionMs, config)
+            persistActiveEpisodeSubtitleCacheAsync(config)
             onReadyToPlay()
             maybeLaunchSilentStartupAutoSync(ref, config, geminiApiKey)
             return
@@ -1024,8 +1124,12 @@ class ThaiSubtitleManager(
             geminiApiKey = geminiApiKey,
             geminiModelId = config.geminiModelId
         )
+        val translatedIdSet = HashSet<Int>(loadedCues.size)
         for (tc in translatedOpening) {
-            cueIndexMap[tc.id]?.let { pos -> workingMutable[pos] = tc }
+            cueIndexMap[tc.id]?.let { pos ->
+                workingMutable[pos] = tc
+                translatedIdSet.add(tc.id)
+            }
         }
 
         // Order remaining cues from playhead forward, then wrap around earlier cues if resumed mid-episode
@@ -1040,6 +1144,8 @@ class ThaiSubtitleManager(
         primaryThaiCues = workingMutable.toList()
         val hasMoreBatches = remainingBatches.isNotEmpty()
         isTranslatingFlag = hasMoreBatches
+        activeTranslatedCueIds = translatedIdSet.toSet()
+        activeIsFullyTranslated = !hasMoreBatches
         currentBadge = if (hasMoreBatches) {
             "Sub ${targetLang.shortBadge} • AI (${loadedCues.size} câu)"
         } else {
@@ -1052,6 +1158,7 @@ class ThaiSubtitleManager(
             firstCueTimeMs = loadedCues.first().startMs
         )
         refreshOverlayAt(currentPositionMs, config)
+        persistActiveEpisodeSubtitleCacheAsync(config)
         onReadyToPlay()
         maybeLaunchSilentStartupAutoSync(ref, config, geminiApiKey)
 
@@ -1076,22 +1183,31 @@ class ThaiSubtitleManager(
                     }
                     for (translatedBatch in waveTranslated) {
                         for (tc in translatedBatch) {
-                            cueIndexMap[tc.id]?.let { pos -> workingMutable[pos] = tc }
+                            cueIndexMap[tc.id]?.let { pos ->
+                                workingMutable[pos] = tc
+                                translatedIdSet.add(tc.id)
+                            }
                         }
                     }
                     completedBatches += wave.size
                     primaryThaiCues = workingMutable.toList()
+                    activeTranslatedCueIds = translatedIdSet.toSet()
+                    activeIsFullyTranslated = completedBatches >= remainingBatches.size
                     val pct = (((completedBatches) * 100) / remainingBatches.size).coerceAtMost(99)
                     currentBadge = "Sub ${targetLang.shortBadge} • AI ($pct%)"
                     refreshOverlayAt(currentPositionMs, config)
+                    persistActiveEpisodeSubtitleCacheAsync(config)
                 }
                 isTranslatingFlag = false
+                activeTranslatedCueIds = loadedCues.mapTo(HashSet()) { it.id }
+                activeIsFullyTranslated = true
                 currentBadge = buildBadgeText(
                     isNativeTarget = false,
                     cueCount = loadedCues.size,
                     config = config
                 )
                 refreshOverlayAt(currentPositionMs, config)
+                persistActiveEpisodeSubtitleCacheAsync(config)
             }
         }
     }
@@ -1293,6 +1409,10 @@ class ThaiSubtitleManager(
             }
 
             sourceCues = loadedCues
+            activeSourceLangCode = ref.languageCode
+            activeSourcePlatform = ref.sourcePlatform
+            activeIsAiAudio = false
+            activeCompletedAudioSlots = emptySet()
             preloadBilingualReferenceTrackAsync(ref)
             val sampleText = loadedCues.take(12).joinToString(" ") { it.text }
             val alreadyInTarget = SubtitleLanguageCatalog.isTrackMatchingLanguage(ref.languageCode, targetLang.code) ||
@@ -1302,14 +1422,19 @@ class ThaiSubtitleManager(
             if (alreadyInTarget || !config.autoTranslateEnabled) {
                 primaryThaiCues = loadedCues
                 isTranslatingFlag = false
+                activeTranslatedCueIds = loadedCues.mapTo(HashSet()) { it.id }
+                activeIsFullyTranslated = true
                 currentBadge = buildBadgeText(
                     isNativeTarget = alreadyInTarget,
                     cueCount = loadedCues.size,
                     config = config
                 )
                 refreshOverlayAt(currentPositionMs, config)
+                persistActiveEpisodeSubtitleCacheAsync(config)
             } else {
                 primaryThaiCues = loadedCues
+                activeTranslatedCueIds = emptySet()
+                activeIsFullyTranslated = false
                 currentBadge = "Sub ${targetLang.shortBadge} • AI dịch..."
                 refreshOverlayAt(currentPositionMs, config)
 
@@ -1330,30 +1455,45 @@ class ThaiSubtitleManager(
         val primaryChanged = !targetLang.code.equals(activePrimaryLangCode, ignoreCase = true)
         val secondaryChanged = !newSecLang.equals(activeSecondaryLangCode, ignoreCase = true)
 
-        if (_selectedTrackId.value?.startsWith("ai_audio_") == true && primaryChanged) {
+        // If user switches primary language, check if that language is ALREADY cached on disk for this episode!
+        if (primaryChanged) {
             val movie = activeMovieRef
             val ep = activeEpisodeRef
-            if (movie != null && ep != null && geminiApiKey.isNotBlank()) {
-                startGeminiRollingAudioSubtitles(
-                    movie = movie,
-                    episode = ep,
-                    initialPositionMs = currentPositionMs,
-                    config = config,
-                    geminiApiKey = geminiApiKey,
-                    onReadyToPlay = null
-                )
-                return
-            }
-        }
+            if (movie != null && ep != null) {
+                scope.launch {
+                    val cachedForLang = withContext(Dispatchers.IO) {
+                        loadEpisodeSubCache(movie, ep, targetLang.code)
+                    }
+                    if (cachedForLang != null && cachedForLang.primaryCues.size >= 3) {
+                        activePrimaryLangCode = targetLang.code
+                        activeSecondaryLangCode = newSecLang
+                        restoreFromSavedBundle(
+                            cached = cachedForLang,
+                            movie = movie,
+                            episode = ep,
+                            config = config,
+                            geminiApiKey = geminiApiKey,
+                            startPositionMs = currentPositionMs,
+                            onReadyToPlay = {}
+                        )
+                        return@launch
+                    }
 
-        if (sourceCues.isNotEmpty()) {
-            scope.launch {
-                val activeId = _selectedTrackId.value
-                val activeTrack = _availableTracks.value.firstOrNull { it.id == activeId }
-                val activeRef = activeTrack?.externalRef
-                if (activeTrack != null && activeRef != null) {
-                    if (primaryChanged) {
-                        // Prefer a native human track if one already exists in the newly chosen language!
+                    if (_selectedTrackId.value?.startsWith("ai_audio_") == true && geminiApiKey.isNotBlank()) {
+                        startGeminiRollingAudioSubtitles(
+                            movie = movie,
+                            episode = ep,
+                            initialPositionMs = currentPositionMs,
+                            config = config,
+                            geminiApiKey = geminiApiKey,
+                            onReadyToPlay = null
+                        )
+                        return@launch
+                    }
+
+                    val activeId = _selectedTrackId.value
+                    val activeTrack = _availableTracks.value.firstOrNull { it.id == activeId }
+                    if (activeTrack != null && activeTrack.externalRef != null) {
                         val nativeTrackForNewLang = _availableTracks.value.firstOrNull {
                             !it.isEmbedded && it.externalRef?.isAutoGenerated != true &&
                                 SubtitleLanguageCatalog.isTrackMatchingLanguage(it.languageCode, targetLang.code)
@@ -1364,11 +1504,34 @@ class ThaiSubtitleManager(
                             geminiApiKey,
                             null
                         )
-                        return@launch
+                    } else if (sourceCues.isNotEmpty()) {
+                        activePrimaryLangCode = targetLang.code
+                        translationJob?.cancel()
+                        translationJob = scope.launch {
+                            translateCuesProgressively(
+                                inputCues = sourceCues,
+                                targetLang = targetLang.code,
+                                config = config,
+                                geminiApiKey = geminiApiKey,
+                                isPrimary = true
+                            )
+                        }
                     }
+                }
+                return
+            }
+        }
+
+        if (sourceCues.isNotEmpty()) {
+            scope.launch {
+                val activeId = _selectedTrackId.value
+                val activeTrack = _availableTracks.value.firstOrNull { it.id == activeId }
+                val activeRef = activeTrack?.externalRef
+                if (activeTrack != null && activeRef != null) {
                     if (secondaryChanged || (config.dualSubEnabled && secondaryCues.isEmpty())) {
                         activeSecondaryLangCode = newSecLang
                         secondaryCues = resolveInitialSecondaryCues(activeRef, sourceCues, config, geminiApiKey)
+                        persistActiveEpisodeSubtitleCacheAsync(config)
                     }
                     currentBadge = buildBadgeText(
                         isNativeTarget = SubtitleLanguageCatalog.isTrackMatchingLanguage(activeRef.languageCode, targetLang.code),
@@ -1434,15 +1597,32 @@ class ThaiSubtitleManager(
         targetLang: String,
         config: SubtitleStyleConfig,
         geminiApiKey: String,
-        isPrimary: Boolean
+        isPrimary: Boolean,
+        existingTranslatedCues: List<SubtitleCue>? = null,
+        alreadyTranslatedIds: Set<Int> = emptySet()
     ) {
-        val batchSize = 32
-        val batches = inputCues.chunked(batchSize)
-        if (batches.isEmpty()) return
+        val workingMutable = (existingTranslatedCues ?: inputCues).toMutableList()
+        val cueIndexMap = HashMap<Int, Int>(workingMutable.size)
+        workingMutable.forEachIndexed { idx, cue -> cueIndexMap[cue.id] = idx }
 
-        val workingMutable = inputCues.toMutableList()
-        val cueIndexMap = HashMap<Int, Int>(inputCues.size)
-        inputCues.forEachIndexed { idx, cue -> cueIndexMap[cue.id] = idx }
+        val pendingCues = if (alreadyTranslatedIds.isEmpty()) {
+            inputCues
+        } else {
+            inputCues.filterNot { it.id in alreadyTranslatedIds }
+        }
+        val batchSize = 32
+        val batches = pendingCues.chunked(batchSize)
+        if (batches.isEmpty()) {
+            if (isPrimary) {
+                activeTranslatedCueIds = inputCues.mapTo(HashSet()) { it.id }
+                activeIsFullyTranslated = true
+                isTranslatingFlag = false
+                persistActiveEpisodeSubtitleCacheAsync(config)
+            }
+            return
+        }
+
+        val translatedIdSet = HashSet<Int>(alreadyTranslatedIds)
 
         val anchorMs = (currentPositionMs - 5_000L).coerceAtLeast(0L)
         val startBatchIdx = batches.indexOfFirst { batch ->
@@ -1462,13 +1642,18 @@ class ThaiSubtitleManager(
             geminiModelId = config.geminiModelId
         )
         for (tc in firstTranslated) {
-            cueIndexMap[tc.id]?.let { pos -> workingMutable[pos] = tc }
+            cueIndexMap[tc.id]?.let { pos ->
+                workingMutable[pos] = tc
+                translatedIdSet.add(tc.id)
+            }
         }
         val restIndices = orderedBatchIndices.drop(1)
         val badgeLang = SubtitleLanguageCatalog.resolve(targetLang).shortBadge
         if (isPrimary) {
             primaryThaiCues = workingMutable.toList()
             isTranslatingFlag = restIndices.isNotEmpty()
+            activeTranslatedCueIds = translatedIdSet.toSet()
+            activeIsFullyTranslated = restIndices.isEmpty()
             currentBadge = if (isTranslatingFlag) {
                 "Sub $badgeLang • AI (${inputCues.size} câu)"
             } else {
@@ -1478,6 +1663,7 @@ class ThaiSubtitleManager(
             secondaryCues = workingMutable.toList()
         }
         refreshOverlayAt(currentPositionMs, config)
+        persistActiveEpisodeSubtitleCacheAsync(config)
 
         // 2. 3-way parallel waves for all remaining batches!
         var doneCount = 1
@@ -1498,7 +1684,10 @@ class ThaiSubtitleManager(
             }
             for (translatedBatch in waveResults) {
                 for (tc in translatedBatch) {
-                    cueIndexMap[tc.id]?.let { pos -> workingMutable[pos] = tc }
+                    cueIndexMap[tc.id]?.let { pos ->
+                        workingMutable[pos] = tc
+                        translatedIdSet.add(tc.id)
+                    }
                 }
             }
             doneCount += wave.size
@@ -1506,6 +1695,8 @@ class ThaiSubtitleManager(
             if (isPrimary) {
                 primaryThaiCues = snapshot
                 isTranslatingFlag = doneCount < orderedBatchIndices.size
+                activeTranslatedCueIds = translatedIdSet.toSet()
+                activeIsFullyTranslated = !isTranslatingFlag
                 currentBadge = if (isTranslatingFlag) {
                     val pct = ((doneCount * 100) / orderedBatchIndices.size).coerceAtMost(99)
                     "Sub $badgeLang • AI ($pct%)"
@@ -1516,11 +1707,15 @@ class ThaiSubtitleManager(
                 secondaryCues = snapshot
             }
             refreshOverlayAt(currentPositionMs, config)
+            persistActiveEpisodeSubtitleCacheAsync(config)
         }
         if (isPrimary) {
             isTranslatingFlag = false
+            activeTranslatedCueIds = inputCues.mapTo(HashSet()) { it.id }
+            activeIsFullyTranslated = true
         }
         refreshOverlayAt(currentPositionMs, config)
+        persistActiveEpisodeSubtitleCacheAsync(config)
     }
 
     fun onEmbeddedPlayerCues(
@@ -1954,6 +2149,286 @@ class ThaiSubtitleManager(
                     isNearestToAnchor = (cue.id == nearestId)
                 )
             }
+    }
+
+    private suspend fun restoreFromSavedBundle(
+        cached: SavedEpisodeSubtitleBundle,
+        movie: MovieItem,
+        episode: Episode,
+        config: SubtitleStyleConfig,
+        geminiApiKey: String,
+        startPositionMs: Long,
+        onReadyToPlay: () -> Unit
+    ) {
+        val targetLang = config.resolvedPrimaryLanguage()
+        val secLang = config.resolvedSecondaryLangCode()
+        activePrimaryLangCode = targetLang.code
+        activeSecondaryLangCode = secLang
+        activeSourceLangCode = cached.sourceLangCode.ifBlank { "auto" }
+        activeSourcePlatform = cached.sourcePlatform.ifBlank { "Đã lưu" }
+        activeTranslatedCueIds = cached.translatedCueIds
+        activeIsFullyTranslated = cached.isFullyTranslated
+        activeIsAiAudio = cached.isAiAudio
+        activeCompletedAudioSlots = cached.completedAudioSlots
+
+        sourceCues = cached.sourceCues.ifEmpty { cached.primaryCues }
+        primaryThaiCues = cached.primaryCues
+
+        if (cached.isAiAudio) {
+            val synthTrack = SubtitleTrackOption(
+                id = "ai_audio_${episode.id}",
+                label = "💾 Gemini Audio -> ${targetLang.shortBadge} (Đã lưu • ${cached.primaryCues.size} câu)",
+                languageCode = targetLang.code,
+                isEmbedded = false,
+                isThai = targetLang.code == "th"
+            )
+            aiAudioSyntheticTrack = synthTrack
+            _availableTracks.value = buildCombinedTracks()
+            _selectedTrackId.value = synthTrack.id
+        } else {
+            val savedRef = ExternalSubtitleRef(
+                id = "saved_${episode.id}_${targetLang.code}",
+                label = "💾 Sub ${targetLang.shortBadge} Đã lưu (${cached.primaryCues.size} câu)",
+                languageCode = activeSourceLangCode,
+                urlOrContent = "",
+                isRawContent = false,
+                sourcePlatform = activeSourcePlatform
+            )
+            parsedExternalCuesCache[savedRef.id] = sourceCues
+            externalRefs.removeAll { it.id == savedRef.id }
+            externalRefs.add(0, savedRef)
+            _availableTracks.value = buildCombinedTracks()
+            _selectedTrackId.value = "ext_${savedRef.id}"
+        }
+
+        // Restore secondary cues cleanly (zero re-translation if secondary language matches!)
+        secondaryCues = when {
+            !config.dualSubEnabled || secLang == "off" -> emptyList()
+            cached.secondaryCues.isNotEmpty() && cached.secondaryLangCode.equals(secLang, ignoreCase = true) ->
+                cached.secondaryCues
+            secLang == "orig" || SubtitleLanguageCatalog.isTrackMatchingLanguage(activeSourceLangCode, secLang) ->
+                sourceCues
+            else -> {
+                secondaryTranslationJob?.cancel()
+                secondaryTranslationJob = scope.launch {
+                    translateCuesProgressively(
+                        inputCues = sourceCues,
+                        targetLang = secLang,
+                        config = config,
+                        geminiApiKey = geminiApiKey,
+                        isPrimary = false
+                    )
+                }
+                sourceCues
+            }
+        }
+
+        isTranslatingFlag = false
+        currentBadge = "💾 Sub ${targetLang.shortBadge} • Đã lưu (${cached.primaryCues.size} câu)"
+        _preFlightState.value = PreFlightSubtitleState(
+            isPreparing = false,
+            loadedCueCount = cached.primaryCues.size,
+            firstCueTimeMs = cached.primaryCues.firstOrNull()?.startMs ?: -1L
+        )
+        refreshOverlayAt(currentPositionMs, config)
+        onReadyToPlay()
+
+        // If a previous session was exited mid-translation, finish ONLY the remaining cues in background!
+        if (!cached.isAiAudio && !cached.isFullyTranslated && config.autoTranslateEnabled && sourceCues.isNotEmpty()) {
+            val remainingCount = sourceCues.count { it.id !in cached.translatedCueIds }
+            if (remainingCount > 0) {
+                translationJob?.cancel()
+                translationJob = scope.launch {
+                    translateCuesProgressively(
+                        inputCues = sourceCues,
+                        targetLang = targetLang.code,
+                        config = config,
+                        geminiApiKey = geminiApiKey,
+                        isPrimary = true,
+                        existingTranslatedCues = cached.primaryCues,
+                        alreadyTranslatedIds = cached.translatedCueIds
+                    )
+                }
+            }
+        } else if (cached.isAiAudio && !cached.isFullyTranslated && geminiApiKey.isNotBlank()) {
+            startGeminiRollingAudioSubtitles(
+                movie = movie,
+                episode = episode,
+                initialPositionMs = startPositionMs,
+                config = config,
+                geminiApiKey = geminiApiKey,
+                preloadedSlots = cached.completedAudioSlots,
+                preloadedCues = cached.primaryCues,
+                onReadyToPlay = null
+            )
+        }
+    }
+
+    private fun episodeSubCacheFile(movie: MovieItem, episode: Episode, primaryLangCode: String): File? {
+        val dir = episodeSubCacheDir ?: return null
+        val mId = movie.id.trim().lowercase()
+        val epId = episode.id.trim().lowercase()
+        val epName = episode.name.trim().lowercase()
+        val streamPart = if (mId.isBlank() || mId in setOf("direct", "local", "external", "custom")) {
+            episode.streamUrl.substringBefore('?').trim().lowercase()
+        } else {
+            ""
+        }
+        val rawKey = "$mId|$epId|$epName|$streamPart|${primaryLangCode.trim().lowercase()}"
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(rawKey.toByteArray(Charsets.UTF_8))
+            .take(12)
+            .joinToString("") { "%02x".format(it) }
+        return File(dir, "ep_$digest.json")
+    }
+
+    private fun persistActiveEpisodeSubtitleCacheAsync(config: SubtitleStyleConfig) {
+        val movie = activeMovieRef ?: return
+        val episode = activeEpisodeRef ?: return
+        val prim = primaryThaiCues
+        if (prim.size < 3 || episodeSubCacheDir == null) return
+
+        val bundle = SavedEpisodeSubtitleBundle(
+            movieId = movie.id,
+            episodeId = episode.id,
+            primaryLangCode = activePrimaryLangCode.ifBlank { config.resolvedPrimaryLanguage().code },
+            secondaryLangCode = activeSecondaryLangCode.ifBlank { config.resolvedSecondaryLangCode() },
+            sourceLangCode = activeSourceLangCode,
+            sourcePlatform = activeSourcePlatform,
+            isAiAudio = activeIsAiAudio,
+            completedAudioSlots = activeCompletedAudioSlots,
+            translatedCueIds = activeTranslatedCueIds,
+            sourceCues = sourceCues.ifEmpty { prim },
+            primaryCues = prim,
+            secondaryCues = secondaryCues,
+            isFullyTranslated = activeIsFullyTranslated,
+            savedAtMs = System.currentTimeMillis()
+        )
+        scope.launch(Dispatchers.IO) {
+            saveEpisodeSubCache(movie, episode, bundle)
+        }
+    }
+
+    internal fun saveEpisodeSubCache(
+        movie: MovieItem,
+        episode: Episode,
+        bundle: SavedEpisodeSubtitleBundle
+    ): Boolean {
+        val targetFile = episodeSubCacheFile(movie, episode, bundle.primaryLangCode) ?: return false
+        return runCatching {
+            synchronized(episodeCacheLock) {
+                targetFile.parentFile?.mkdirs()
+                val root = JSONObject().apply {
+                    put("v", 1)
+                    put("movieId", bundle.movieId)
+                    put("episodeId", bundle.episodeId)
+                    put("primaryLangCode", bundle.primaryLangCode)
+                    put("secondaryLangCode", bundle.secondaryLangCode)
+                    put("sourceLangCode", bundle.sourceLangCode)
+                    put("sourcePlatform", bundle.sourcePlatform)
+                    put("isAiAudio", bundle.isAiAudio)
+                    put("isFullyTranslated", bundle.isFullyTranslated)
+                    put("savedAtMs", bundle.savedAtMs)
+                    put("completedAudioSlots", JSONArray().apply {
+                        bundle.completedAudioSlots.sorted().forEach { put(it) }
+                    })
+                    put("translatedCueIds", JSONArray().apply {
+                        if (!bundle.isFullyTranslated) {
+                            bundle.translatedCueIds.forEach { put(it) }
+                        }
+                    })
+                    put("sourceCues", encodeCueListJson(bundle.sourceCues))
+                    put("primaryCues", encodeCueListJson(bundle.primaryCues))
+                    put("secondaryCues", encodeCueListJson(bundle.secondaryCues))
+                }
+                val tmp = File(targetFile.parentFile, "${targetFile.name}.tmp")
+                tmp.writeText(root.toString(), Charsets.UTF_8)
+                if (targetFile.exists()) targetFile.delete()
+                if (!tmp.renameTo(targetFile)) {
+                    targetFile.writeText(root.toString(), Charsets.UTF_8)
+                    tmp.delete()
+                }
+            }
+            true
+        }.getOrDefault(false)
+    }
+
+    internal fun loadEpisodeSubCache(
+        movie: MovieItem,
+        episode: Episode,
+        primaryLangCode: String
+    ): SavedEpisodeSubtitleBundle? {
+        val targetFile = episodeSubCacheFile(movie, episode, primaryLangCode) ?: return null
+        if (!targetFile.exists() || targetFile.length() < 20L) return null
+        return runCatching {
+            val raw = synchronized(episodeCacheLock) { targetFile.readText(Charsets.UTF_8) }
+            val obj = JSONObject(raw)
+            val primary = decodeCueListJson(obj.optJSONArray("primaryCues"))
+            if (primary.isEmpty()) return null
+            val source = decodeCueListJson(obj.optJSONArray("sourceCues")).ifEmpty { primary }
+            val secondary = decodeCueListJson(obj.optJSONArray("secondaryCues"))
+            val isFull = obj.optBoolean("isFullyTranslated", true)
+            val slots = HashSet<Int>()
+            obj.optJSONArray("completedAudioSlots")?.let { arr ->
+                for (i in 0 until arr.length()) slots.add(arr.optInt(i))
+            }
+            val transIds = if (isFull) {
+                primary.mapTo(HashSet()) { it.id }
+            } else {
+                HashSet<Int>().also { set ->
+                    obj.optJSONArray("translatedCueIds")?.let { arr ->
+                        for (i in 0 until arr.length()) set.add(arr.optInt(i))
+                    }
+                }
+            }
+            SavedEpisodeSubtitleBundle(
+                movieId = obj.optString("movieId", movie.id),
+                episodeId = obj.optString("episodeId", episode.id),
+                primaryLangCode = obj.optString("primaryLangCode", primaryLangCode),
+                secondaryLangCode = obj.optString("secondaryLangCode", ""),
+                sourceLangCode = obj.optString("sourceLangCode", "auto"),
+                sourcePlatform = obj.optString("sourcePlatform", "Đã lưu"),
+                isAiAudio = obj.optBoolean("isAiAudio", false),
+                completedAudioSlots = slots,
+                translatedCueIds = transIds,
+                sourceCues = source,
+                primaryCues = primary,
+                secondaryCues = secondary,
+                isFullyTranslated = isFull,
+                savedAtMs = obj.optLong("savedAtMs", 0L)
+            )
+        }.getOrNull()
+    }
+
+    private fun encodeCueListJson(cues: List<SubtitleCue>): JSONArray {
+        val arr = JSONArray()
+        for (c in cues) {
+            arr.put(JSONArray().apply {
+                put(c.id)
+                put(c.startMs)
+                put(c.endMs)
+                put(c.text)
+            })
+        }
+        return arr
+    }
+
+    private fun decodeCueListJson(arr: JSONArray?): List<SubtitleCue> {
+        if (arr == null || arr.length() == 0) return emptyList()
+        val list = ArrayList<SubtitleCue>(arr.length())
+        for (i in 0 until arr.length()) {
+            val row = arr.optJSONArray(i) ?: continue
+            if (row.length() < 4) continue
+            list.add(
+                SubtitleCue(
+                    id = row.optInt(0, i + 1),
+                    startMs = row.optLong(1, 0L),
+                    endMs = row.optLong(2, 0L),
+                    text = row.optString(3, "")
+                )
+            )
+        }
+        return list
     }
 
     fun clearAutoSyncFeedback() {

@@ -168,6 +168,8 @@ class MainActivity : ComponentActivity() {
                                 isTvHardware = isTvHardware,
                                 controlTargetMode = controlTargetMode,
                                 selectedTvName = selectedTvDevice?.displayTitle.orEmpty(),
+                                savedWatchProgress = watchHistory.firstOrNull { it.movieId == screen.movie.id }
+                                    ?: viewModel.prefs.getLatestMovieWatchProgress(screen.movie.id),
                                 onPlayEpisode = { ep -> viewModel.startTargetAwarePlayback(screen.movie, ep) },
                                 onPlayOnPhone = { ep -> viewModel.startPlayback(screen.movie, ep) },
                                 onPlayOnTv = { ep -> viewModel.playMovieOnSelectedTv(screen.movie, ep) },
@@ -208,7 +210,7 @@ class MainActivity : ComponentActivity() {
                                 onUpdateSubtitleConfig = viewModel::updateSubtitleStyle,
                                 onResetSubtitleConfig = viewModel.prefs::resetSubtitleConfigToThaiDefault,
                                 onSaveProgress = { pos, dur ->
-                                    viewModel.saveWatchProgress(screen.movie, screen.episode, pos, dur)
+                                    viewModel.saveWatchProgress(screen.movie, screen.episode, pos, dur, immediateCommit = true)
                                 },
                                 onSwitchEpisode = { nextEp ->
                                     viewModel.startPlayback(screen.movie, nextEp, 0L)

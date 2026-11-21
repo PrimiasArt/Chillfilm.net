@@ -165,6 +165,142 @@ export async function translateCueBatch({ cues, targetLang, geminiApiKey, gemini
   return translateWithGoogleFree(cues, langSpec.code);
 }
 
+/* ==================== PERSISTENT TRANSLATED SUBTITLE CACHE (INDEXEDDB) ==================== */
+const SUB_DB_NAME = 'chillfilm_nki_sub_cache_v1';
+const SUB_STORE_NAME = 'episode_subs';
+const MAX_CACHED_EPISODES = 160;
+let subDbPromise = null;
+
+export function buildSubCacheKey(movieSlug, episode, primaryLangCode) {
+  const m = String(movieSlug || 'unknown').trim().toLowerCase();
+  const epName = String(episode?.slug || episode?.name || '').trim().toLowerCase();
+  const urlPart = (m === 'direct' || m === 'local')
+    ? String(episode?.link_m3u8 || '').split('?')[0].trim().toLowerCase()
+    : '';
+  const lang = String(primaryLangCode || 'vi').trim().toLowerCase();
+  return `${m}|${epName}|${urlPart}|${lang}`;
+}
+
+function openSubCacheDb() {
+  if (subDbPromise) return subDbPromise;
+  if (typeof indexedDB === 'undefined') return Promise.resolve(null);
+  subDbPromise = new Promise((resolve) => {
+    try {
+      const req = indexedDB.open(SUB_DB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(SUB_STORE_NAME)) {
+          const store = db.createObjectStore(SUB_STORE_NAME, { keyPath: 'key' });
+          store.createIndex('savedAt', 'savedAt', { unique: false });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+  return subDbPromise;
+}
+
+export async function loadCachedEpisodeSub(cacheKey) {
+  if (!cacheKey) return null;
+  try {
+    const db = await openSubCacheDb();
+    if (db) {
+      const entry = await new Promise((resolve) => {
+        try {
+          const tx = db.transaction(SUB_STORE_NAME, 'readonly');
+          const req = tx.objectStore(SUB_STORE_NAME).get(cacheKey);
+          req.onsuccess = () => resolve(req.result || null);
+          req.onerror = () => resolve(null);
+        } catch {
+          resolve(null);
+        }
+      });
+      if (entry && Array.isArray(entry.primaryCues) && entry.primaryCues.length >= 3) {
+        return entry;
+      }
+    }
+  } catch {
+    // Fall through to localStorage fallback
+  }
+
+  try {
+    const raw = localStorage.getItem(`cf_sub_${cacheKey}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && Array.isArray(parsed.primaryCues) && parsed.primaryCues.length >= 3) {
+      return parsed;
+    }
+  } catch {
+    // Ignore
+  }
+  return null;
+}
+
+export async function saveCachedEpisodeSub(cacheKey, payload) {
+  if (!cacheKey || !payload || !Array.isArray(payload.primaryCues) || payload.primaryCues.length < 3) {
+    return false;
+  }
+  const record = {
+    key: cacheKey,
+    primaryLangCode: payload.primaryLangCode || 'vi',
+    secondaryLangCode: payload.secondaryLangCode || '',
+    sourceLangCode: payload.sourceLangCode || 'auto',
+    trackLabel: payload.trackLabel || 'Đã lưu',
+    sourceCues: payload.sourceCues || payload.primaryCues,
+    primaryCues: payload.primaryCues,
+    secondaryCues: payload.secondaryCues || [],
+    isFullyTranslated: Boolean(payload.isFullyTranslated),
+    translatedCount: Number(payload.translatedCount || payload.primaryCues.length),
+    savedAt: Date.now(),
+  };
+
+  try {
+    const db = await openSubCacheDb();
+    if (db) {
+      await new Promise((resolve) => {
+        try {
+          const tx = db.transaction(SUB_STORE_NAME, 'readwrite');
+          const store = tx.objectStore(SUB_STORE_NAME);
+          store.put(record);
+          // Prune oldest records if cache exceeds MAX_CACHED_EPISODES
+          const countReq = store.count();
+          countReq.onsuccess = () => {
+            if (countReq.result > MAX_CACHED_EPISODES) {
+              const idx = store.index('savedAt');
+              let toDelete = countReq.result - MAX_CACHED_EPISODES;
+              idx.openCursor().onsuccess = (ev) => {
+                const cursor = ev.target.result;
+                if (cursor && toDelete > 0) {
+                  cursor.delete();
+                  toDelete--;
+                  cursor.continue();
+                }
+              };
+            }
+          };
+          tx.oncomplete = () => resolve(true);
+          tx.onerror = () => resolve(false);
+        } catch {
+          resolve(false);
+        }
+      });
+      return true;
+    }
+  } catch {
+    // Fall back to localStorage below
+  }
+
+  try {
+    localStorage.setItem(`cf_sub_${cacheKey}`, JSON.stringify(record));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function translateWithGemini(cues, langSpec, apiKey, modelId) {
   const cleanModel = modelId.replace(/^models\//, '') || 'gemini-3-flash-preview';
   const inputPayload = cues.map((c, idx) => ({ i: idx, t: c.text.replace(/\n/g, ' ') }));

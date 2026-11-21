@@ -329,17 +329,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun quickPlayMovie(movie: MovieItem) {
-        val readyEp = movie.firstPlayableEpisode
+        val lastProgress = prefs.getLatestMovieWatchProgress(movie.id)
+        val allEps = movie.servers.flatMap { it.episodes }
+        val readyEp = if (lastProgress != null && allEps.isNotEmpty()) {
+            allEps.firstOrNull { it.id == lastProgress.episodeId || it.streamUrl == lastProgress.streamUrl }
+                ?: movie.firstPlayableEpisode
+        } else {
+            movie.firstPlayableEpisode
+        }
         if (readyEp != null) {
-            startTargetAwarePlayback(movie, readyEp)
+            val resumeMs = if (lastProgress != null &&
+                (readyEp.id == lastProgress.episodeId || readyEp.streamUrl == lastProgress.streamUrl)
+            ) {
+                (lastProgress.positionMs - 2_000L).coerceAtLeast(0L)
+            } else {
+                0L
+            }
+            startTargetAwarePlayback(movie, readyEp, resumeMs)
             return
         }
-        showBanner("⏳ Đang kết nối máy chủ phim & chuẩn bị Sub ไทย...")
+        showBanner("⏳ Đang kết nối máy chủ phim & chuẩn bị phụ đề AI...")
         viewModelScope.launch {
             val resolved = repository.resolveMovieDetail(movie, prefs.customProviders.value)
-            val ep = resolved.firstPlayableEpisode
+            val resolvedEps = resolved.servers.flatMap { it.episodes }
+            val ep = if (lastProgress != null && resolvedEps.isNotEmpty()) {
+                resolvedEps.firstOrNull { it.id == lastProgress.episodeId || it.streamUrl == lastProgress.streamUrl }
+                    ?: resolved.firstPlayableEpisode
+            } else {
+                resolved.firstPlayableEpisode
+            }
             if (ep != null) {
-                startTargetAwarePlayback(resolved, ep)
+                val resumeMs = if (lastProgress != null &&
+                    (ep.id == lastProgress.episodeId || ep.streamUrl == lastProgress.streamUrl)
+                ) {
+                    (lastProgress.positionMs - 2_000L).coerceAtLeast(0L)
+                } else {
+                    0L
+                }
+                startTargetAwarePlayback(resolved, ep, resumeMs)
             } else {
                 navigateTo(AppScreen.Detail(movie = resolved, isResolving = false))
             }
@@ -376,18 +403,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startPlayback(movie: MovieItem, episode: Episode, startPositionMs: Long = 0L) {
-        navigateTo(AppScreen.Player(movie = movie, episode = episode, startPositionMs = startPositionMs))
+        val effectiveStartMs = if (startPositionMs > 0L) {
+            startPositionMs
+        } else {
+            prefs.getEpisodeResumePositionMs(movie.id, episode.id, episode.streamUrl)
+        }
+        navigateTo(AppScreen.Player(movie = movie, episode = episode, startPositionMs = effectiveStartMs))
     }
 
     fun startTargetAwarePlayback(movie: MovieItem, episode: Episode, startPositionMs: Long = 0L) {
+        val effectiveStartMs = if (startPositionMs > 0L) {
+            startPositionMs
+        } else {
+            prefs.getEpisodeResumePositionMs(movie.id, episode.id, episode.streamUrl)
+        }
         val selectedIp = prefs.selectedTvIp.value
         if (!isTvHardware &&
             prefs.controlTargetMode.value == ControlTargetMode.REMOTE_TV &&
             selectedIp != null
         ) {
-            playMovieOnSelectedTv(movie, episode, startPositionMs)
+            playMovieOnSelectedTv(movie, episode, effectiveStartMs)
         } else {
-            startPlayback(movie, episode, startPositionMs)
+            startPlayback(movie, episode, effectiveStartMs)
         }
     }
 
@@ -531,7 +568,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         movie: MovieItem,
         episode: Episode,
         positionMs: Long,
-        durationMs: Long
+        durationMs: Long,
+        immediateCommit: Boolean = false
     ) {
         if (positionMs < 2_000L) return
         prefs.saveWatchProgress(
@@ -545,7 +583,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 episodeName = episode.name,
                 positionMs = positionMs,
                 durationMs = durationMs
-            )
+            ),
+            immediateCommit = immediateCommit
         )
     }
 

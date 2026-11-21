@@ -991,4 +991,74 @@ class SubtitleAndCatalogTest {
         assertEquals("vi", cfg.resolvedSecondaryLangCode())
         assertEquals("Tiếng Việt", cfg.resolvedSecondaryDisplayName())
     }
+
+    @Test
+    fun persistentEpisodeSubtitleCacheSavesAndRestoresInstantlyWithoutRetranslation() {
+        val tempDir = java.io.File(System.getProperty("java.io.tmpdir"), "chillfilm_sub_cache_test_${System.currentTimeMillis()}")
+        try {
+            val movie = com.phyll.filmhub.model.MovieItem(
+                id = "kkphim_test_movie_1",
+                title = "Phim Test NKI",
+                originalTitle = "NKI Cinema Test",
+                providerId = "kkphim",
+                providerName = "KKPhim"
+            )
+            val episode = com.phyll.filmhub.model.Episode(
+                id = "ep_01",
+                name = "Tập 1",
+                streamUrl = "https://cdn.example.com/token=abc123/index.m3u8"
+            )
+            val sourceCues = listOf(
+                SubtitleCue(1, 1_000L, 4_000L, "Hello everyone"),
+                SubtitleCue(2, 5_000L, 8_000L, "Welcome to ChillFilm"),
+                SubtitleCue(3, 9_000L, 12_000L, "Subtitles are cached forever")
+            )
+            val translatedVi = listOf(
+                SubtitleCue(1, 1_000L, 4_000L, "Xin chào mọi người"),
+                SubtitleCue(2, 5_000L, 8_000L, "Chào mừng tới ChillFilm"),
+                SubtitleCue(3, 9_000L, 12_000L, "Phụ đề đã được lưu vĩnh viễn")
+            )
+
+            // 1. First viewing saves translated bundle to persistent dir
+            val writerManager = ThaiSubtitleManager(cacheDir = null, persistentSubDir = tempDir)
+            val savedOk = writerManager.saveEpisodeSubCache(
+                movie = movie,
+                episode = episode,
+                bundle = com.phyll.filmhub.subtitle.SavedEpisodeSubtitleBundle(
+                    movieId = movie.id,
+                    episodeId = episode.id,
+                    primaryLangCode = "vi",
+                    secondaryLangCode = "en",
+                    sourceLangCode = "en",
+                    sourcePlatform = "OpenSubtitles",
+                    isAiAudio = false,
+                    completedAudioSlots = emptySet(),
+                    translatedCueIds = setOf(1, 2, 3),
+                    sourceCues = sourceCues,
+                    primaryCues = translatedVi,
+                    secondaryCues = sourceCues,
+                    isFullyTranslated = true,
+                    savedAtMs = System.currentTimeMillis()
+                )
+            )
+            assertTrue(savedOk)
+            writerManager.release()
+
+            // 2. Re-opening the same episode later (even with refreshed CDN token!) restores instantly from disk!
+            val readerManager = ThaiSubtitleManager(cacheDir = null, persistentSubDir = tempDir)
+            val refreshedEpisode = episode.copy(streamUrl = "https://cdn.example.com/token=NEW_TOKEN_999/index.m3u8")
+            val restored = readerManager.loadEpisodeSubCache(movie, refreshedEpisode, "vi")
+            assertNotNull(restored)
+            assertEquals(3, restored!!.primaryCues.size)
+            assertEquals("Xin chào mọi người", restored.primaryCues[0].text)
+            assertEquals("Hello everyone", restored.secondaryCues[0].text)
+            assertTrue(restored.isFullyTranslated)
+
+            // Different language must NOT collide with Vietnamese cache
+            assertNull(readerManager.loadEpisodeSubCache(movie, refreshedEpisode, "th"))
+            readerManager.release()
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
 }

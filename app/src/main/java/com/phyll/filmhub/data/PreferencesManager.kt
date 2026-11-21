@@ -88,6 +88,38 @@ class PreferencesManager(context: Context) {
     private val _seriesProfiles = MutableStateFlow(loadSeriesProfiles())
     val seriesProfiles: StateFlow<Map<String, SeriesSubtitleProfile>> = _seriesProfiles.asStateFlow()
 
+    private val episodeResumeCache: MutableMap<String, WatchProgress> = loadEpisodeResumeMap().toMutableMap()
+
+    fun getEpisodeResumePositionMs(movieId: String, episodeId: String, streamUrl: String = ""): Long {
+        val byEp = episodeResumeCache["$movieId::$episodeId"]
+            ?: episodeResumeCache.values.firstOrNull {
+                it.movieId == movieId && (it.episodeId == episodeId || (streamUrl.isNotBlank() && it.streamUrl == streamUrl))
+            }
+            ?: _watchHistory.value.firstOrNull {
+                it.movieId == movieId && (it.episodeId == episodeId || (streamUrl.isNotBlank() && it.streamUrl == streamUrl))
+            }
+            ?: return 0L
+        if (byEp.positionMs < 3_000L) return 0L
+        if (byEp.durationMs > 30_000L && byEp.positionMs >= (byEp.durationMs * 0.96).toLong()) {
+            return 0L // Finished watching (>96%), restart cleanly from beginning
+        }
+        return (byEp.positionMs - 2_000L).coerceAtLeast(0L)
+    }
+
+    fun getLatestMovieWatchProgress(movieId: String): WatchProgress? {
+        val fromHistory = _watchHistory.value.firstOrNull { it.movieId == movieId }
+        val fromMap = episodeResumeCache.values
+            .filter { it.movieId == movieId }
+            .maxByOrNull { it.updatedAt }
+        val best = when {
+            fromHistory != null && fromMap != null -> if (fromMap.updatedAt >= fromHistory.updatedAt) fromMap else fromHistory
+            else -> fromMap ?: fromHistory
+        } ?: return null
+        if (best.positionMs < 3_000L) return null
+        if (best.durationMs > 30_000L && best.positionMs >= (best.durationMs * 0.96).toLong()) return null
+        return best
+    }
+
     fun getSeriesSubtitleProfile(seriesId: String): SeriesSubtitleProfile? {
         if (seriesId.isBlank()) return null
         return _seriesProfiles.value[seriesId]
@@ -290,18 +322,42 @@ class PreferencesManager(context: Context) {
         prefs.edit().putString(KEY_UI_MODE_V25, mode.name).apply()
     }
 
-    fun saveWatchProgress(progress: WatchProgress) {
+    fun saveWatchProgress(progress: WatchProgress, immediateCommit: Boolean = false) {
         val current = _watchHistory.value.toMutableList()
         current.removeAll { it.movieId == progress.movieId }
         current.add(0, progress)
-        val trimmed = current.take(30)
+        val trimmed = current.take(40)
         _watchHistory.value = trimmed
-        prefs.edit().putString(KEY_WATCH_HISTORY, gson.toJson(trimmed)).apply()
+
+        // Also persist exact per-episode resume position so re-entering ANY movie or episode resumes seamlessly!
+        val epKey = "${progress.movieId}::${progress.episodeId}"
+        episodeResumeCache[epKey] = progress
+        if (episodeResumeCache.size > 200) {
+            val keep = episodeResumeCache.entries
+                .sortedByDescending { it.value.updatedAt }
+                .take(180)
+                .associate { it.key to it.value }
+            episodeResumeCache.clear()
+            episodeResumeCache.putAll(keep)
+        }
+
+        val editor = prefs.edit()
+            .putString(KEY_WATCH_HISTORY, gson.toJson(trimmed))
+            .putString(KEY_EPISODE_RESUME_MAP, gson.toJson(episodeResumeCache.values.toList()))
+        if (immediateCommit) {
+            editor.commit()
+        } else {
+            editor.apply()
+        }
     }
 
     fun clearWatchHistory() {
         _watchHistory.value = emptyList()
-        prefs.edit().remove(KEY_WATCH_HISTORY).apply()
+        episodeResumeCache.clear()
+        prefs.edit()
+            .remove(KEY_WATCH_HISTORY)
+            .remove(KEY_EPISODE_RESUME_MAP)
+            .apply()
     }
 
     fun toggleFavorite(movieId: String) {
@@ -442,6 +498,14 @@ class PreferencesManager(context: Context) {
             .getOrNull() ?: emptyList()
     }
 
+    private fun loadEpisodeResumeMap(): Map<String, WatchProgress> {
+        val json = prefs.getString(KEY_EPISODE_RESUME_MAP, null) ?: return emptyMap()
+        val type = object : TypeToken<List<WatchProgress>>() {}.type
+        val list = runCatching { gson.fromJson<List<WatchProgress>>(json, type) }
+            .getOrNull() ?: return emptyMap()
+        return list.associateBy { "${it.movieId}::${it.episodeId}" }
+    }
+
     private fun loadFavoriteIds(): Set<String> {
         return prefs.getStringSet(KEY_FAVORITES, emptySet())?.toSet() ?: emptySet()
     }
@@ -515,6 +579,7 @@ class PreferencesManager(context: Context) {
         private const val KEY_PROMPT_QR_ON_STARTUP = "prompt_qr_on_startup_v1"
         private const val KEY_UI_MODE_V25 = "device_ui_mode_v25"
         private const val KEY_WATCH_HISTORY = "watch_history_v1"
+        private const val KEY_EPISODE_RESUME_MAP = "episode_resume_map_v1"
         private const val KEY_FAVORITES = "favorite_movie_ids"
         private const val KEY_CUSTOM_PROVIDERS = "custom_vod_providers_v1"
         private const val KEY_SERIES_SYNC_PROFILES = "series_subtitle_profiles_v1"

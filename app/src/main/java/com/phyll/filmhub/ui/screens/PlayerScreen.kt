@@ -96,6 +96,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
@@ -105,6 +106,12 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
@@ -164,6 +171,7 @@ import com.phyll.filmhub.ui.theme.tvFocusableClickable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 @OptIn(UnstableApi::class)
@@ -198,6 +206,8 @@ fun PlayerScreen(
     val context = LocalContext.current
     val activity = context as? Activity
     val view = LocalView.current
+    val configuration = LocalConfiguration.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val isTv = LocalIsTvMode.current
     val playerScope = rememberCoroutineScope()
 
@@ -209,8 +219,10 @@ fun PlayerScreen(
     var isPlaying by remember { mutableStateOf(false) }
     var isBuffering by remember { mutableStateOf(true) }
     var playerError by remember { mutableStateOf<String?>(null) }
-    var positionMs by remember { mutableLongStateOf(startPositionMs) }
-    var durationMs by remember { mutableLongStateOf(0L) }
+    var positionMs by remember(episode.id, episode.streamUrl) { mutableLongStateOf(startPositionMs) }
+    var durationMs by remember(episode.id, episode.streamUrl) { mutableLongStateOf(0L) }
+    var pendingInitialSeekMs by remember(episode.id, episode.streamUrl) { mutableLongStateOf(startPositionMs) }
+    var resumeNoticeText by remember(episode.id, episode.streamUrl) { mutableStateOf<String?>(null) }
     var lastUserInteractionTick by remember { mutableLongStateOf(System.currentTimeMillis()) }
 
     // PrimiasArt/Chill-Player Core Features: Lock, Gestures, DSP 200% Boost + Equalizer, Aspect Ratio, Speed, Sleep Timer, PiP
@@ -236,7 +248,10 @@ fun PlayerScreen(
     val playPauseFocusRequester = remember { FocusRequester() }
 
     val subtitleManager = remember {
-        ThaiSubtitleManager(cacheDir = context.cacheDir)
+        ThaiSubtitleManager(
+            cacheDir = context.cacheDir,
+            persistentSubDir = File(context.filesDir, "chillfilm_saved_subs_v1")
+        )
     }
 
     val renderState by subtitleManager.renderState.collectAsState()
@@ -397,21 +412,96 @@ fun PlayerScreen(
         }
     }
 
+    LaunchedEffect(resumeNoticeText) {
+        if (resumeNoticeText != null) {
+            delay(3_400L)
+            resumeNoticeText = null
+        }
+    }
+
+    fun applyImmersiveFullscreen(enable: Boolean) {
+        val win = activity?.window ?: return
+        if (enable) {
+            WindowCompat.setDecorFitsSystemWindows(win, false)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                val lp = win.attributes
+                lp.layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                win.attributes = lp
+            }
+            val controller = WindowInsetsControllerCompat(win, view)
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+            @Suppress("DEPRECATION")
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                win.decorView.systemUiVisibility = (
+                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                        or View.SYSTEM_UI_FLAG_FULLSCREEN
+                        or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                        or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                    )
+            }
+        } else {
+            WindowCompat.setDecorFitsSystemWindows(win, true)
+            val controller = WindowInsetsControllerCompat(win, view)
+            controller.show(WindowInsetsCompat.Type.systemBars())
+            @Suppress("DEPRECATION")
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                win.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+            }
+        }
+    }
+
+    // Re-enforce true edge-to-edge immersive fullscreen on every orientation/HUD state change
+    // so Android notification bar, clock, battery, and nav bar NEVER linger in landscape or portrait!
+    LaunchedEffect(
+        configuration.orientation,
+        isLandscapeRotated,
+        showControls,
+        isLocked,
+        showSubtitleDrawer,
+        activeChillMenu
+    ) {
+        applyImmersiveFullscreen(true)
+    }
+
     DisposableEffect(Unit) {
         val window = activity?.window
         window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        applyImmersiveFullscreen(true)
         onDispose {
+            applyImmersiveFullscreen(false)
             window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             window?.let { win ->
                 val lp = win.attributes
                 lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
                 win.attributes = lp
             }
-            if (isLandscapeRotated) {
-                activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-            }
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             chillAudioEffects.releaseEffects()
             subtitleManager.release()
+        }
+    }
+
+    // Persist playback position immediately if app goes to background or user locks phone
+    DisposableEffect(lifecycleOwner, exoPlayer) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
+                val posNow = maxOf(exoPlayer.currentPosition.coerceAtLeast(0L), positionMs)
+                val durNow = maxOf(exoPlayer.duration.coerceAtLeast(0L), durationMs)
+                if (posNow > 2_000L) {
+                    onSaveProgress(posNow, durNow)
+                }
+            } else if (event == Lifecycle.Event.ON_RESUME) {
+                applyImmersiveFullscreen(true)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
 
@@ -424,7 +514,7 @@ fun PlayerScreen(
                 it.copy(syncOffsetMs = initialOffset, subSpeedScale = initialScale)
             }
         }
-        // Launch Pre-Flight Subtitle Discovery + Runtime Validation + AI Thai Pre-Translation BEFORE playing!
+        // Launch Pre-Flight Subtitle Discovery + Persistent Cache Restore + AI Pre-Translation BEFORE playing!
         subtitleManager.prepareForMovieBeforePlay(
             movie = movie,
             episode = episode,
@@ -452,12 +542,34 @@ fun PlayerScreen(
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
+                if (!playing) {
+                    val posNow = maxOf(exoPlayer.currentPosition.coerceAtLeast(0L), positionMs)
+                    val durNow = maxOf(exoPlayer.duration.coerceAtLeast(0L), durationMs)
+                    if (posNow > 2_000L) {
+                        onSaveProgress(posNow, durNow)
+                    }
+                }
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 isBuffering = playbackState == Player.STATE_BUFFERING
                 if (playbackState == Player.STATE_READY) {
-                    durationMs = exoPlayer.duration.coerceAtLeast(0L)
+                    val realDur = exoPlayer.duration.coerceAtLeast(0L)
+                    if (realDur > 0L) durationMs = realDur
+                    // HLS streams often ignore seekTo() issued prior to STATE_READY -> apply guaranteed seek now!
+                    if (pendingInitialSeekMs > 2_000L) {
+                        val safeTarget = if (realDur > 15_000L) {
+                            pendingInitialSeekMs.coerceAtMost(realDur - 5_000L).coerceAtLeast(0L)
+                        } else {
+                            pendingInitialSeekMs
+                        }
+                        pendingInitialSeekMs = 0L
+                        if (kotlin.math.abs(exoPlayer.currentPosition - safeTarget) > 1_500L) {
+                            exoPlayer.seekTo(safeTarget)
+                        }
+                        positionMs = safeTarget
+                        resumeNoticeText = "▶ Tiếp tục xem từ ${formatDurationMs(safeTarget)}"
+                    }
                     if (exoPlayer.audioSessionId > 0) {
                         chillAudioEffects.attachToSession(exoPlayer.audioSessionId, volumeScale, equalizerPreset)
                     }
@@ -535,7 +647,11 @@ fun PlayerScreen(
 
         onDispose {
             onReportTelemetry(CompanionPlayerTelemetry(isActive = false))
-            onSaveProgress(exoPlayer.currentPosition, exoPlayer.duration.coerceAtLeast(0L))
+            val finalPos = maxOf(exoPlayer.currentPosition.coerceAtLeast(0L), positionMs)
+            val finalDur = maxOf(exoPlayer.duration.coerceAtLeast(0L), durationMs)
+            if (finalPos > 2_000L) {
+                onSaveProgress(finalPos, finalDur)
+            }
             exoPlayer.removeListener(listener)
             exoPlayer.release()
         }
@@ -648,7 +764,9 @@ fun PlayerScreen(
                 }
             }
             "exit_player" -> {
-                onSaveProgress(exoPlayer.currentPosition, durationMs)
+                val finalPos = maxOf(exoPlayer.currentPosition.coerceAtLeast(0L), positionMs)
+                val finalDur = maxOf(exoPlayer.duration.coerceAtLeast(0L), durationMs)
+                if (finalPos > 2_000L) onSaveProgress(finalPos, finalDur)
                 onExitPlayer()
             }
         }
@@ -740,14 +858,16 @@ fun PlayerScreen(
         while (true) {
             val pos = exoPlayer.currentPosition.coerceAtLeast(0L)
             val dur = exoPlayer.duration.coerceAtLeast(0L)
-            positionMs = pos
+            if (pendingInitialSeekMs <= 2_000L || pos > 2_000L) {
+                positionMs = pos
+            }
             if (dur > 0L) durationMs = dur
-            subtitleManager.onPlaybackPosition(pos, subtitleConfig)
+            subtitleManager.onPlaybackPosition(positionMs, subtitleConfig)
 
             tickCount++
             if (tickCount % 10 == 1) {
                 cachedSnapCues = subtitleManager.getBilingualCuesForVisualSnap(
-                    aroundPositionMs = pos,
+                    aroundPositionMs = positionMs,
                     config = subtitleConfig,
                     limit = 16
                 )
@@ -766,8 +886,8 @@ fun PlayerScreen(
                         isBuffering = isBuffering,
                         isPreFlightBlocking = isPreFlightBlocking,
                         preFlightStep = preFlightState.stepTitle.ifBlank { preFlightState.stepDetail },
-                        positionMs = pos,
-                        durationMs = dur,
+                        positionMs = positionMs,
+                        durationMs = durationMs,
                         syncOffsetMs = subtitleConfig.syncOffsetMs,
                         subSpeedScale = subtitleConfig.subSpeedScale,
                         dualSubEnabled = subtitleConfig.dualSubEnabled,
@@ -780,8 +900,9 @@ fun PlayerScreen(
                     )
                 )
             }
-            if (tickCount % 120 == 0 && exoPlayer.isPlaying) {
-                onSaveProgress(pos, dur)
+            // Save watch progress every ~3 seconds so abrupt exits NEVER restart from 00:00!
+            if (tickCount % 38 == 0 && exoPlayer.isPlaying && positionMs > 2_000L) {
+                onSaveProgress(positionMs, durationMs)
             }
             delay(80L)
         }
@@ -834,7 +955,9 @@ fun PlayerScreen(
             isPreFlightBlocking -> onExitPlayer()
             showControls -> showControls = false
             else -> {
-                onSaveProgress(exoPlayer.currentPosition, durationMs)
+                val finalPos = maxOf(exoPlayer.currentPosition.coerceAtLeast(0L), positionMs)
+                val finalDur = maxOf(exoPlayer.duration.coerceAtLeast(0L), durationMs)
+                if (finalPos > 2_000L) onSaveProgress(finalPos, finalDur)
                 onExitPlayer()
             }
         }
@@ -1180,14 +1303,13 @@ fun PlayerScreen(
                         )
                     )
             ) {
-                // 5a. Clean Floating Top Bar (Back + Title + Max 3 Compact Actions)
+                // 5a. Clean Floating Top Bar (Back + Title + Max 3 Compact Actions — True Edge-to-Edge Fullscreen)
                 Row(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .fillMaxWidth()
-                        .statusBarsPadding()
                         .displayCutoutPadding()
-                        .padding(horizontal = if (isTv) 24.dp else 12.dp, vertical = 10.dp),
+                        .padding(horizontal = if (isTv) 24.dp else 14.dp, vertical = 10.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -1203,7 +1325,9 @@ fun PlayerScreen(
                                     focusedBorderColor = EmeraldNeon,
                                     unfocusedBorderColor = CinemaGlassBorder,
                                     onClick = {
-                                        onSaveProgress(exoPlayer.currentPosition, durationMs)
+                                        val finalPos = maxOf(exoPlayer.currentPosition.coerceAtLeast(0L), positionMs)
+                                        val finalDur = maxOf(exoPlayer.duration.coerceAtLeast(0L), durationMs)
+                                        if (finalPos > 2_000L) onSaveProgress(finalPos, finalDur)
                                         onExitPlayer()
                                     }
                                 )
@@ -1474,7 +1598,12 @@ fun PlayerScreen(
                                 label = "Tập sau",
                                 tint = EmeraldNeon,
                                 modifier = Modifier.weight(1f),
-                                onClick = { onSwitchEpisode(nextEpisode) }
+                                onClick = {
+                                    val finalPos = maxOf(exoPlayer.currentPosition.coerceAtLeast(0L), positionMs)
+                                    val finalDur = maxOf(exoPlayer.duration.coerceAtLeast(0L), durationMs)
+                                    if (finalPos > 2_000L) onSaveProgress(finalPos, finalDur)
+                                    onSwitchEpisode(nextEpisode)
+                                }
                             )
                         } else {
                             BottomHudActionChip(
@@ -1588,6 +1717,31 @@ fun PlayerScreen(
                     lastUserInteractionTick = System.currentTimeMillis()
                 }
             )
+        }
+
+        // Auto-Resume Toast Pill ("▶ Tiếp tục xem từ MM:SS")
+        AnimatedVisibility(
+            visible = resumeNoticeText != null && autoSyncFeedback == null && !isPreFlightBlocking,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 56.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(99.dp))
+                    .background(CinemaObsidian.copy(alpha = 0.90f))
+                    .border(1.dp, EmeraldNeon, RoundedCornerShape(99.dp))
+                    .padding(horizontal = 16.dp, vertical = 7.dp)
+            ) {
+                Text(
+                    text = resumeNoticeText.orEmpty(),
+                    color = EmeraldNeon,
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
 
         // Auto-Sync Toast Feedback Pill (visible even when OSD controls auto-hide!)

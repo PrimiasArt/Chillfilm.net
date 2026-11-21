@@ -2,8 +2,11 @@
 <html lang="vi">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#06070D" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>ChillFilm — NKI AI Cinema</title>
   <meta name="description" content="Web App xem phim độc lập thuộc hệ sinh thái NKI: trình phát Chill-Player 200% Audio Boost, phụ đề AI đa ngôn ngữ và kết nối TV tùy chọn." />
   <link rel="icon" type="image/png" href="./assets/favicon.png" />
@@ -111,6 +114,7 @@
           </div>
           <div class="hud-right">
             <button class="btn-grad" id="hudSubLangPill" style="padding:6px 12px;font-size:11.5px;">CC • VI</button>
+            <button class="icon-btn mobile-only" id="hudRotateBtn" title="Xoay ngang Toàn màn hình">↻</button>
             <button class="icon-btn" id="hudCastBtn" title="Phát lên TV (Phụ)">📡</button>
             <button class="icon-btn" id="hudMoreBtn" title="Tốc độ, Audio Boost 200%, EQ, Tỉ lệ">⋮</button>
           </div>

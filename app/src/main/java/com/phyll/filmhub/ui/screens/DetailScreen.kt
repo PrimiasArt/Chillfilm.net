@@ -57,6 +57,7 @@ import coil.compose.AsyncImage
 import com.phyll.filmhub.model.ControlTargetMode
 import com.phyll.filmhub.model.Episode
 import com.phyll.filmhub.model.MovieItem
+import com.phyll.filmhub.model.WatchProgress
 import com.phyll.filmhub.ui.theme.BrandEmeraldVioletBrush
 import com.phyll.filmhub.ui.theme.CinemaGlass
 import com.phyll.filmhub.ui.theme.CinemaGlassBorder
@@ -82,6 +83,7 @@ fun DetailScreen(
     isTvHardware: Boolean = true,
     controlTargetMode: ControlTargetMode = ControlTargetMode.LOCAL_DEVICE,
     selectedTvName: String = "",
+    savedWatchProgress: WatchProgress? = null,
     onPlayEpisode: (Episode) -> Unit,
     onPlayOnPhone: (Episode) -> Unit = onPlayEpisode,
     onPlayOnTv: (Episode) -> Unit = onPlayEpisode,
@@ -107,7 +109,24 @@ fun DetailScreen(
     ) {
         val isWide = maxWidth >= 600.dp || isTv
         val horizPad = if (isWide) 32.dp else 16.dp
-        val firstEp = movie.firstPlayableEpisode
+        val allEps = remember(movie.id, movie.servers) { movie.servers.flatMap { it.episodes } }
+        val resumeEp = remember(savedWatchProgress, allEps) {
+            if (savedWatchProgress != null) {
+                allEps.firstOrNull {
+                    it.id == savedWatchProgress.episodeId || it.streamUrl == savedWatchProgress.streamUrl
+                }
+            } else null
+        }
+        val firstEp = resumeEp ?: movie.firstPlayableEpisode
+        val primaryCtaLabel = if (resumeEp != null && savedWatchProgress != null && savedWatchProgress.positionMs >= 3_000L) {
+            val mins = savedWatchProgress.positionMs / 60_000L
+            val secs = (savedWatchProgress.positionMs / 1000L) % 60L
+            "Tiếp Tục (${resumeEp.name} • %02d:%02d)".format(mins, secs)
+        } else if (firstEp != null) {
+            "Xem Ngay (${firstEp.name})"
+        } else {
+            "Xem Ngay"
+        }
 
         // Full-bleed atmospheric backdrop header
         val heroUrl = movie.backdropUrl.ifBlank { movie.posterUrl }
@@ -409,7 +428,7 @@ fun DetailScreen(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "Xem Ngay (${firstEp.name})",
+                            text = primaryCtaLabel,
                             color = Color.White,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.ExtraBold,
@@ -472,7 +491,7 @@ fun DetailScreen(
                             Icon(Icons.Default.PlayArrow, null, tint = Color.White, modifier = Modifier.size(22.dp))
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "Xem Ngay (${firstEp.name})",
+                                text = primaryCtaLabel,
                                 color = Color.White,
                                 fontSize = 15.sp,
                                 fontWeight = FontWeight.ExtraBold
