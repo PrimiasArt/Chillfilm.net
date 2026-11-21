@@ -112,6 +112,7 @@ fun HomeScreen(
     selectedCountry: CountryCategory,
     sections: List<CatalogSection>,
     watchHistory: List<WatchProgress>,
+    myList: List<MovieItem> = emptyList(),
     isLoading: Boolean,
     searchQuery: String,
     searchResults: List<MovieItem>,
@@ -565,6 +566,23 @@ fun HomeScreen(
                                 history = watchHistory,
                                 horizPad = horizPad,
                                 onResume = onResumeHistory
+                            )
+                        }
+                    }
+
+                    if (myList.isNotEmpty() && selectedCountry == CountryCategory.ALL) {
+                        item(key = "my_list_row") {
+                            CatalogSectionRow(
+                                section = CatalogSection(
+                                    id = "my_list_cloud",
+                                    title = "❤️ My List",
+                                    subtitle = "Saved for later • Synced across Web, Android & TV",
+                                    movies = myList
+                                ),
+                                horizPad = horizPad,
+                                showTopTenRanks = false,
+                                onMovieFocused = { focused -> spotlightMovie = focused },
+                                onMovieClick = onMovieClick
                             )
                         }
                     }

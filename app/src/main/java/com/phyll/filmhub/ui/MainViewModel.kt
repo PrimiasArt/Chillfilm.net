@@ -298,7 +298,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             CloudSyncClient.pullState()
                 .onSuccess { res ->
                     prefs.mergeCloudWatchProgress(res.watchProgress)
-                    if (!silent) showBanner("☁️ Cloud Sync complete (${res.watchProgress.size} items)")
+                    val localOnlyMyList = prefs.mergeCloudMyList(res.myList)
+                    if (localOnlyMyList.isNotEmpty()) {
+                        viewModelScope.launch(Dispatchers.IO) {
+                            CloudSyncClient.pushMyListUpdates(added = localOnlyMyList)
+                        }
+                    }
+                    if (!silent) showBanner("☁️ Cloud Sync complete (${res.watchProgress.size} watched • ${res.myList.size} My List)")
                 }
                 .onFailure { err ->
                     if (!silent) showBanner("Sync error: ${err.message.orEmpty()}")
@@ -706,6 +712,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setAppLanguage(language: AppLanguage) {
         prefs.setAppLanguage(language)
+        refreshCatalog()
+    }
+
+    fun toggleMyList(movie: MovieItem) {
+        val (added, cloudItem) = prefs.toggleMyList(movie)
+        showBanner(if (added) "❤️ Saved \"${movie.title}\" to My List" else "Removed \"${movie.title}\" from My List")
+        if (CloudSyncClient.isSignedIn()) {
+            viewModelScope.launch(Dispatchers.IO) {
+                if (added) {
+                    CloudSyncClient.pushMyListUpdates(added = listOf(cloudItem))
+                } else {
+                    CloudSyncClient.pushMyListUpdates(removedKeys = listOf(cloudItem.itemKey))
+                }
+            }
+        }
     }
 
     fun startTargetAwarePlayback(movie: MovieItem, episode: Episode, startPositionMs: Long = 0L) {

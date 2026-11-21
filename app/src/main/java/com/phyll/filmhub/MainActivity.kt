@@ -85,6 +85,8 @@ class MainActivity : ComponentActivity() {
             val adminVaultSnapshot by viewModel.adminVaultSnapshot.collectAsState()
             val watchHistory by viewModel.prefs.watchHistory.collectAsState()
             val favoriteIds by viewModel.prefs.favoriteIds.collectAsState()
+            val myList by viewModel.prefs.myList.collectAsState()
+            val skipIntroSec by viewModel.prefs.skipIntroSec.collectAsState()
             val customProviders by viewModel.prefs.customProviders.collectAsState()
             val seriesProfiles by viewModel.prefs.seriesProfiles.collectAsState()
 
@@ -142,6 +144,7 @@ class MainActivity : ComponentActivity() {
                                 selectedCountry = selectedCountry,
                                 sections = sections,
                                 watchHistory = watchHistory,
+                                myList = myList,
                                 isLoading = isLoadingCatalog,
                                 searchQuery = searchQuery,
                                 searchResults = searchResults,
@@ -188,7 +191,7 @@ class MainActivity : ComponentActivity() {
                                 onPlayEpisode = { ep -> viewModel.startTargetAwarePlayback(screen.movie, ep) },
                                 onPlayOnPhone = { ep -> viewModel.startPlayback(screen.movie, ep) },
                                 onPlayOnTv = { ep -> viewModel.playMovieOnSelectedTv(screen.movie, ep) },
-                                onToggleFavorite = { viewModel.prefs.toggleFavorite(screen.movie.id) },
+                                onToggleFavorite = { viewModel.toggleMyList(screen.movie) },
                                 onOpenQrCompanion = { viewModel.setQrDialogVisible(true) },
                                 onBack = { viewModel.navigateBack() }
                             )
@@ -328,6 +331,7 @@ class MainActivity : ComponentActivity() {
                             remoteCommand = remotePlayerCommand,
                             isTvHardware = isTvHardware,
                             isMinimized = isPlayerMinimized,
+                            skipIntroSec = skipIntroSec,
                             modifier = if (isPlayerMinimized) {
                                 Modifier.align(Alignment.BottomEnd)
                             } else {

@@ -98,8 +98,22 @@ data class CloudCatalogFeedResult(
     val extraSourceRows: List<CloudCatalogRow>
 )
 
+data class CloudMyListItem(
+    val itemKey: String,
+    val source: String = "phimapi",
+    val sourceId: String = "",
+    val slug: String,
+    val name: String,
+    val originName: String = "",
+    val poster: String = "",
+    val year: String = "",
+    val quality: String = "HD",
+    val addedAt: Long = System.currentTimeMillis()
+)
+
 data class CloudSyncPullResult(
     val watchProgress: List<WatchProgress>,
+    val myList: List<CloudMyListItem> = emptyList(),
     val serverTime: Long
 )
 
@@ -135,6 +149,9 @@ object CloudSyncClient {
 
     @Volatile
     var defaultModel: String = "gemini-3-flash-preview"
+
+    @Volatile
+    var activeLangCode: String = "en"
 
     fun applySession(session: CloudSession?) {
         if (session == null || session.token.isBlank()) {
@@ -511,9 +528,28 @@ object CloudSyncClient {
                         servers.add(ServerGroup(sObj.optString("server_name", movie.providerName), eps))
                     }
                 }
+                val prefLang = activeLangCode.lowercase()
+                val rawName = d.optString("name").trim()
+                val nameVi = d.optString("nameVi").trim()
+                val nameEn = d.optString("nameEn").trim()
+                val localizedTitle = when {
+                    prefLang == "vi" && nameVi.isNotEmpty() -> nameVi
+                    prefLang != "zh" && nameEn.isNotEmpty() -> nameEn
+                    rawName.isNotEmpty() -> rawName
+                    else -> movie.title
+                }
+                val contentVi = d.optString("contentVi").trim()
+                val contentEn = d.optString("contentEn").trim()
+                val localizedDesc = when {
+                    prefLang == "vi" && contentVi.isNotEmpty() -> contentVi
+                    prefLang != "zh" && contentEn.isNotEmpty() -> contentEn
+                    else -> d.optString("content").trim()
+                }.ifBlank { movie.description }
+
                 movie.copy(
+                    title = localizedTitle,
                     originalTitle = d.optString("origin_name").ifBlank { movie.originalTitle },
-                    description = d.optString("content").ifBlank { movie.description },
+                    description = localizedDesc,
                     duration = d.optString("time").ifBlank { movie.duration },
                     imdbId = d.optString("imdbId").ifBlank { movie.imdbId },
                     servers = servers
@@ -528,7 +564,15 @@ object CloudSyncClient {
         for (i in 0 until arr.length()) {
             val m = arr.optJSONObject(i) ?: continue
             val slug = m.optString("slug").trim()
-            val name = m.optString("name").trim()
+            val rawName = m.optString("name").trim()
+            val nameVi = m.optString("nameVi").trim()
+            val nameEn = m.optString("nameEn").trim()
+            val prefLang = activeLangCode.lowercase()
+            val name = when {
+                prefLang == "vi" && nameVi.isNotEmpty() -> nameVi
+                prefLang != "zh" && nameEn.isNotEmpty() -> nameEn
+                else -> rawName
+            }.ifBlank { rawName }
             if (slug.isEmpty() || name.isEmpty()) continue
             val src = m.optString("source", "phimapi").trim().lowercase()
             val srcId = m.optString("sourceId", "").trim()
@@ -557,8 +601,15 @@ object CloudSyncClient {
                 "single" -> ContentType.MOVIE
                 else -> ContentType.SERIES
             }
-            val desc = m.optString("content").trim().ifBlank {
-                "${m.optString("origin_name").trim().ifBlank { name }} (${m.optString("year", "2026")}) • $genres"
+            val contentVi = m.optString("contentVi").trim()
+            val contentEn = m.optString("contentEn").trim()
+            val rawDesc = when {
+                prefLang == "vi" && contentVi.isNotEmpty() -> contentVi
+                prefLang != "zh" && contentEn.isNotEmpty() -> contentEn
+                else -> m.optString("content").trim()
+            }
+            val desc = rawDesc.ifBlank {
+                "${m.optString("origin_name").trim().ifBlank { rawName }} (${m.optString("year", "2026")}) • $genres"
             }
             val directServers = if (src == "direct" && streamUrl.isNotEmpty()) {
                 listOf(ServerGroup(srcName, listOf(Episode(id = "${slug}_live", name = "Live", streamUrl = streamUrl))))
@@ -620,11 +671,71 @@ object CloudSyncClient {
                     )
                 )
             }
+            val myArr = obj.optJSONArray("myList") ?: JSONArray()
+            val myItems = ArrayList<CloudMyListItem>(myArr.length())
+            for (i in 0 until myArr.length()) {
+                val r = myArr.optJSONObject(i) ?: continue
+                val slug = r.optString("slug").trim()
+                if (slug.isEmpty()) continue
+                val src = r.optString("source", "phimapi").trim().lowercase()
+                val srcId = r.optString("sourceId", "").trim()
+                myItems.add(
+                    CloudMyListItem(
+                        itemKey = r.optString("itemKey", "$src::$srcId::$slug"),
+                        source = src,
+                        sourceId = srcId,
+                        slug = slug,
+                        name = r.optString("name", slug),
+                        originName = r.optString("origin_name", ""),
+                        poster = r.optString("poster", ""),
+                        year = r.optString("year", ""),
+                        quality = r.optString("quality", "HD"),
+                        addedAt = r.optLong("addedAt", System.currentTimeMillis())
+                    )
+                )
+            }
             CloudSyncPullResult(
                 watchProgress = list,
+                myList = myItems,
                 serverTime = obj.optLong("serverTime", System.currentTimeMillis())
             )
         }
+    }
+
+    suspend fun pushMyListUpdates(
+        added: List<CloudMyListItem> = emptyList(),
+        removedKeys: List<String> = emptyList()
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (!isSignedIn() || (added.isEmpty() && removedKeys.isEmpty())) return@withContext false
+        runCatching {
+            val body = JSONObject()
+            if (added.isNotEmpty()) {
+                val arr = JSONArray()
+                for (it in added.take(100)) {
+                    arr.put(
+                        JSONObject()
+                            .put("itemKey", it.itemKey)
+                            .put("source", it.source)
+                            .put("sourceId", it.sourceId)
+                            .put("slug", it.slug)
+                            .put("name", it.name)
+                            .put("origin_name", it.originName)
+                            .put("poster", it.poster)
+                            .put("year", it.year)
+                            .put("quality", it.quality)
+                            .put("addedAt", it.addedAt)
+                    )
+                }
+                body.put("myList", arr)
+            }
+            if (removedKeys.isNotEmpty()) {
+                val remArr = JSONArray()
+                removedKeys.take(100).forEach { remArr.put(it) }
+                body.put("myListRemoved", remArr)
+            }
+            postJson("/api/sync/state", body, requireAuth = true)
+            true
+        }.getOrDefault(false)
     }
 
     suspend fun pushWatchProgress(items: List<WatchProgress>): Boolean = withContext(Dispatchers.IO) {

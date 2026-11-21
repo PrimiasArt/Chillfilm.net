@@ -6,11 +6,13 @@ import android.content.res.Configuration
 import android.util.Base64
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
+import com.phyll.filmhub.cloud.CloudMyListItem
 import com.phyll.filmhub.cloud.CloudSession
 import com.phyll.filmhub.cloud.CloudSyncClient
 import com.phyll.filmhub.model.ControlTargetMode
 import com.phyll.filmhub.model.DeviceUiMode
 import com.phyll.filmhub.model.ManagedTvDevice
+import com.phyll.filmhub.model.MovieItem
 import com.phyll.filmhub.model.SeriesSubtitleProfile
 import com.phyll.filmhub.model.SubtitleColorChoice
 import com.phyll.filmhub.model.SubtitleEdgeStyle
@@ -79,8 +81,17 @@ class PreferencesManager(context: Context) {
     private val _deviceUiMode = MutableStateFlow(loadDeviceUiMode())
     val deviceUiMode: StateFlow<DeviceUiMode> = _deviceUiMode.asStateFlow()
 
-    private val _appLanguage = MutableStateFlow(loadAppLanguage())
+    private val _appLanguage = MutableStateFlow(loadAppLanguage().also { CloudSyncClient.activeLangCode = it.code })
     val appLanguage: StateFlow<AppLanguage> = _appLanguage.asStateFlow()
+
+    private val _skipIntroSec = MutableStateFlow(prefs.getInt(KEY_SKIP_INTRO_SEC, 85).coerceIn(10, 300))
+    val skipIntroSec: StateFlow<Int> = _skipIntroSec.asStateFlow()
+
+    fun setSkipIntroSec(seconds: Int) {
+        val clamped = seconds.coerceIn(10, 300)
+        _skipIntroSec.value = clamped
+        prefs.edit().putInt(KEY_SKIP_INTRO_SEC, clamped).apply()
+    }
 
     private val _cloudSession = MutableStateFlow(loadCloudSession().also { CloudSyncClient.applySession(it) })
     val cloudSession: StateFlow<CloudSession?> = _cloudSession.asStateFlow()
@@ -99,6 +110,7 @@ class PreferencesManager(context: Context) {
 
     fun setAppLanguage(language: AppLanguage) {
         _appLanguage.value = language
+        CloudSyncClient.activeLangCode = language.code
         prefs.edit().putString(KEY_APP_UI_LANGUAGE, language.code).commit()
     }
 
@@ -107,6 +119,9 @@ class PreferencesManager(context: Context) {
 
     private val _favoriteIds = MutableStateFlow(loadFavoriteIds())
     val favoriteIds: StateFlow<Set<String>> = _favoriteIds.asStateFlow()
+
+    private val _myList = MutableStateFlow(loadMyList())
+    val myList: StateFlow<List<MovieItem>> = _myList.asStateFlow()
 
     private val _customProviders = MutableStateFlow(loadCustomProviders())
     val customProviders: StateFlow<List<VodProviderConfig>> = _customProviders.asStateFlow()
@@ -478,6 +493,95 @@ class PreferencesManager(context: Context) {
         prefs.edit().putStringSet(KEY_FAVORITES, updated).apply()
     }
 
+    fun toCloudMyListItem(movie: MovieItem, addedAt: Long = System.currentTimeMillis()): CloudMyListItem {
+        val src = movie.providerId.removePrefix("cloud_").let {
+            if (it == "modern_vod" || it.isBlank()) "phimapi" else it
+        }
+        val parts = (movie.detailLookupId ?: movie.id).split("|", limit = 2)
+        val slug = CloudSyncClient.normalizeMovieSlug(parts[0])
+        val srcId = if (parts.size > 1) parts[1] else ""
+        return CloudMyListItem(
+            itemKey = "$src::$srcId::$slug",
+            source = src,
+            sourceId = srcId,
+            slug = slug,
+            name = movie.title,
+            originName = movie.originalTitle,
+            poster = movie.posterUrl,
+            year = movie.year,
+            quality = movie.quality,
+            addedAt = addedAt
+        )
+    }
+
+    fun toggleMyList(movie: MovieItem): Pair<Boolean, CloudMyListItem> {
+        val cloudItem = toCloudMyListItem(movie)
+        val current = _myList.value.toMutableList()
+        val existingIdx = current.indexOfFirst {
+            it.id == movie.id || toCloudMyListItem(it).itemKey == cloudItem.itemKey
+        }
+        val favs = _favoriteIds.value.toMutableSet()
+        val added: Boolean
+        if (existingIdx >= 0) {
+            val removed = current.removeAt(existingIdx)
+            favs.remove(movie.id)
+            favs.remove(removed.id)
+            added = false
+        } else {
+            current.add(0, movie.copy(servers = emptyList()))
+            favs.add(movie.id)
+            added = true
+        }
+        val trimmed = current.take(150)
+        _myList.value = trimmed
+        _favoriteIds.value = favs
+        prefs.edit()
+            .putString(KEY_MY_LIST_V1, gson.toJson(trimmed))
+            .putStringSet(KEY_FAVORITES, favs)
+            .apply()
+        return added to cloudItem
+    }
+
+    fun mergeCloudMyList(remoteItems: List<CloudMyListItem>): List<CloudMyListItem> {
+        val byKey = LinkedHashMap<String, MovieItem>()
+        val favs = _favoriteIds.value.toMutableSet()
+        for (r in remoteItems) {
+            val providerId = if (r.source == "phimapi") "modern_vod" else "cloud_${r.source}"
+            val id = if (r.source == "phimapi") "modern_${r.slug}" else "${providerId}_${r.sourceId}_${r.slug}"
+            val lookup = if (r.sourceId.isNotBlank() && r.source != "phimapi") "${r.slug}|${r.sourceId}" else r.slug
+            byKey[r.itemKey] = MovieItem(
+                id = id,
+                title = r.name,
+                originalTitle = r.originName,
+                year = r.year,
+                quality = r.quality,
+                posterUrl = r.poster,
+                backdropUrl = r.poster,
+                providerId = providerId,
+                providerName = "My List",
+                detailLookupId = lookup
+            )
+            favs.add(id)
+        }
+        val localOnly = ArrayList<CloudMyListItem>()
+        for (local in _myList.value) {
+            val c = toCloudMyListItem(local)
+            if (!byKey.containsKey(c.itemKey)) {
+                byKey[c.itemKey] = local
+                localOnly.add(c)
+                favs.add(local.id)
+            }
+        }
+        val merged = byKey.values.toList().take(150)
+        _myList.value = merged
+        _favoriteIds.value = favs
+        prefs.edit()
+            .putString(KEY_MY_LIST_V1, gson.toJson(merged))
+            .putStringSet(KEY_FAVORITES, favs)
+            .apply()
+        return localOnly
+    }
+
     fun addCustomProvider(provider: VodProviderConfig) {
         val current = _customProviders.value.toMutableList()
         current.removeAll { it.id == provider.id || it.baseUrl.equals(provider.baseUrl, ignoreCase = true) }
@@ -619,6 +723,13 @@ class PreferencesManager(context: Context) {
         return prefs.getStringSet(KEY_FAVORITES, emptySet())?.toSet() ?: emptySet()
     }
 
+    private fun loadMyList(): List<MovieItem> {
+        val json = prefs.getString(KEY_MY_LIST_V1, null) ?: return emptyList()
+        val type = object : TypeToken<List<MovieItem>>() {}.type
+        return runCatching { gson.fromJson<List<MovieItem>>(json, type) }
+            .getOrNull() ?: emptyList()
+    }
+
     private fun loadCustomProviders(): List<VodProviderConfig> {
         val json = prefs.getString(KEY_CUSTOM_PROVIDERS, null) ?: return emptyList()
         val type = object : TypeToken<List<VodProviderConfig>>() {}.type
@@ -713,6 +824,8 @@ class PreferencesManager(context: Context) {
         private const val KEY_WATCH_HISTORY = "watch_history_v1"
         private const val KEY_EPISODE_RESUME_MAP = "episode_resume_map_v1"
         private const val KEY_FAVORITES = "favorite_movie_ids"
+        private const val KEY_MY_LIST_V1 = "my_list_movies_v1"
+        private const val KEY_SKIP_INTRO_SEC = "skip_intro_sec_v1"
         private const val KEY_CUSTOM_PROVIDERS = "custom_vod_providers_v1"
         private const val KEY_SERIES_SYNC_PROFILES = "series_subtitle_profiles_v1"
     }

@@ -1,6 +1,6 @@
 {
-  "versionName": "3.0.1",
-  "versionCode": 101,
+  "versionName": "3.2.0",
+  "versionCode": 110,
   "downloadUrl": "https://github.com/PrimiasArt/Chillfilm.net/releases/download/android-apk-latest/ChillFilm-latest.apk",
-  "releaseNotes": "ChillFilm 2026 (Emerald x Violet + Chill-Player Engine + In-App Updater + Remote TV Manager)"
+  "releaseNotes": "ChillFilm 3.2.0: Multi-Source Auto-Crawled Bilingual Cinema, My List Cloud Sync (Web <-> Android <-> TV), Skip Intro (+85s) & Auto-Next 5s Countdown, Hard VN-Safe Filter"
 }

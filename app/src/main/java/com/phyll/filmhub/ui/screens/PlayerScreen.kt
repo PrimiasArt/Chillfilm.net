@@ -192,6 +192,7 @@ fun PlayerScreen(
     remoteCommand: PlayerRemoteCommand? = null,
     isTvHardware: Boolean = false,
     isMinimized: Boolean = false,
+    skipIntroSec: Int = 85,
     modifier: Modifier = Modifier,
     onSaveGeminiKeyInline: (String, String) -> Unit = { _, _ -> },
     onConsumeRemoteCommand: (Long) -> Unit = {},
@@ -232,6 +233,9 @@ fun PlayerScreen(
     var durationMs by remember(episode.id, episode.streamUrl) { mutableLongStateOf(0L) }
     var pendingInitialSeekMs by remember(episode.id, episode.streamUrl) { mutableLongStateOf(startPositionMs) }
     var resumeNoticeText by remember(episode.id, episode.streamUrl) { mutableStateOf<String?>(null) }
+    var skipIntroDismissed by remember(episode.id, episode.streamUrl) { mutableStateOf(false) }
+    var autoNextCancelled by remember(episode.id, episode.streamUrl) { mutableStateOf(false) }
+    var autoNextCountdownSec by remember(episode.id, episode.streamUrl) { mutableIntStateOf(0) }
     var lastUserInteractionTick by remember { mutableLongStateOf(System.currentTimeMillis()) }
 
     // PrimiasArt/Chill-Player Core Features: Lock, Gestures, DSP 200% Boost + Equalizer, Aspect Ratio, Speed, Sleep Timer, PiP
@@ -596,6 +600,10 @@ fun PlayerScreen(
                     }
                     if (exoPlayer.audioSessionId > 0) {
                         chillAudioEffects.attachToSession(exoPlayer.audioSessionId, volumeScale, equalizerPreset)
+                    }
+                } else if (playbackState == Player.STATE_ENDED) {
+                    if (nextEpisode != null && !autoNextCancelled && autoNextCountdownSec <= 0) {
+                        autoNextCountdownSec = 5
                     }
                 }
             }
@@ -1236,6 +1244,158 @@ fun PlayerScreen(
                 config = subtitleConfig,
                 previewSampleWhenEmpty = showSubtitleDrawer
             )
+        }
+
+        // 2a. Auto-Next 5s Countdown Trigger + Floating Skip Intro (+85s customizable) & Auto-Next Overlays
+        LaunchedEffect(positionMs, durationMs, nextEpisode?.id, autoNextCancelled, isMinimized) {
+            if (!isMinimized && nextEpisode != null && !autoNextCancelled && autoNextCountdownSec == 0) {
+                if (durationMs > 45_000L && (durationMs - positionMs) in 1_000L..15_000L) {
+                    autoNextCountdownSec = 5
+                }
+            }
+        }
+        LaunchedEffect(autoNextCountdownSec, nextEpisode?.id) {
+            val targetNext = nextEpisode
+            if (autoNextCountdownSec > 0 && targetNext != null) {
+                delay(1_000L)
+                if (autoNextCountdownSec == 1) {
+                    autoNextCountdownSec = 0
+                    val finalPos = maxOf(exoPlayer.currentPosition.coerceAtLeast(0L), positionMs)
+                    val finalDur = maxOf(exoPlayer.duration.coerceAtLeast(0L), durationMs)
+                    if (finalPos > 2_000L) onSaveProgress(finalPos, finalDur)
+                    onSwitchEpisode(targetNext)
+                } else if (autoNextCountdownSec > 1) {
+                    autoNextCountdownSec -= 1
+                }
+            }
+        }
+
+        val effectiveSkipSec = skipIntroSec.coerceIn(10, 300)
+        val maxIntroWindowMs = maxOf(180_000L, (effectiveSkipSec + 95) * 1000L)
+        val showSkipIntroPill = !isMinimized &&
+            !isPreFlightBlocking &&
+            !isLocked &&
+            !skipIntroDismissed &&
+            autoNextCountdownSec == 0 &&
+            positionMs in 3_000L..maxIntroWindowMs &&
+            (durationMs == 0L || durationMs > (effectiveSkipSec + 50) * 1000L)
+
+        if (showSkipIntroPill) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 20.dp, bottom = if (showControls) 112.dp else 28.dp)
+                    .tvFocusableClickable(
+                        shape = RoundedCornerShape(99.dp),
+                        focusedBorderColor = EmeraldNeon,
+                        unfocusedBorderColor = Color.White.copy(alpha = 0.35f),
+                        onClick = {
+                            val target = (exoPlayer.currentPosition + effectiveSkipSec * 1000L).let {
+                                if (durationMs > 10_000L) it.coerceAtMost(durationMs - 5_000L) else it
+                            }
+                            exoPlayer.seekTo(target)
+                            positionMs = target
+                            skipIntroDismissed = true
+                        }
+                    )
+                    .background(Color(0x9910121A))
+                    .padding(horizontal = 15.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(
+                    text = "Skip Intro (+${effectiveSkipSec}s)",
+                    color = Color.White,
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.ExtraBold
+                )
+                Icon(
+                    imageVector = Icons.Default.SkipNext,
+                    contentDescription = "Skip Intro",
+                    tint = EmeraldNeon,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+
+        if (!isMinimized && autoNextCountdownSec > 0 && nextEpisode != null) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 20.dp, bottom = 112.dp)
+                    .width(268.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .border(1.dp, EmeraldNeon.copy(alpha = 0.65f), RoundedCornerShape(14.dp))
+                    .background(Color(0xCC10121A))
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "NEXT EPISODE IN ${autoNextCountdownSec}s",
+                    color = EmeraldNeon,
+                    fontSize = 10.5.sp,
+                    fontWeight = FontWeight.Black,
+                    letterSpacing = 0.8.sp
+                )
+                Text(
+                    text = "${movie.title} • ${nextEpisode.name}",
+                    color = Color.White,
+                    fontSize = 13.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .tvFocusableClickable(
+                                shape = RoundedCornerShape(8.dp),
+                                focusedBorderColor = Color.White,
+                                unfocusedBorderColor = EmeraldNeon,
+                                onClick = {
+                                    autoNextCountdownSec = 0
+                                    val finalPos = maxOf(exoPlayer.currentPosition.coerceAtLeast(0L), positionMs)
+                                    val finalDur = maxOf(exoPlayer.duration.coerceAtLeast(0L), durationMs)
+                                    if (finalPos > 2_000L) onSaveProgress(finalPos, finalDur)
+                                    onSwitchEpisode(nextEpisode)
+                                }
+                            )
+                            .background(EmeraldPrimary)
+                            .padding(vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "▶ Watch Now",
+                            color = Color(0xFF06120A),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Black
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .tvFocusableClickable(
+                                shape = RoundedCornerShape(8.dp),
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = Color.White.copy(alpha = 0.25f),
+                                onClick = {
+                                    autoNextCancelled = true
+                                    autoNextCountdownSec = 0
+                                }
+                            )
+                            .background(Color(0x33FFFFFF))
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "Cancel",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
         }
 
         // 2b. Floating Bottom-Right Pop-out Mini-Player Controls (Tap to expand, X to close!)

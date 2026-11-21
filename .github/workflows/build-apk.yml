@@ -45,9 +45,9 @@ jobs:
             "versionCode": ${VERSION_CODE},
             "buildTime": "${BUILD_TIME}",
             "downloadUrl": "https://github.com/PrimiasArt/Chillfilm.net/releases/download/android-apk-latest/ChillFilm-latest.apk",
-            "webAppUrl": "https://primiasart.github.io/Chillfilm.net/",
+            "webAppUrl": "https://chillfilm.vercel.app/",
             "commit": "${{ github.sha }}",
-            "releaseNotes": "ChillFilm x NKI v${VERSION_NAME} (Build ${VERSION_CODE}) • Responsive Mobile UI, Universal AI Multi-Language Subtitles & Standalone Web App"
+            "releaseNotes": "ChillFilm x NKI v${VERSION_NAME} (Build ${VERSION_CODE}) • Global Multi-Source Auto-Crawler (Bilingual EN/VI), My List Cloud Sync, Skip Intro (+85s) & Auto-Next 5s, Hard VN-Safe Filter"
           }
           EOF
           cat version.json
@@ -90,11 +90,10 @@ jobs:
             - **Phiên bản:** `v${{ steps.ver.outputs.version_name }}` (`versionCode: ${{ steps.ver.outputs.version_code }}`)
             - **Chữ ký cố định (`chillfilm.keystore`):** Cài đè bản mới trực tiếp **không mất API Key, cài đặt phụ đề hay lịch sử xem phim**.
             - **Nâng cấp lớn trong bản này:**
-              - 🏷 **Bộ nhận diện ChillFilm × NKI**: Logo ứng dụng & TV Banner tùy biến trực tiếp từ biểu tượng **NKI** trên nền 2026 Xanh Lục (Emerald) × Tím (Violet).
-              - 📱 **Tái thiết kế 100% Responsive cho Điện thoại**: Khắc phục triệt để vỡ khung/tràn chữ ở Menu, Chi Tiết, Cài Đặt và Trình phát Video (safe-area tai thỏ/thanh điều hướng, điều khiển phát đặt giữa màn hình, tối giản không rối mắt).
-              - 🌐 **Phụ đề AI Đa Ngôn Ngữ Toàn Cầu**: Không còn giới hạn tiếng Thái — chọn dịch & nghe phim tạo phụ đề sang **mọi ngôn ngữ AI hỗ trợ** (Việt, Anh, Thái, Hàn, Nhật, Trung, Pháp, Đức, Tây Ban Nha... hoặc tự nhập bất kỳ ngôn ngữ nào).
-              - 💻 **Standalone Web App cho PC & Mobile Browser**: Xem trực tiếp trên trình duyệt tại `https://primiasart.github.io/Chillfilm.net/` (kèm Chill-Player Audio Boost 200%, Equalizer, phụ đề AI đa ngôn ngữ).
-              - 📡 **Stream / Cast lên TV** gọn gàng như tính năng phụ tùy chọn.
+              - 🌐 **Kho phim Đa Nguồn Toàn Cầu & Tự động dịch Song ngữ Anh/Việt**: Đồng bộ 10 nguồn phim sạch (KKPhim 36 quốc gia + 5 nguồn MacCMS quốc tế + Internet Archive + Live Cinema), tự kiểm tra & cào phim mới mỗi 3 giờ, chặn 100% phim sex/cấp 3/phim cấm VN (vẫn cho phép phim 18+ hợp pháp).
+              - ❤️ **My List & Lịch sử xem đồng bộ Cloud 2 chiều (Web ↔ Android ↔ Smart TV)** qua NKI Cloud (Neon Postgres + Vercel Blob).
+              - ⏭ **Skip Intro (+85s) & Tự chuyển tập (Auto-Next 5s)** trực tiếp trong Chill-Player kèm Audio Boost 200%, Equalizer & Phụ đề AI đa ngôn ngữ.
+              - 💻 **Web App đồng bộ đầy đủ (có cả Phòng xem chung Watch Party):** https://chillfilm.vercel.app/
 
             👉 Tải **`ChillFilm-latest.apk`** (dùng chung cho cả Điện thoại Android & Smart TV/TV360 Box) bên dưới!
           files: |
