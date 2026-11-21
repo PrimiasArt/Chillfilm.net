@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#06070D" />
+  <title>ChillFilm — NKI AI Cinema</title>
+  <meta name="description" content="Web App xem phim độc lập thuộc hệ sinh thái NKI: trình phát Chill-Player 200% Audio Boost, phụ đề AI đa ngôn ngữ và kết nối TV tùy chọn." />
+  <link rel="icon" type="image/png" href="./assets/favicon.png" />
+  <link rel="apple-touch-icon" href="./assets/icon-192.png" />
+  <link rel="manifest" href="./manifest.json" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Sarabun:wght@500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js" defer></script>
+</head>
+<body>
+
+  <!-- MINIMALIST TOP NAVIGATION -->
+  <header class="topbar">
+    <div class="brand" id="brandHome" title="ChillFilm • Hệ sinh thái NKI">
+      <img src="./assets/icon-192.png" alt="NKI ChillFilm Logo" />
+      <div class="brand-wordmark">
+        <span class="c1">CHILL</span><span class="c2">FILM</span>
+        <span class="nki-pill">NKI</span>
+      </div>
+    </div>
+
+    <div class="search-desktop">
+      <input id="searchInputDesktop" type="search" placeholder="Tìm phim bộ, phim lẻ, diễn viên..." />
+      <button class="btn-grad" id="searchBtnDesktop" style="padding:6px 14px;font-size:12px;">Tìm</button>
+    </div>
+
+    <div class="top-actions">
+      <button class="icon-btn mobile-only" id="mobileSearchToggle" title="Tìm kiếm" aria-label="Tìm kiếm">🔍</button>
+      <button class="icon-btn" id="openCastBtn" title="Stream & Kết nối TV (Tính năng phụ)" aria-label="Cast TV">📡</button>
+      <button class="icon-btn" id="openSettingsBtn" title="Cài đặt AI & Phụ đề" aria-label="Cài đặt">
+        ⚙️
+        <span class="status-dot" id="aiDot" style="display:none;"></span>
+      </button>
+      <button class="icon-btn" id="refreshBtn" title="Làm mới kho phim" aria-label="Làm mới">↻</button>
+    </div>
+  </header>
+
+  <!-- EXPANDABLE MOBILE SEARCH BAR -->
+  <div class="mobile-search-bar" id="mobileSearchBar">
+    <input id="searchInputMobile" type="search" placeholder="Nhập tên phim cần tìm..." />
+    <button class="btn-grad" id="searchBtnMobile">Tìm</button>
+  </div>
+
+  <!-- MAIN CONTENT -->
+  <main class="container">
+    <div id="homeView">
+      <nav class="cat-strip" id="catStrip"></nav>
+      <section class="hero" id="heroBox" style="display:none;"></section>
+
+      <section id="historySection" style="display:none;">
+        <div class="section-head">
+          <div class="section-title">Tiếp Tục Xem</div>
+        </div>
+        <div class="movie-grid" id="historyGrid"></div>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <div class="section-title" id="catalogTitle">Mới &amp; Hot</div>
+        </div>
+        <div class="movie-grid" id="catalogGrid"></div>
+      </section>
+    </div>
+
+    <section class="detail-view" id="detailView"></section>
+
+    <footer class="footer">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <img src="./assets/favicon.png" alt="NKI" style="width:20px;height:20px;border-radius:5px;" />
+        <span><strong>ChillFilm</strong> • Hệ sinh thái <strong>NKI</strong> • Standalone Cinema Web App</span>
+      </div>
+      <div style="display:flex;gap:12px;align-items:center;">
+        <a href="https://github.com/PrimiasArt/Chillfilm.net/releases/download/android-apk-latest/ChillFilm-latest.apk" style="color:#34d399;text-decoration:none;font-weight:700;">📱 Tải App Android &amp; TV (.APK)</a>
+      </div>
+    </footer>
+  </main>
+
+  <!-- FULLSCREEN CHILL-PLAYER OVERLAY -->
+  <div class="player-modal" id="playerModal">
+    <div class="player-stage" id="playerStage">
+      <video id="videoEl" playsinline></video>
+
+      <!-- Dual-Language AI Subtitle Overlay -->
+      <div class="sub-layer">
+        <div class="sub-pill" id="subPill"></div>
+      </div>
+
+      <!-- Gesture Feedback -->
+      <div class="gesture-toast" id="gestureToast"></div>
+
+      <!-- Screen Unlock Floating Button -->
+      <button class="lock-fab" id="lockFab" title="Mở khóa màn hình">🔒</button>
+
+      <!-- Minimalist Responsive Spatial Glass HUD -->
+      <div class="player-hud" id="playerHud">
+        <div class="hud-top">
+          <div class="hud-title-group">
+            <button class="icon-btn" id="hudBackBtn" title="Thoát trình phát">←</button>
+            <div class="hud-titles">
+              <div class="hud-movie-title" id="hudMovieTitle">ChillFilm</div>
+              <div class="hud-sub-status" id="hudSubStatus">AI Sub sẵn sàng</div>
+            </div>
+          </div>
+          <div class="hud-right">
+            <button class="btn-grad" id="hudSubLangPill" style="padding:6px 12px;font-size:11.5px;">CC • VI</button>
+            <button class="icon-btn" id="hudCastBtn" title="Phát lên TV (Phụ)">📡</button>
+            <button class="icon-btn" id="hudMoreBtn" title="Tốc độ, Audio Boost 200%, EQ, Tỉ lệ">⋮</button>
+          </div>
+        </div>
+
+        <div class="hud-center">
+          <button class="play-circle-sm" id="rewBtn">-10s</button>
+          <button class="play-circle-lg" id="playPauseBtn" style="font-size:24px;">▶</button>
+          <button class="play-circle-sm" id="fwdBtn">+10s</button>
+        </div>
+
+        <div class="hud-bottom">
+          <div class="seek-row">
+            <span id="curTimeLabel" style="color:#34d399;">00:00</span>
+            <input type="range" id="seekRange" min="0" max="1000" value="0" />
+            <span id="durTimeLabel" style="color:#9ca3af;">00:00</span>
+          </div>
+          <div class="hud-actions-row">
+            <button class="hud-chip" id="hudLockBtn">🔒 Khóa</button>
+            <button class="hud-chip" id="hudSpeedBoostBtn">⚡ 1.0x</button>
+            <button class="hud-chip" id="hudNextOrAspectBtn">⬜ Tỉ lệ</button>
+            <button class="hud-chip" id="hudFsBtn">⛶ Toàn màn</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- UNIVERSAL MULTI-LANGUAGE AI SUBTITLE MODAL -->
+  <div class="backdrop" id="subModal">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>🌐 Phụ Đề AI Đa Ngôn Ngữ</h3>
+        <button class="icon-btn" data-close="subModal">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="row-between">
+          <label style="font-size:13px;font-weight:700;"><input type="checkbox" id="subEnableToggle" checked /> Bật Phụ Đề</label>
+          <label style="font-size:13px;font-weight:700;"><input type="checkbox" id="dualSubToggle" /> Song Ngữ (2 dòng)</label>
+        </div>
+
+        <div class="field-group">
+          <span class="field-label">NGÔN NGỮ SUB CHÍNH (DÒNG 1 • AI DỊCH MỌI NGÔN NGỮ)</span>
+          <div class="chip-wrap" id="primaryLangChips"></div>
+          <div style="display:flex;gap:8px;margin-top:4px;">
+            <input class="field-input" id="customLangInput" placeholder="Nhập ngôn ngữ khác bất kỳ (VD: Dutch, Turkish...)" />
+            <button class="btn-grad" id="applyCustomLangBtn">Chọn</button>
+          </div>
+        </div>
+
+        <div class="field-group">
+          <span class="field-label">NGÔN NGỮ SUB PHỤ (DÒNG 2 • SONG NGỮ)</span>
+          <div class="chip-wrap" id="secondaryLangChips"></div>
+        </div>
+
+        <div class="field-group">
+          <span class="field-label">BẢN SUB ONLINE / NẠP FILE .SRT TỪ MÁY</span>
+          <select class="field-select" id="subTrackSelect"></select>
+          <label class="btn-glass" style="width:100%;justify-content:center;cursor:pointer;">
+            📂 Nạp file .SRT / .VTT / .ASS từ máy tính / điện thoại
+            <input type="file" id="localSubFile" accept=".srt,.vtt,.ass,.ssa,.txt" style="display:none;" />
+          </label>
+        </div>
+
+        <div class="field-group">
+          <div class="row-between">
+            <span class="field-label">KHỚP GIỜ PHỤ ĐỀ (SYNC)</span>
+            <strong id="syncValLabel" style="color:#34d399;font-size:13px;">0.0s</strong>
+          </div>
+          <div style="display:flex;gap:8px;">
+            <button class="btn-glass" style="flex:1;" id="syncMinusBtn">-0.5s</button>
+            <button class="btn-glass" style="flex:1;" id="syncResetBtn">Về 0s</button>
+            <button class="btn-glass" style="flex:1;" id="syncPlusBtn">+0.5s</button>
+          </div>
+        </div>
+
+        <div class="field-group">
+          <div class="row-between">
+            <span class="field-label">Cỡ chữ Sub Chính: <strong id="subSizeLabel" style="color:#34d399;">22px</strong></span>
+            <input type="color" id="subColorInput" value="#FFD600" style="width:34px;height:26px;border:none;background:none;cursor:pointer;" />
+          </div>
+          <input type="range" id="subSizeRange" min="14" max="44" value="22" style="accent-color:#10b981;" />
+        </div>
+
+        <div class="field-group">
+          <div class="row-between">
+            <span class="field-label">Cỡ chữ Sub Phụ: <strong id="secSizeLabel" style="color:#c084fc;">16px</strong></span>
+            <input type="color" id="secColorInput" value="#FFFFFF" style="width:34px;height:26px;border:none;background:none;cursor:pointer;" />
+          </div>
+          <input type="range" id="secSizeRange" min="12" max="36" value="16" style="accent-color:#8b5cf6;" />
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CHILL-PLAYER MORE OPTIONS MODAL (200% BOOST, EQ, SPEED, ASPECT, SLEEP, PIP) -->
+  <div class="backdrop" id="moreModal">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>🎛 Tùy Chọn Chill-Player</h3>
+        <button class="icon-btn" data-close="moreModal">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field-group">
+          <div class="row-between">
+            <span class="field-label">🔊 ÂM LƯỢNG &amp; AUDIO BOOST (TỚI 200%)</span>
+            <strong id="boostValLabel" style="color:#fbbf24;font-size:13px;">100%</strong>
+          </div>
+          <input type="range" id="boostSlider" min="0" max="200" value="100" style="accent-color:#fbbf24;" />
+        </div>
+
+        <div class="field-group">
+          <span class="field-label">EQUALIZER ÂM THANH</span>
+          <div class="chip-wrap">
+            <button class="pill-choice active" data-eq="FLAT">Chuẩn (Flat)</button>
+            <button class="pill-choice" data-eq="BASS">Tăng Bass</button>
+            <button class="pill-choice" data-eq="VOCAL">Giọng Rõ (Vocal)</button>
+            <button class="pill-choice" data-eq="MOVIE">Rạp Phim (Movie)</button>
+          </div>
+        </div>
+
+        <div class="field-group">
+          <span class="field-label">TỐC ĐỘ PHÁT</span>
+          <div class="chip-wrap">
+            <button class="pill-choice" data-speed="0.5">0.5x</button>
+            <button class="pill-choice" data-speed="0.75">0.75x</button>
+            <button class="pill-choice active" data-speed="1">1.0x</button>
+            <button class="pill-choice" data-speed="1.25">1.25x</button>
+            <button class="pill-choice" data-speed="1.5">1.5x</button>
+            <button class="pill-choice" data-speed="2">2.0x</button>
+          </div>
+        </div>
+
+        <div class="field-group">
+          <span class="field-label">TỈ LỆ KHUNG HÌNH</span>
+          <div class="chip-wrap">
+            <button class="pill-choice active" data-aspect="fit">Vừa khung (Fit)</button>
+            <button class="pill-choice" data-aspect="fill">Tràn khung (Fill)</button>
+            <button class="pill-choice" data-aspect="stretch">Kéo giãn</button>
+            <button class="pill-choice" data-aspect="16-9">16:9</button>
+            <button class="pill-choice" data-aspect="4-3">4:3</button>
+          </div>
+        </div>
+
+        <div class="field-group">
+          <span class="field-label">🌙 HẸN GIỜ TẮT PHIM</span>
+          <div class="chip-wrap">
+            <button class="pill-choice active-violet" data-sleep="0">Tắt</button>
+            <button class="pill-choice" data-sleep="15">15 phút</button>
+            <button class="pill-choice" data-sleep="30">30 phút</button>
+            <button class="pill-choice" data-sleep="45">45 phút</button>
+            <button class="pill-choice" data-sleep="60">60 phút</button>
+          </div>
+        </div>
+
+        <button class="btn-glass" id="pipBtn" style="width:100%;">🖼 Mở Cửa Sổ Nổi (Picture-in-Picture)</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- SETTINGS & GEMINI AI KEY MODAL -->
+  <div class="backdrop" id="settingsModal">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>⚙️ Cài Đặt ChillFilm • NKI</h3>
+        <button class="icon-btn" data-close="settingsModal">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="info-box">
+          🔐 <strong>Bảo mật cục bộ:</strong> Gemini API Key lưu trực tiếp trên trình duyệt của bạn (<code>localStorage</code>) — không gửi qua bất kỳ máy chủ trung gian nào. Nếu chưa có Key, app vẫn dịch phụ đề bằng Neural AI miễn phí!
+        </div>
+
+        <div class="field-group">
+          <span class="field-label">NGÔN NGỮ PHỤ ĐỀ MẶC ĐỊNH</span>
+          <select class="field-select" id="defaultLangSelect"></select>
+        </div>
+
+        <div class="field-group">
+          <span class="field-label">GOOGLE GEMINI API KEY (TÙY CHỌN — DỊCH CHUẨN RẠP)</span>
+          <input class="field-input" id="geminiKeyInput" type="password" placeholder="AIzaSy..." />
+        </div>
+
+        <div class="field-group">
+          <span class="field-label">MODEL GEMINI AI</span>
+          <select class="field-select" id="geminiModelSelect">
+            <option value="gemini-3-flash-preview">gemini-3-flash-preview (Siêu nhanh)</option>
+            <option value="gemini-2.5-flash">gemini-2.5-flash (Ổn định)</option>
+            <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview (Dịch sâu)</option>
+            <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+          </select>
+        </div>
+
+        <button class="btn-grad" id="saveSettingsBtn" style="width:100%;">💾 Lưu Cài Đặt AI</button>
+
+        <hr style="border:none;border-top:1px solid var(--glass-border);" />
+
+        <div class="field-group">
+          <span class="field-label">PHÁT LINK VIDEO TRỰC TIẾP (.M3U8 / .MP4) HOẶC FILE TRONG MÁY</span>
+          <input class="field-input" id="directUrlInput" placeholder="https://.../index.m3u8 hoặc .mp4" />
+          <input class="field-input" id="directTitleInput" placeholder="Tên phim (tùy chọn)" />
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="btn-grad" id="playDirectBtn" style="flex:1;">▶ Phát Link</button>
+            <label class="btn-glass" style="flex:1;cursor:pointer;">
+              📂 Mở File Video
+              <input type="file" id="localVideoFile" accept="video/*" style="display:none;" />
+            </label>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- OPTIONAL SECONDARY TV STREAM / CAST MODAL -->
+  <div class="backdrop" id="tvModal">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>📡 Stream &amp; Kết Nối TV (Tính Năng Phụ)</h3>
+        <button class="icon-btn" data-close="tvModal">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="info-box">
+          Tính năng phụ giúp truyền phim từ trình duyệt sang TV đã cài <strong>ChillFilm APK</strong> trên cùng Wi-Fi, hoặc tải bản cài Android/TV mới nhất.
+        </div>
+
+        <div class="field-group">
+          <span class="field-label">ĐỊA CHỈ IP TV TRONG MẠNG WI-FI (CỔNG 8899)</span>
+          <div style="display:flex;gap:8px;">
+            <input class="field-input" id="tvIpInput" placeholder="VD: 192.168.102.3" />
+            <button class="btn-grad" id="saveTvIpBtn">Lưu IP</button>
+          </div>
+        </div>
+
+        <div class="field-group">
+          <span class="field-label">ĐIỀU KHIỂN NHANH TV</span>
+          <div class="chip-wrap">
+            <button class="btn-glass" data-tvkey="up">▲ Lên</button>
+            <button class="btn-glass" data-tvkey="down">▼ Xuống</button>
+            <button class="btn-glass" data-tvkey="left">◄ Trái</button>
+            <button class="btn-glass" data-tvkey="right">► Phải</button>
+            <button class="btn-grad" data-tvkey="ok">OK</button>
+            <button class="btn-glass" data-tvkey="back">↩ Back</button>
+          </div>
+        </div>
+
+        <button class="btn-glass" id="syncKeyToTvBtn" style="width:100%;">🔐 Đồng Bộ Gemini API Key Sang TV</button>
+
+        <a id="apkDownloadBtn" class="btn-grad" href="https://github.com/PrimiasArt/Chillfilm.net/releases/download/android-apk-latest/ChillFilm-latest.apk" style="width:100%;text-decoration:none;">
+          📱 Tải ChillFilm APK (Điện thoại Android &amp; Smart TV)
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

@@ -966,4 +966,29 @@ class SubtitleAndCatalogTest {
         assertNotNull(parsedOlder)
         assertTrue(!com.phyll.filmhub.updater.AppUpdater.isUpdateAvailable(current, parsedOlder!!))
     }
+
+    @Test
+    fun universalMultiLanguageAiSubtitleCatalogSupportsPresetsAndCustomLanguages() {
+        val vi = com.phyll.filmhub.model.SubtitleLanguageCatalog.resolve("vie")
+        assertEquals("vi", vi.code)
+        assertEquals("VI", vi.shortBadge)
+
+        val ja = com.phyll.filmhub.model.SubtitleLanguageCatalog.resolve("ja")
+        assertEquals("JA", ja.shortBadge)
+        assertEquals("jpn", ja.openSubtitlesId)
+
+        val custom = com.phyll.filmhub.model.SubtitleLanguageCatalog.resolve("Dutch")
+        assertEquals("Dutch", custom.code)
+        assertTrue(custom.geminiInstructionName.contains("Dutch"))
+
+        assertTrue(com.phyll.filmhub.model.SubtitleLanguageCatalog.isTrackMatchingLanguage("kor", "ko"))
+        assertTrue(com.phyll.filmhub.model.SubtitleLanguageCatalog.isTextAlreadyInTargetLanguage("안녕하세요", "ko"))
+        assertTrue(com.phyll.filmhub.model.SubtitleLanguageCatalog.isTextAlreadyInTargetLanguage("Chào bạn nhé", "vi"))
+        assertFalse(com.phyll.filmhub.model.SubtitleLanguageCatalog.isTextAlreadyInTargetLanguage("Hello world", "th"))
+
+        val cfg = SubtitleStyleConfig(preferredPrimaryLang = "ko", secondaryLangCode = "vi", dualSubEnabled = true)
+        assertEquals("KO", cfg.resolvedPrimaryLanguage().shortBadge)
+        assertEquals("vi", cfg.resolvedSecondaryLangCode())
+        assertEquals("Tiếng Việt", cfg.resolvedSecondaryDisplayName())
+    }
 }

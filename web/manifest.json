@@ -1,0 +1,24 @@
+{
+  "name": "ChillFilm — NKI AI Cinema",
+  "short_name": "ChillFilm",
+  "description": "Web App xem phim độc lập thuộc hệ sinh thái NKI với trình phát Chill-Player và phụ đề AI đa ngôn ngữ.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#06070D",
+  "theme_color": "#06070D",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "./assets/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./assets/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

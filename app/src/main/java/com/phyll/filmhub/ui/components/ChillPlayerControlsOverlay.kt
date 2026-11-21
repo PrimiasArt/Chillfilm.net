@@ -10,23 +10,32 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Equalizer
@@ -34,6 +43,8 @@ import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.NightlightRound
+import androidx.compose.material.icons.filled.PictureInPictureAlt
+import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.VolumeUp
@@ -48,7 +59,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.media3.common.util.UnstableApi
@@ -64,6 +78,7 @@ import com.phyll.filmhub.ui.theme.EmeraldPrimary
 import com.phyll.filmhub.ui.theme.TextPrimary
 import com.phyll.filmhub.ui.theme.TextSecondary
 import com.phyll.filmhub.ui.theme.VioletGlow
+import com.phyll.filmhub.ui.theme.VioletSoft
 import com.phyll.filmhub.ui.theme.tvFocusableClickable
 
 enum class ChillAspectRatioMode(
@@ -72,7 +87,7 @@ enum class ChillAspectRatioMode(
     val enforcedRatio: Float? = null
 ) {
     @OptIn(UnstableApi::class)
-    FIT("Vừa màn hình (Fit)", AspectRatioFrameLayout.RESIZE_MODE_FIT),
+    FIT("Vừa khung (Fit)", AspectRatioFrameLayout.RESIZE_MODE_FIT),
     @OptIn(UnstableApi::class)
     FILL("Tràn khung (Fill)", AspectRatioFrameLayout.RESIZE_MODE_ZOOM),
     @OptIn(UnstableApi::class)
@@ -191,17 +206,18 @@ fun BoxScope.ChillGestureAndLockOverlay(
     seekOffsetSecs: Int,
     targetSeekPreviewMs: Long,
     durationMs: Long,
-    doubleTapSide: Int, // -1 left, +1 right, 0 none
+    doubleTapSide: Int,
     onToggleLock: () -> Unit,
     formatTimeFn: (Long) -> String
 ) {
-    // 1. Left-Edge Screen Lock Floating Capsule (MX / Chill-Player Signature)
+    // 1. Floating Unlock Button ONLY visible when Screen is Locked (no clutter during normal playback!)
     AnimatedVisibility(
-        visible = isLocked || showControls,
+        visible = isLocked,
         enter = fadeIn(),
         exit = fadeOut(),
         modifier = Modifier
             .align(Alignment.CenterStart)
+            .displayCutoutPadding()
             .padding(start = 16.dp)
     ) {
         Box(
@@ -209,17 +225,17 @@ fun BoxScope.ChillGestureAndLockOverlay(
                 .size(46.dp)
                 .tvFocusableClickable(
                     shape = CircleShape,
-                    focusedBorderColor = if (isLocked) AmberBoost else EmeraldNeon,
-                    unfocusedBorderColor = if (isLocked) AmberBoost else CinemaGlassBorder,
+                    focusedBorderColor = Color.White,
+                    unfocusedBorderColor = AmberBoost,
                     onClick = onToggleLock
                 )
-                .background(if (isLocked) AmberBoost else CinemaGlass),
+                .background(AmberBoost),
             contentAlignment = Alignment.Center
         ) {
             Icon(
-                imageVector = if (isLocked) Icons.Default.Lock else Icons.Default.LockOpen,
-                contentDescription = if (isLocked) "Mở khóa" else "Khóa màn hình",
-                tint = if (isLocked) CinemaObsidian else TextPrimary,
+                imageVector = Icons.Default.Lock,
+                contentDescription = "Mở khóa màn hình",
+                tint = CinemaObsidian,
                 modifier = Modifier.size(21.dp)
             )
         }
@@ -230,23 +246,26 @@ fun BoxScope.ChillGestureAndLockOverlay(
         visible = lockHintVisible,
         enter = fadeIn(),
         exit = fadeOut(),
-        modifier = Modifier.align(Alignment.Center)
+        modifier = Modifier
+            .align(Alignment.Center)
+            .padding(horizontal = 24.dp)
     ) {
         Row(
             modifier = Modifier
                 .clip(RoundedCornerShape(99.dp))
                 .background(CinemaGlass)
-                .border(1.2.dp, AmberBoost.copy(alpha = 0.7f), RoundedCornerShape(99.dp))
-                .padding(horizontal = 18.dp, vertical = 10.dp),
+                .border(1.2.dp, AmberBoost.copy(alpha = 0.75f), RoundedCornerShape(99.dp))
+                .padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(Icons.Default.Lock, contentDescription = null, tint = AmberBoost, modifier = Modifier.size(16.dp))
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = "Màn hình đang khóa • Chạm ổ khóa bên trái để mở khóa",
+                text = "Đang khóa cảm ứng • Chạm ổ khóa bên trái để mở",
                 color = TextPrimary,
                 fontSize = 12.sp,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
+                maxLines = 2
             )
         }
     }
@@ -256,25 +275,26 @@ fun BoxScope.ChillGestureAndLockOverlay(
         Column(
             modifier = Modifier
                 .align(Alignment.CenterEnd)
-                .padding(end = 24.dp)
-                .clip(RoundedCornerShape(24.dp))
+                .displayCutoutPadding()
+                .padding(end = 20.dp)
+                .clip(RoundedCornerShape(22.dp))
                 .background(CinemaGlass)
-                .border(1.dp, CinemaGlassBorder, RoundedCornerShape(24.dp))
-                .padding(horizontal = 14.dp, vertical = 16.dp),
+                .border(1.dp, CinemaGlassBorder, RoundedCornerShape(22.dp))
+                .padding(horizontal = 12.dp, vertical = 14.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             val isBoost = gesturePercent > 100
             Icon(
                 imageVector = Icons.Default.VolumeUp,
                 contentDescription = null,
                 tint = if (isBoost) AmberBoost else EmeraldNeon,
-                modifier = Modifier.size(22.dp)
+                modifier = Modifier.size(20.dp)
             )
             Box(
                 modifier = Modifier
-                    .width(8.dp)
-                    .height(110.dp)
+                    .width(7.dp)
+                    .height(96.dp)
                     .clip(CircleShape)
                     .background(Color.White.copy(alpha = 0.14f)),
                 contentAlignment = Alignment.BottomCenter
@@ -292,14 +312,14 @@ fun BoxScope.ChillGestureAndLockOverlay(
                 Text(
                     text = "$gesturePercent%",
                     color = TextPrimary,
-                    fontSize = 12.sp,
+                    fontSize = 11.sp,
                     fontWeight = FontWeight.ExtraBold
                 )
                 if (isBoost) {
                     Text(
                         text = "BOOST",
                         color = AmberBoost,
-                        fontSize = 9.sp,
+                        fontSize = 8.5.sp,
                         fontWeight = FontWeight.Black
                     )
                 }
@@ -312,19 +332,20 @@ fun BoxScope.ChillGestureAndLockOverlay(
         Column(
             modifier = Modifier
                 .align(Alignment.CenterStart)
-                .padding(start = 74.dp)
-                .clip(RoundedCornerShape(24.dp))
+                .displayCutoutPadding()
+                .padding(start = 20.dp)
+                .clip(RoundedCornerShape(22.dp))
                 .background(CinemaGlass)
-                .border(1.dp, CinemaGlassBorder, RoundedCornerShape(24.dp))
-                .padding(horizontal = 14.dp, vertical = 16.dp),
+                .border(1.dp, CinemaGlassBorder, RoundedCornerShape(22.dp))
+                .padding(horizontal = 12.dp, vertical = 14.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Icon(Icons.Default.WbSunny, contentDescription = null, tint = VioletGlow, modifier = Modifier.size(22.dp))
+            Icon(Icons.Default.WbSunny, contentDescription = null, tint = VioletGlow, modifier = Modifier.size(20.dp))
             Box(
                 modifier = Modifier
-                    .width(8.dp)
-                    .height(110.dp)
+                    .width(7.dp)
+                    .height(96.dp)
                     .clip(CircleShape)
                     .background(Color.White.copy(alpha = 0.14f)),
                 contentAlignment = Alignment.BottomCenter
@@ -341,7 +362,7 @@ fun BoxScope.ChillGestureAndLockOverlay(
             Text(
                 text = "$gesturePercent%",
                 color = TextPrimary,
-                fontSize = 12.sp,
+                fontSize = 11.sp,
                 fontWeight = FontWeight.ExtraBold
             )
         }
@@ -352,10 +373,10 @@ fun BoxScope.ChillGestureAndLockOverlay(
         Column(
             modifier = Modifier
                 .align(Alignment.Center)
-                .clip(RoundedCornerShape(24.dp))
+                .clip(RoundedCornerShape(22.dp))
                 .background(CinemaGlass)
-                .border(1.2.dp, BrandNeonGlassBorderBrush, RoundedCornerShape(24.dp))
-                .padding(horizontal = 22.dp, vertical = 12.dp),
+                .border(1.2.dp, BrandNeonGlassBorderBrush, RoundedCornerShape(22.dp))
+                .padding(horizontal = 20.dp, vertical = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
@@ -379,29 +400,29 @@ fun BoxScope.ChillGestureAndLockOverlay(
         Column(
             modifier = Modifier
                 .align(Alignment.CenterStart)
-                .padding(start = 76.dp)
+                .padding(start = 32.dp)
                 .clip(CircleShape)
                 .background(CinemaGlass)
                 .border(1.dp, EmeraldNeon.copy(alpha = 0.7f), CircleShape)
-                .padding(16.dp),
+                .padding(14.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Icon(Icons.Default.Replay10, contentDescription = null, tint = EmeraldNeon, modifier = Modifier.size(28.dp))
-            Text("-10s", color = EmeraldNeon, fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
+            Icon(Icons.Default.Replay10, contentDescription = null, tint = EmeraldNeon, modifier = Modifier.size(26.dp))
+            Text("-10s", color = EmeraldNeon, fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
         }
     } else if (doubleTapSide == 1) {
         Column(
             modifier = Modifier
                 .align(Alignment.CenterEnd)
-                .padding(end = 36.dp)
+                .padding(end = 32.dp)
                 .clip(CircleShape)
                 .background(CinemaGlass)
                 .border(1.dp, VioletGlow.copy(alpha = 0.7f), CircleShape)
-                .padding(16.dp),
+                .padding(14.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Icon(Icons.Default.Forward10, contentDescription = null, tint = VioletGlow, modifier = Modifier.size(28.dp))
-            Text("+10s", color = VioletGlow, fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
+            Icon(Icons.Default.Forward10, contentDescription = null, tint = VioletGlow, modifier = Modifier.size(26.dp))
+            Text("+10s", color = VioletGlow, fontSize = 10.sp, fontWeight = FontWeight.ExtraBold)
         }
     }
 }
@@ -414,6 +435,11 @@ fun BoxScope.ChillPlayerMenuOverlay(
     equalizerPreset: ChillEqualizerPreset,
     volumeScale: Float,
     sleepTimerMinutes: Int?,
+    canEnterPip: Boolean = false,
+    isAutoSyncing: Boolean = false,
+    onEnterPip: () -> Unit = {},
+    onTriggerAiAutoSync: () -> Unit = {},
+    onOpenQrCompanion: () -> Unit = {},
     onNavigateMenu: (ChillPlayerMenu) -> Unit,
     onSelectAspectRatio: (ChillAspectRatioMode) -> Unit,
     onSelectPlaybackSpeed: (Float) -> Unit,
@@ -423,156 +449,228 @@ fun BoxScope.ChillPlayerMenuOverlay(
 ) {
     if (activeMenu == ChillPlayerMenu.NONE) return
 
-    Column(
+    val cfg = LocalConfiguration.current
+    val isCompactPortrait = cfg.screenWidthDp < 540
+    val maxSheetHeight = (cfg.screenHeightDp * 0.72f).coerceIn(220f, 440f).dp
+
+    Box(
         modifier = Modifier
-            .align(Alignment.TopEnd)
-            .padding(top = 68.dp, end = 20.dp)
-            .widthIn(min = 240.dp, max = 300.dp)
-            .clip(RoundedCornerShape(22.dp))
-            .background(Color(0xEB0E111E))
-            .border(1.2.dp, BrandNeonGlassBorderBrush, RoundedCornerShape(22.dp))
-            .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.42f))
+            .pointerInput(Unit) {
+                detectTapGestures { onNavigateMenu(ChillPlayerMenu.NONE) }
+            }
     ) {
-        // Header
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (activeMenu == ChillPlayerMenu.SPEED ||
-                    activeMenu == ChillPlayerMenu.EQUALIZER ||
-                    activeMenu == ChillPlayerMenu.SLEEP
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .tvFocusableClickable(shape = CircleShape, onClick = { onNavigateMenu(ChillPlayerMenu.MORE) })
-                            .padding(4.dp)
-                    ) {
-                        Icon(Icons.Default.ChevronLeft, contentDescription = "Quay lại", tint = TextSecondary, modifier = Modifier.size(18.dp))
-                    }
-                    Spacer(modifier = Modifier.width(4.dp))
-                }
-                val title = when (activeMenu) {
-                    ChillPlayerMenu.MORE -> "Tùy Chọn Chill-Player"
-                    ChillPlayerMenu.ASPECT -> "Tỉ Lệ Khung Hình"
-                    ChillPlayerMenu.SPEED -> "Tốc Độ Phát"
-                    ChillPlayerMenu.EQUALIZER -> "Equalizer & Boost 200%"
-                    ChillPlayerMenu.SLEEP -> "Hẹn Giờ Tắt Phim"
-                    ChillPlayerMenu.NONE -> ""
-                }
-                Text(text = title, color = EmeraldNeon, fontSize = 13.sp, fontWeight = FontWeight.ExtraBold)
-            }
-            Box(
-                modifier = Modifier
-                    .tvFocusableClickable(shape = CircleShape, onClick = { onNavigateMenu(ChillPlayerMenu.NONE) })
-                    .padding(4.dp)
-            ) {
-                Icon(Icons.Default.Close, contentDescription = "Đóng", tint = TextSecondary, modifier = Modifier.size(17.dp))
-            }
+        val cardModifier = if (isCompactPortrait) {
+            Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(horizontal = 12.dp, vertical = 12.dp)
+                .fillMaxWidth()
+                .heightIn(max = maxSheetHeight)
+        } else {
+            Modifier
+                .align(Alignment.TopEnd)
+                .statusBarsPadding()
+                .displayCutoutPadding()
+                .padding(top = 60.dp, end = 16.dp, bottom = 16.dp)
+                .widthIn(min = 260.dp, max = 320.dp)
+                .heightIn(max = maxSheetHeight)
         }
 
-        when (activeMenu) {
-            ChillPlayerMenu.MORE -> {
-                MenuChoiceRow(
-                    icon = { Icon(Icons.Default.Speed, null, tint = EmeraldNeon, modifier = Modifier.size(16.dp)) },
-                    label = "Tốc độ phát",
-                    value = "${playbackSpeed}x",
-                    onClick = { onNavigateMenu(ChillPlayerMenu.SPEED) }
-                )
-                MenuChoiceRow(
-                    icon = { Icon(Icons.Default.Equalizer, null, tint = VioletGlow, modifier = Modifier.size(16.dp)) },
-                    label = "Equalizer & Boost ${(volumeScale * 100).toInt()}%",
-                    value = equalizerPreset.name,
-                    onClick = { onNavigateMenu(ChillPlayerMenu.EQUALIZER) }
-                )
-                MenuChoiceRow(
-                    icon = { Icon(Icons.Default.AspectRatio, null, tint = EmeraldNeon, modifier = Modifier.size(16.dp)) },
-                    label = "Tỉ lệ khung hình",
-                    value = aspectRatio.displayName.substringBefore(" "),
-                    onClick = { onNavigateMenu(ChillPlayerMenu.ASPECT) }
-                )
-                MenuChoiceRow(
-                    icon = { Icon(Icons.Default.NightlightRound, null, tint = VioletGlow, modifier = Modifier.size(16.dp)) },
-                    label = "Hẹn giờ tắt",
-                    value = sleepTimerMinutes?.let { "${it}p" } ?: "Tắt",
-                    onClick = { onNavigateMenu(ChillPlayerMenu.SLEEP) }
-                )
-            }
-
-            ChillPlayerMenu.ASPECT -> {
-                ChillAspectRatioMode.entries.forEach { mode ->
-                    val selected = aspectRatio == mode
-                    SelectableGlassOptionRow(
-                        label = mode.displayName,
-                        selected = selected,
-                        onClick = {
-                            onSelectAspectRatio(mode)
-                            onNavigateMenu(ChillPlayerMenu.NONE)
+        Column(
+            modifier = cardModifier
+                .clip(RoundedCornerShape(22.dp))
+                .background(Color(0xF50E111E))
+                .border(1.dp, BrandNeonGlassBorderBrush, RoundedCornerShape(22.dp))
+                .pointerInput(Unit) { detectTapGestures { } }
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            // Header
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                    if (activeMenu == ChillPlayerMenu.SPEED ||
+                        activeMenu == ChillPlayerMenu.EQUALIZER ||
+                        activeMenu == ChillPlayerMenu.SLEEP ||
+                        activeMenu == ChillPlayerMenu.ASPECT
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .tvFocusableClickable(shape = CircleShape, onClick = { onNavigateMenu(ChillPlayerMenu.MORE) })
+                                .padding(4.dp)
+                        ) {
+                            Icon(Icons.Default.ChevronLeft, contentDescription = "Quay lại", tint = TextSecondary, modifier = Modifier.size(18.dp))
                         }
-                    )
-                }
-            }
-
-            ChillPlayerMenu.SPEED -> {
-                listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f).forEach { rate ->
-                    SelectableGlassOptionRow(
-                        label = "${rate}x" + if (rate == 1.0f) " (Chuẩn)" else "",
-                        selected = kotlin.math.abs(playbackSpeed - rate) < 0.05f,
-                        onClick = {
-                            onSelectPlaybackSpeed(rate)
-                            onNavigateMenu(ChillPlayerMenu.NONE)
-                        }
-                    )
-                }
-            }
-
-            ChillPlayerMenu.EQUALIZER -> {
-                ChillEqualizerPreset.entries.forEach { eq ->
-                    SelectableGlassOptionRow(
-                        label = eq.displayName,
-                        selected = equalizerPreset == eq,
-                        onClick = { onSelectEqualizer(eq) }
-                    )
-                }
-                Spacer(modifier = Modifier.height(4.dp))
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Âm lượng / Audio Boost:", color = TextSecondary, fontSize = 11.sp)
-                    val pct = (volumeScale * 100).toInt()
+                        Spacer(modifier = Modifier.width(4.dp))
+                    }
+                    val title = when (activeMenu) {
+                        ChillPlayerMenu.MORE -> "Tùy Chọn Trình Phát"
+                        ChillPlayerMenu.ASPECT -> "Tỉ Lệ Khung Hình"
+                        ChillPlayerMenu.SPEED -> "Tốc Độ Phát"
+                        ChillPlayerMenu.EQUALIZER -> "Equalizer & Boost 200%"
+                        ChillPlayerMenu.SLEEP -> "Hẹn Giờ Tắt Phim"
+                        ChillPlayerMenu.NONE -> ""
+                    }
                     Text(
-                        text = "$pct%",
-                        color = if (pct > 100) AmberBoost else EmeraldNeon,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.ExtraBold
+                        text = title,
+                        color = EmeraldNeon,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
-                Slider(
-                    value = volumeScale,
-                    onValueChange = onChangeVolumeScale,
-                    valueRange = 0f..2.0f,
-                    colors = SliderDefaults.colors(
-                        thumbColor = if (volumeScale > 1.0f) AmberBoost else EmeraldNeon,
-                        activeTrackColor = if (volumeScale > 1.0f) AmberBoost else EmeraldPrimary,
-                        inactiveTrackColor = Color.White.copy(alpha = 0.16f)
-                    )
-                )
+                Box(
+                    modifier = Modifier
+                        .tvFocusableClickable(shape = CircleShape, onClick = { onNavigateMenu(ChillPlayerMenu.NONE) })
+                        .padding(4.dp)
+                ) {
+                    Icon(Icons.Default.Close, contentDescription = "Đóng", tint = TextSecondary, modifier = Modifier.size(18.dp))
+                }
             }
 
-            ChillPlayerMenu.SLEEP -> {
-                listOf<Int?>(null, 15, 30, 45, 60).forEach { mins ->
-                    SelectableGlassOptionRow(
-                        label = mins?.let { "Tắt sau $it phút" } ?: "Tắt hẹn giờ",
-                        selected = sleepTimerMinutes == mins,
-                        onClick = {
-                            onSelectSleepTimer(mins)
-                            onNavigateMenu(ChillPlayerMenu.NONE)
+            // Scrollable menu body (NEVER clips in short landscape height!)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(7.dp)
+            ) {
+                when (activeMenu) {
+                    ChillPlayerMenu.MORE -> {
+                        MenuChoiceRow(
+                            icon = { Icon(Icons.Default.Speed, null, tint = EmeraldNeon, modifier = Modifier.size(17.dp)) },
+                            label = "Tốc độ phát",
+                            value = "${playbackSpeed}x",
+                            onClick = { onNavigateMenu(ChillPlayerMenu.SPEED) }
+                        )
+                        MenuChoiceRow(
+                            icon = { Icon(Icons.Default.Equalizer, null, tint = VioletSoft, modifier = Modifier.size(17.dp)) },
+                            label = "Âm thanh & Boost ${(volumeScale * 100).toInt()}%",
+                            value = equalizerPreset.name,
+                            onClick = { onNavigateMenu(ChillPlayerMenu.EQUALIZER) }
+                        )
+                        MenuChoiceRow(
+                            icon = { Icon(Icons.Default.AspectRatio, null, tint = EmeraldNeon, modifier = Modifier.size(17.dp)) },
+                            label = "Tỉ lệ khung hình",
+                            value = aspectRatio.displayName.substringBefore(" "),
+                            onClick = { onNavigateMenu(ChillPlayerMenu.ASPECT) }
+                        )
+                        MenuChoiceRow(
+                            icon = { Icon(Icons.Default.NightlightRound, null, tint = VioletSoft, modifier = Modifier.size(17.dp)) },
+                            label = "Hẹn giờ tắt",
+                            value = sleepTimerMinutes?.let { "${it}p" } ?: "Tắt",
+                            onClick = { onNavigateMenu(ChillPlayerMenu.SLEEP) }
+                        )
+                        MenuChoiceRow(
+                            icon = { Icon(Icons.Default.AutoFixHigh, null, tint = EmeraldNeon, modifier = Modifier.size(17.dp)) },
+                            label = if (isAutoSyncing) "Đang khớp phụ đề AI..." else "AI Tự khớp phụ đề",
+                            value = "Auto",
+                            onClick = {
+                                onNavigateMenu(ChillPlayerMenu.NONE)
+                                onTriggerAiAutoSync()
+                            }
+                        )
+                        if (canEnterPip) {
+                            MenuChoiceRow(
+                                icon = { Icon(Icons.Default.PictureInPictureAlt, null, tint = VioletSoft, modifier = Modifier.size(17.dp)) },
+                                label = "Cửa sổ nổi (PiP)",
+                                value = "Mở",
+                                onClick = {
+                                    onNavigateMenu(ChillPlayerMenu.NONE)
+                                    onEnterPip()
+                                }
+                            )
                         }
-                    )
+                        MenuChoiceRow(
+                            icon = { Icon(Icons.Default.QrCode2, null, tint = TextSecondary, modifier = Modifier.size(17.dp)) },
+                            label = "QR Gửi Sub / Remote",
+                            value = "LAN",
+                            onClick = {
+                                onNavigateMenu(ChillPlayerMenu.NONE)
+                                onOpenQrCompanion()
+                            }
+                        )
+                    }
+
+                    ChillPlayerMenu.ASPECT -> {
+                        ChillAspectRatioMode.entries.forEach { mode ->
+                            SelectableGlassOptionRow(
+                                label = mode.displayName,
+                                selected = aspectRatio == mode,
+                                onClick = {
+                                    onSelectAspectRatio(mode)
+                                    onNavigateMenu(ChillPlayerMenu.NONE)
+                                }
+                            )
+                        }
+                    }
+
+                    ChillPlayerMenu.SPEED -> {
+                        listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f).forEach { rate ->
+                            SelectableGlassOptionRow(
+                                label = "${rate}x" + if (rate == 1.0f) " (Chuẩn)" else "",
+                                selected = kotlin.math.abs(playbackSpeed - rate) < 0.05f,
+                                onClick = {
+                                    onSelectPlaybackSpeed(rate)
+                                    onNavigateMenu(ChillPlayerMenu.NONE)
+                                }
+                            )
+                        }
+                    }
+
+                    ChillPlayerMenu.EQUALIZER -> {
+                        ChillEqualizerPreset.entries.forEach { eq ->
+                            SelectableGlassOptionRow(
+                                label = eq.displayName,
+                                selected = equalizerPreset == eq,
+                                onClick = { onSelectEqualizer(eq) }
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Âm lượng / Audio Boost:", color = TextSecondary, fontSize = 11.5.sp)
+                            val pct = (volumeScale * 100).toInt()
+                            Text(
+                                text = if (pct > 100) "$pct% BOOST" else "$pct%",
+                                color = if (pct > 100) AmberBoost else EmeraldNeon,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        }
+                        Slider(
+                            value = volumeScale,
+                            onValueChange = onChangeVolumeScale,
+                            valueRange = 0f..2.0f,
+                            colors = SliderDefaults.colors(
+                                thumbColor = if (volumeScale > 1.0f) AmberBoost else EmeraldNeon,
+                                activeTrackColor = if (volumeScale > 1.0f) AmberBoost else EmeraldPrimary,
+                                inactiveTrackColor = Color.White.copy(alpha = 0.16f)
+                            )
+                        )
+                    }
+
+                    ChillPlayerMenu.SLEEP -> {
+                        listOf<Int?>(null, 15, 30, 45, 60).forEach { mins ->
+                            SelectableGlassOptionRow(
+                                label = mins?.let { "Tắt sau $it phút" } ?: "Tắt hẹn giờ",
+                                selected = sleepTimerMinutes == mins,
+                                onClick = {
+                                    onSelectSleepTimer(mins)
+                                    onNavigateMenu(ChillPlayerMenu.NONE)
+                                }
+                            )
+                        }
+                    }
+
+                    ChillPlayerMenu.NONE -> Unit
                 }
             }
-
-            ChillPlayerMenu.NONE -> Unit
         }
     }
 }
@@ -594,15 +692,23 @@ private fun MenuChoiceRow(
                 onClick = onClick
             )
             .background(Color.White.copy(alpha = 0.05f))
-            .padding(horizontal = 12.dp, vertical = 9.dp),
+            .padding(horizontal = 12.dp, vertical = 10.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
             icon()
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(text = label, color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(
+                text = label,
+                color = TextPrimary,
+                fontSize = 12.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
+        Spacer(modifier = Modifier.width(8.dp))
         Text(text = value, color = TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
     }
 }
@@ -627,15 +733,17 @@ private fun SelectableGlassOptionRow(
                     listOf(Color.White.copy(alpha = 0.05f), Color.White.copy(alpha = 0.05f))
                 )
             )
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(horizontal = 12.dp, vertical = 9.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             text = label,
             color = if (selected) Color.White else TextPrimary,
-            fontSize = 12.sp,
-            fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.Medium
+            fontSize = 12.5.sp,
+            fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
         if (selected) {
             Text(text = "✓", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Black)

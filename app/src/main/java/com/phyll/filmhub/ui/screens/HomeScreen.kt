@@ -5,10 +5,17 @@ import android.content.Intent
 import android.speech.RecognizerIntent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -16,24 +23,29 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Movie
-import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -56,14 +68,15 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.phyll.filmhub.R
 import com.phyll.filmhub.data.CatalogSection
 import com.phyll.filmhub.model.ControlTargetMode
 import com.phyll.filmhub.model.CountryCategory
@@ -79,15 +92,14 @@ import com.phyll.filmhub.ui.theme.CinemaGlassBorder
 import com.phyll.filmhub.ui.theme.CinemaObsidian
 import com.phyll.filmhub.ui.theme.CinemaSurface
 import com.phyll.filmhub.ui.theme.CinemaSurfaceElevated
-import com.phyll.filmhub.ui.theme.ElectricCyan
 import com.phyll.filmhub.ui.theme.EmeraldNeon
 import com.phyll.filmhub.ui.theme.EmeraldPrimary
 import com.phyll.filmhub.ui.theme.LocalIsTvMode
 import com.phyll.filmhub.ui.theme.TextPrimary
 import com.phyll.filmhub.ui.theme.TextSecondary
-import com.phyll.filmhub.ui.theme.ThaiGold
 import com.phyll.filmhub.ui.theme.VioletGlow
 import com.phyll.filmhub.ui.theme.VioletPrimary
+import com.phyll.filmhub.ui.theme.VioletSoft
 import com.phyll.filmhub.ui.theme.tvFocusableClickable
 
 @Composable
@@ -124,6 +136,7 @@ fun HomeScreen(
 ) {
     val isTv = LocalIsTvMode.current
     val focusManager = LocalFocusManager.current
+    var showSearchBar by remember { mutableStateOf(searchQuery.isNotBlank() || isTv) }
 
     var spotlightMovie by remember(sections) {
         mutableStateOf(sections.firstOrNull()?.movies?.firstOrNull())
@@ -142,69 +155,265 @@ fun HomeScreen(
                 ?.firstOrNull()
                 .orEmpty()
             if (spoken.isNotBlank()) {
+                showSearchBar = true
                 onExecuteSearch(spoken)
             }
         }
     }
 
-    Box(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(AmbientCinemaBackdropBrush)
     ) {
+        val isWide = maxWidth >= 600.dp || isTv
+        val horizPad = if (isWide) 24.dp else 14.dp
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(bottom = 66.dp) // Space for the Phone-Style Bottom Navigation Bar
+                .statusBarsPadding()
         ) {
-            // Sleek Phone-Style Header & Search Pill
-            TopBarSection(
-                isTv = isTv,
-                searchQuery = searchQuery,
-                hasSessionGeminiKey = hasSessionGeminiKey,
-                activeGeminiModel = activeGeminiModel,
-                companionLanUrl = companionLanUrl,
-                onSearchQueryChange = onSearchQueryChange,
-                onExecuteSearch = {
-                    focusManager.clearFocus()
-                    onExecuteSearch(searchQuery)
-                },
-                onLaunchVoiceSearch = {
-                    runCatching {
-                        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                            putExtra(
-                                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            // 1. Minimalist, Overflow-Proof NKI x ChillFilm Top Header Bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = horizPad, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                // Brand Lockup: Authentic NKI x ChillFilm Icon + Wordmark
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Image(
+                        painter = painterResource(id = R.drawable.ic_chillfilm_nki),
+                        contentDescription = "ChillFilm by NKI",
+                        modifier = Modifier
+                            .size(if (isWide) 38.dp else 34.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "CHILL",
+                                color = EmeraldNeon,
+                                fontSize = if (isWide) 18.sp else 16.sp,
+                                fontWeight = FontWeight.Black,
+                                letterSpacing = 1.sp,
+                                maxLines = 1
                             )
-                            putExtra(RecognizerIntent.EXTRA_PROMPT, "Nói tên phim (Tiếng Thái / Việt / Anh)...")
+                            Text(
+                                text = "FILM",
+                                color = VioletSoft,
+                                fontSize = if (isWide) 18.sp else 16.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                letterSpacing = 1.sp,
+                                maxLines = 1
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(EmeraldPrimary.copy(alpha = 0.16f))
+                                    .border(0.75.dp, EmeraldNeon.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
+                                    .padding(horizontal = 5.dp, vertical = 1.dp)
+                            ) {
+                                Text(
+                                    text = "NKI",
+                                    color = EmeraldNeon,
+                                    fontSize = 8.5.sp,
+                                    fontWeight = FontWeight.Black,
+                                    letterSpacing = 0.6.sp
+                                )
+                            }
                         }
-                        onBeforeLaunchSystemOverlay()
-                        voiceLauncher.launch(intent)
-                    }.onFailure {
-                        onAfterSystemOverlayResult()
-                        onVoiceError()
+                        if (isWide && !companionLanUrl.isNullOrBlank()) {
+                            Text(
+                                text = "NKI Ecosystem • $companionLanUrl",
+                                color = TextSecondary,
+                                fontSize = 10.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
-                },
-                onOpenQrCompanion = onOpenQrCompanion,
-                onToggleUiMode = onToggleUiMode,
-                onRefresh = onRefresh
-            )
+                }
 
-            // Dual-Mode Switcher & TV Quick Status Bar on Standalone Android Phones / Tablets
-            if (!isTvHardware) {
-                PhoneControllerModeBanner(
-                    controlTargetMode = controlTargetMode,
-                    selectedTv = selectedTvDevice,
-                    isRemoteTvOnline = isRemoteTvOnline,
-                    hasSavedGeminiKey = hasSessionGeminiKey,
-                    onToggleMode = onToggleControlTargetMode,
-                    onOpenTvManager = onOpenTvManager
-                )
+                // Right Action Cluster: ONLY 3 crisp compact circular icons (zero overflow on 360dp!)
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    HeaderGlassIconBtn(
+                        icon = Icons.Default.Search,
+                        contentDesc = "Tìm phim",
+                        tint = if (showSearchBar || searchQuery.isNotBlank()) EmeraldNeon else TextPrimary,
+                        active = showSearchBar || searchQuery.isNotBlank(),
+                        onClick = {
+                            if (showSearchBar && searchQuery.isNotBlank()) {
+                                onSearchQueryChange("")
+                            }
+                            showSearchBar = !showSearchBar
+                        }
+                    )
+
+                    // Optional Secondary TV Cast / Stream Button
+                    HeaderGlassIconBtn(
+                        icon = if (isTvHardware) Icons.Default.Tv else Icons.Default.Cast,
+                        contentDesc = "Stream / Kết nối TV",
+                        tint = if (isRemoteTvOnline) EmeraldNeon else VioletSoft,
+                        showDot = isRemoteTvOnline,
+                        onClick = {
+                            if (isTvHardware) onOpenQrCompanion() else onOpenTvManager()
+                        }
+                    )
+
+                    HeaderGlassIconBtn(
+                        icon = Icons.Default.Refresh,
+                        contentDesc = "Làm mới",
+                        tint = TextSecondary,
+                        onClick = onRefresh
+                    )
+                }
             }
 
-            // Luxury Minimalist Country Filter Pills
+            // 2. Expandable Sleek Glass Search Bar (only takes vertical space when opened!)
+            AnimatedVisibility(
+                visible = showSearchBar || searchQuery.isNotBlank(),
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = horizPad)
+                        .padding(bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = searchQuery,
+                        onValueChange = onSearchQueryChange,
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        placeholder = {
+                            Text(
+                                text = "Tìm tên phim, diễn viên hoặc dán link YouTube...",
+                                color = TextSecondary,
+                                fontSize = 13.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.Search,
+                                contentDescription = null,
+                                tint = EmeraldNeon,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        trailingIcon = {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(end = 6.dp)
+                            ) {
+                                if (searchQuery.isNotEmpty()) {
+                                    Box(
+                                        modifier = Modifier
+                                            .tvFocusableClickable(shape = CircleShape) {
+                                                onSearchQueryChange("")
+                                            }
+                                            .padding(5.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Clear,
+                                            contentDescription = "Xóa",
+                                            tint = TextSecondary,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .tvFocusableClickable(
+                                            shape = CircleShape,
+                                            focusedBorderColor = VioletGlow,
+                                            onClick = {
+                                                runCatching {
+                                                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                                        putExtra(
+                                                            RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                                                            RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                                                        )
+                                                        putExtra(RecognizerIntent.EXTRA_PROMPT, "Nói tên phim...")
+                                                    }
+                                                    onBeforeLaunchSystemOverlay()
+                                                    voiceLauncher.launch(intent)
+                                                }.onFailure {
+                                                    onAfterSystemOverlayResult()
+                                                    onVoiceError()
+                                                }
+                                            }
+                                        )
+                                        .padding(6.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Mic,
+                                        contentDescription = "Tìm bằng giọng nói",
+                                        tint = VioletSoft,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        },
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                        keyboardActions = KeyboardActions(onSearch = {
+                            focusManager.clearFocus()
+                            onExecuteSearch(searchQuery)
+                        }),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = EmeraldNeon,
+                            unfocusedBorderColor = CinemaGlassBorder,
+                            focusedContainerColor = CinemaSurface,
+                            unfocusedContainerColor = CinemaSurface,
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary
+                        ),
+                        shape = RoundedCornerShape(14.dp)
+                    )
+
+                    Box(
+                        modifier = Modifier
+                            .tvFocusableClickable(
+                                shape = RoundedCornerShape(14.dp),
+                                focusedBorderColor = Color.White,
+                                unfocusedBorderColor = EmeraldNeon.copy(alpha = 0.6f),
+                                onClick = {
+                                    focusManager.clearFocus()
+                                    onExecuteSearch(searchQuery)
+                                }
+                            )
+                            .background(BrandEmeraldVioletBrush)
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "Tìm",
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    }
+                }
+            }
+
+            // 3. Clean Horizontally Scrollable Category Chips
             LazyRow(
-                contentPadding = PaddingValues(horizontal = if (isTv) 24.dp else 14.dp, vertical = 4.dp),
+                contentPadding = PaddingValues(horizontal = horizPad, vertical = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(CountryCategory.entries) { country ->
@@ -214,60 +423,62 @@ fun HomeScreen(
                             .tvFocusableClickable(
                                 shape = RoundedCornerShape(99.dp),
                                 focusedBorderColor = EmeraldNeon,
-                                unfocusedBorderColor = if (isSelected) VioletGlow else CinemaGlassBorder,
+                                unfocusedBorderColor = if (isSelected) EmeraldNeon.copy(alpha = 0.7f) else CinemaGlassBorder,
                                 focusedScale = 1.04f,
                                 onClick = { onSelectCountry(country) }
                             )
                             .background(
-                                brush = if (isSelected) BrandEmeraldVioletBrush else Brush.horizontalGradient(listOf(CinemaGlass, CinemaGlass))
+                                brush = if (isSelected) BrandEmeraldVioletBrush
+                                else Brush.horizontalGradient(listOf(CinemaGlass, CinemaGlass))
                             )
-                            .padding(horizontal = 14.dp, vertical = 6.dp)
+                            .padding(horizontal = 14.dp, vertical = 7.dp)
                     ) {
                         Text(
                             text = country.displayName,
                             color = if (isSelected) Color.White else Color(0xFFD1D5DB),
                             fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
                             fontSize = 12.sp,
-                            letterSpacing = 0.2.sp
+                            maxLines = 1
                         )
                     }
                 }
             }
 
-            // Main Body: Either Search Results or Home Catalog
+            Spacer(modifier = Modifier.height(4.dp))
+
+            // 4. Main Scrollable Catalog OR Responsive Search Results Grid
             if (searchQuery.isNotBlank()) {
                 SearchResultsBody(
                     query = searchQuery,
                     isSearching = isSearching,
                     results = searchResults,
+                    horizPad = horizPad,
                     onClearSearch = { onSearchQueryChange("") },
                     onMovieClick = onMovieClick
                 )
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = 28.dp),
+                    contentPadding = PaddingValues(top = 6.dp, bottom = 104.dp),
                     verticalArrangement = Arrangement.spacedBy(18.dp)
                 ) {
-                    // Phone-Style Hero Spotlight Card
                     spotlightMovie?.let { hero ->
                         item(key = "hero_banner") {
                             HeroSpotlightBanner(
                                 movie = hero,
-                                isTv = isTv,
+                                isWide = isWide,
+                                horizPad = horizPad,
                                 onPlayClick = { onQuickPlayMovie(hero) },
-                                onDetailClick = { onMovieClick(hero) },
-                                onStreamToPhoneClick = onOpenQrCompanion
+                                onDetailClick = { onMovieClick(hero) }
                             )
                         }
                     }
 
-                    // Continue Watching Section
                     if (watchHistory.isNotEmpty() && selectedCountry == CountryCategory.ALL) {
                         item(key = "continue_watching") {
                             ContinueWatchingRow(
                                 history = watchHistory,
-                                isTv = isTv,
+                                horizPad = horizPad,
                                 onResume = onResumeHistory
                             )
                         }
@@ -282,12 +493,12 @@ fun HomeScreen(
                                 contentAlignment = Alignment.Center
                             ) {
                                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    CircularProgressIndicator(color = ThaiGold)
+                                    CircularProgressIndicator(color = EmeraldNeon)
                                     Spacer(modifier = Modifier.height(12.dp))
                                     Text(
-                                        text = "Đang tải kho phim đa quốc gia...",
+                                        text = "Đang tải kho phim ChillFilm...",
                                         color = TextSecondary,
-                                        fontSize = 14.sp
+                                        fontSize = 13.sp
                                     )
                                 }
                             }
@@ -297,10 +508,8 @@ fun HomeScreen(
                     items(sections, key = { it.id }) { section ->
                         CatalogSectionRow(
                             section = section,
-                            isTv = isTv,
-                            onMovieFocused = { focused ->
-                                spotlightMovie = focused
-                            },
+                            horizPad = horizPad,
+                            onMovieFocused = { focused -> spotlightMovie = focused },
                             onMovieClick = onMovieClick
                         )
                     }
@@ -308,184 +517,132 @@ fun HomeScreen(
             }
         }
 
-        // Sleek Phone-Like Bottom Glass Navigation Bar (Works with BOTH Touch/Phone Stream & TV Remote D-Pad!)
-        MobileBottomNavigationBar(
+        // 5. Sleek Floating 4-Tab Spatial Glass Bottom Navigation Bar (100% Equal-Weight, Zero Clipping!)
+        FloatingBottomNavBar(
             selectedCountry = selectedCountry,
             isSearchActive = searchQuery.isNotBlank(),
             hasGeminiKey = hasSessionGeminiKey,
-            isTvHardware = isTvHardware,
-            selectedTvDevice = selectedTvDevice,
-            onGoHomeAll = {
+            isWide = isWide,
+            onGoDiscover = {
                 onSearchQueryChange("")
                 onSelectCountry(CountryCategory.ALL)
             },
-            onGoThaiMovies = {
+            onGoSeries = {
                 onSearchQueryChange("")
-                onSelectCountry(CountryCategory.THAILAND)
+                onSelectCountry(CountryCategory.LIVE_TV)
             },
-            onGoYouTubeMovies = {
+            onGoYouTube = {
                 onSearchQueryChange("")
                 onSelectCountry(CountryCategory.YOUTUBE)
             },
-            onOpenPhoneStream = onOpenQrCompanion,
-            onOpenTvManager = onOpenTvManager,
             onOpenSettings = onOpenSettingsSources,
-            modifier = Modifier.align(Alignment.BottomCenter)
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
         )
     }
 }
 
 @Composable
-private fun PhoneControllerModeBanner(
-    controlTargetMode: ControlTargetMode,
-    selectedTv: ManagedTvDevice?,
-    isRemoteTvOnline: Boolean,
-    hasSavedGeminiKey: Boolean,
-    onToggleMode: () -> Unit,
-    onOpenTvManager: () -> Unit
+private fun HeaderGlassIconBtn(
+    icon: ImageVector,
+    contentDesc: String,
+    tint: Color,
+    active: Boolean = false,
+    showDot: Boolean = false,
+    onClick: () -> Unit
 ) {
-    Row(
+    Box(
         modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 4.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(Color(0xFF0E1522))
-            .border(1.dp, ElectricCyan.copy(alpha = 0.28f), RoundedCornerShape(14.dp))
-            .padding(horizontal = 10.dp, vertical = 7.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .tvFocusableClickable(
-                    shape = RoundedCornerShape(10.dp),
-                    focusedBorderColor = ThaiGold,
-                    unfocusedBorderColor = if (controlTargetMode == ControlTargetMode.REMOTE_TV) ElectricCyan else ThaiGold,
-                    onClick = onToggleMode
-                )
-                .background(
-                    if (controlTargetMode == ControlTargetMode.REMOTE_TV) ElectricCyan.copy(alpha = 0.16f)
-                    else ThaiGold.copy(alpha = 0.16f)
-                )
-                .padding(horizontal = 10.dp, vertical = 7.dp)
-        ) {
-            val modeTitle = if (controlTargetMode == ControlTargetMode.REMOTE_TV) {
-                val tvLabel = selectedTv?.displayTitle ?: "Chưa chọn TV"
-                val dot = if (isRemoteTvOnline) "🟢" else "🟡"
-                "$dot Chế độ Điều Khiển TV: $tvLabel"
-            } else {
-                "📱 Chế độ: Xem Trực Tiếp Trên ĐT ${if (hasSavedGeminiKey) "• 🔐 AI Sẵn" else ""}"
-            }
-            Text(
-                text = modeTitle,
-                color = if (controlTargetMode == ControlTargetMode.REMOTE_TV) ElectricCyan else ThaiGold,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.ExtraBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+            .size(38.dp)
+            .tvFocusableClickable(
+                shape = CircleShape,
+                focusedBorderColor = EmeraldNeon,
+                unfocusedBorderColor = if (active) EmeraldNeon.copy(alpha = 0.65f) else CinemaGlassBorder,
+                onClick = onClick
             )
-        }
-
-        Box(
-            modifier = Modifier
-                .tvFocusableClickable(
-                    shape = RoundedCornerShape(10.dp),
-                    focusedBorderColor = Color.White,
-                    unfocusedBorderColor = ElectricCyan,
-                    onClick = onOpenTvManager
-                )
-                .background(ElectricCyan)
-                .padding(horizontal = 11.dp, vertical = 7.dp)
-        ) {
-            Text(
-                text = "📡 Cài & Chọn TV",
-                color = CinemaObsidian,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.ExtraBold,
-                maxLines = 1
+            .background(if (active) EmeraldPrimary.copy(alpha = 0.18f) else CinemaGlass),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDesc,
+            tint = tint,
+            modifier = Modifier.size(19.dp)
+        )
+        if (showDot) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(7.dp)
+                    .size(7.dp)
+                    .clip(CircleShape)
+                    .background(EmeraldNeon)
             )
         }
     }
 }
 
 @Composable
-private fun MobileBottomNavigationBar(
+private fun FloatingBottomNavBar(
     selectedCountry: CountryCategory,
     isSearchActive: Boolean,
     hasGeminiKey: Boolean,
-    isTvHardware: Boolean,
-    selectedTvDevice: ManagedTvDevice?,
-    onGoHomeAll: () -> Unit,
-    onGoThaiMovies: () -> Unit,
-    onGoYouTubeMovies: () -> Unit,
-    onOpenPhoneStream: () -> Unit,
-    onOpenTvManager: () -> Unit,
+    isWide: Boolean,
+    onGoDiscover: () -> Unit,
+    onGoSeries: () -> Unit,
+    onGoYouTube: () -> Unit,
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = if (isTvHardware) 20.dp else 10.dp, vertical = 8.dp),
+            .padding(horizontal = if (isWide) 64.dp else 14.dp, vertical = 10.dp),
         contentAlignment = Alignment.Center
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(56.dp)
+                .height(60.dp)
                 .clip(RoundedCornerShape(24.dp))
-                .background(CinemaGlass)
-                .border(width = 1.dp, brush = BrandNeonGlassBorderBrush, shape = RoundedCornerShape(24.dp))
-                .padding(horizontal = 8.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
+                .background(Color(0xE80D1120))
+                .border(1.dp, BrandNeonGlassBorderBrush, RoundedCornerShape(24.dp))
+                .padding(horizontal = 6.dp, vertical = 5.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            BottomNavTabItem(
+            BottomNavTab(
                 icon = Icons.Default.Home,
                 label = "Khám phá",
-                active = !isSearchActive && selectedCountry == CountryCategory.ALL,
-                accentColor = ThaiGold,
-                onClick = onGoHomeAll
+                active = !isSearchActive && selectedCountry != CountryCategory.LIVE_TV && selectedCountry != CountryCategory.YOUTUBE,
+                accentColor = EmeraldNeon,
+                modifier = Modifier.weight(1f),
+                onClick = onGoDiscover
             )
-            BottomNavTabItem(
+            BottomNavTab(
                 icon = Icons.Default.Movie,
-                label = "Phim Thái",
-                active = !isSearchActive && selectedCountry == CountryCategory.THAILAND,
-                accentColor = ThaiGold,
-                onClick = onGoThaiMovies
+                label = "Phim bộ",
+                active = !isSearchActive && selectedCountry == CountryCategory.LIVE_TV,
+                accentColor = EmeraldNeon,
+                modifier = Modifier.weight(1f),
+                onClick = onGoSeries
             )
-            BottomNavTabItem(
+            BottomNavTab(
                 icon = Icons.Default.SmartDisplay,
                 label = "YouTube",
                 active = !isSearchActive && selectedCountry == CountryCategory.YOUTUBE,
-                accentColor = ElectricCyan,
-                onClick = onGoYouTubeMovies
+                accentColor = VioletSoft,
+                modifier = Modifier.weight(1f),
+                onClick = onGoYouTube
             )
-            if (isTvHardware) {
-                BottomNavTabItem(
-                    icon = Icons.Default.PhoneAndroid,
-                    label = "Stream ĐT",
-                    active = false,
-                    accentColor = ElectricCyan,
-                    highlightPill = true,
-                    onClick = onOpenPhoneStream
-                )
-            } else {
-                BottomNavTabItem(
-                    icon = Icons.Default.Tv,
-                    label = if (selectedTvDevice != null) "TV & Điều Khiển" else "Quản Lý TV",
-                    active = false,
-                    accentColor = ElectricCyan,
-                    highlightPill = true,
-                    onClick = onOpenTvManager
-                )
-            }
-            BottomNavTabItem(
+            BottomNavTab(
                 icon = Icons.Default.Settings,
-                label = if (hasGeminiKey) "AI & Nguồn" else "Cài đặt",
+                label = "Cài đặt",
                 active = false,
-                accentColor = if (hasGeminiKey) Color(0xFF10B981) else ThaiGold,
+                accentColor = if (hasGeminiKey) EmeraldNeon else VioletSoft,
+                showBadgeDot = hasGeminiKey,
+                modifier = Modifier.weight(1f),
                 onClick = onOpenSettings
             )
         }
@@ -493,353 +650,73 @@ private fun MobileBottomNavigationBar(
 }
 
 @Composable
-private fun BottomNavTabItem(
+private fun BottomNavTab(
     icon: ImageVector,
     label: String,
     active: Boolean,
     accentColor: Color,
-    highlightPill: Boolean = false,
+    showBadgeDot: Boolean = false,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
-    val bg = when {
-        active -> accentColor.copy(alpha = 0.16f)
-        highlightPill -> ElectricCyan.copy(alpha = 0.10f)
-        else -> Color.Transparent
-    }
-    val fg = when {
-        active -> accentColor
-        highlightPill -> ElectricCyan
-        else -> TextSecondary
-    }
-    val isCompactPortrait = LocalConfiguration.current.screenWidthDp < 520
-    val modifierWithFocus = Modifier
-        .tvFocusableClickable(
-            shape = RoundedCornerShape(12.dp),
-            focusedBorderColor = accentColor,
-            unfocusedBorderColor = if (active || highlightPill) accentColor.copy(alpha = 0.35f) else Color.Transparent,
-            focusedScale = 1.05f,
-            onClick = onClick
-        )
-        .background(bg)
-
-    if (isCompactPortrait) {
-        Column(
-            modifier = modifierWithFocus.padding(horizontal = 7.dp, vertical = 4.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = label,
-                tint = fg,
-                modifier = Modifier.size(16.dp)
-            )
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = label,
-                color = if (active || highlightPill) TextPrimary else TextSecondary,
-                fontSize = 9.sp,
-                fontWeight = if (active || highlightPill) FontWeight.Bold else FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-    } else {
-        Row(
-            modifier = modifierWithFocus.padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = label,
-                tint = fg,
-                modifier = Modifier.size(17.dp)
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = label,
-                color = if (active || highlightPill) TextPrimary else TextSecondary,
-                fontSize = 11.sp,
-                fontWeight = if (active || highlightPill) FontWeight.Bold else FontWeight.Medium,
-                maxLines = 1
-            )
-        }
-    }
-}
-
-@Composable
-private fun TopBarSection(
-    isTv: Boolean,
-    searchQuery: String,
-    hasSessionGeminiKey: Boolean,
-    activeGeminiModel: String,
-    companionLanUrl: String?,
-    onSearchQueryChange: (String) -> Unit,
-    onExecuteSearch: () -> Unit,
-    onLaunchVoiceSearch: () -> Unit,
-    onOpenQrCompanion: () -> Unit,
-    onToggleUiMode: () -> Unit,
-    onRefresh: () -> Unit
-) {
-    val horizPad = if (isTv) 24.dp else 14.dp
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = horizPad, vertical = 8.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(32.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(BrandEmeraldVioletBrush),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.PlayArrow,
-                        contentDescription = null,
-                        tint = Color.White,
-                        modifier = Modifier.size(19.dp)
-                    )
-                }
-                Spacer(modifier = Modifier.width(10.dp))
-                Column {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = "CHILL",
-                            color = EmeraldNeon,
-                            fontSize = if (isTv) 18.sp else 15.sp,
-                            fontWeight = FontWeight.Black,
-                            letterSpacing = 1.2.sp
-                        )
-                        Spacer(modifier = Modifier.width(3.dp))
-                        Text(
-                            text = "FILM",
-                            color = VioletGlow,
-                            fontSize = if (isTv) 18.sp else 15.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            letterSpacing = 1.5.sp
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(99.dp))
-                                .background(VioletPrimary.copy(alpha = 0.16f))
-                                .border(0.75.dp, VioletGlow.copy(alpha = 0.55f), RoundedCornerShape(99.dp))
-                                .padding(horizontal = 7.dp, vertical = 2.dp)
-                        ) {
-                            Text(
-                                text = "2026 AI",
-                                color = EmeraldNeon,
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                letterSpacing = 0.5.sp
-                            )
-                        }
-                    }
-                    if (!companionLanUrl.isNullOrBlank()) {
-                        Text(
-                            text = "Remote & Stream: $companionLanUrl",
-                            color = TextSecondary,
-                            fontSize = 10.sp
-                        )
-                    }
-                }
-            }
-
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Ephemeral RAM AI Status Pill
-                Box(
-                    modifier = Modifier
-                        .tvFocusableClickable(
-                            shape = RoundedCornerShape(99.dp),
-                            focusedBorderColor = ThaiGold,
-                            unfocusedBorderColor = if (hasSessionGeminiKey) Color(0xFF10B981).copy(alpha = 0.5f) else Color.White.copy(alpha = 0.12f),
-                            onClick = onOpenQrCompanion
-                        )
-                        .background(
-                            if (hasSessionGeminiKey) Color(0xFF063E2E) else Color(0xFF111723)
-                        )
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                ) {
-                    Text(
-                        text = if (hasSessionGeminiKey) "AI READY • ${activeGeminiModel.take(12)}" else "Nạp Gemini AI",
-                        color = if (hasSessionGeminiKey) Color(0xFF6EE7B7) else ThaiGold,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.3.sp
-                    )
-                }
-
-                ActionIconPill(
-                    icon = Icons.Default.PhoneAndroid,
-                    label = if (isTv) "Mode: TV" else "Mode: ĐT",
-                    accent = ThaiGold,
-                    onClick = onToggleUiMode
-                )
-
-                ActionIconPill(
-                    icon = Icons.Default.QrCode2,
-                    label = "Stream ĐT",
-                    accent = ElectricCyan,
-                    onClick = onOpenQrCompanion
-                )
-
-                ActionIconPill(
-                    icon = Icons.Default.Refresh,
-                    label = "",
-                    accent = TextPrimary,
-                    onClick = onRefresh
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(6.dp))
-
-        // Sleek Glass Search Pill Bar
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = onSearchQueryChange,
-                modifier = Modifier.weight(1f),
-                singleLine = true,
-                placeholder = {
-                    Text(
-                        text = "Tìm phim Thái, Hàn, Âu Mỹ hoặc dán link YouTube...",
-                        color = TextSecondary,
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                },
-                leadingIcon = {
-                    Icon(Icons.Default.Search, contentDescription = "Tìm kiếm", tint = ThaiGold, modifier = Modifier.size(18.dp))
-                },
-                trailingIcon = {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        modifier = Modifier.padding(end = 6.dp)
-                    ) {
-                        if (searchQuery.isNotEmpty()) {
-                            Box(
-                                modifier = Modifier
-                                    .tvFocusableClickable(shape = CircleShape) {
-                                        onSearchQueryChange("")
-                                    }
-                                    .padding(4.dp)
-                            ) {
-                                Icon(Icons.Default.Clear, contentDescription = "Xóa", tint = TextSecondary, modifier = Modifier.size(16.dp))
-                            }
-                        }
-                        Box(
-                            modifier = Modifier
-                                .tvFocusableClickable(
-                                    shape = CircleShape,
-                                    focusedBorderColor = ElectricCyan,
-                                    onClick = onLaunchVoiceSearch
-                                )
-                                .background(CinemaSurfaceElevated)
-                                .padding(6.dp)
-                        ) {
-                            Icon(
-                                Icons.Default.Mic,
-                                contentDescription = "Giọng nói",
-                                tint = ElectricCyan,
-                                modifier = Modifier.size(15.dp)
-                            )
-                        }
-                    }
-                },
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                keyboardActions = KeyboardActions(onSearch = { onExecuteSearch() }),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = ThaiGold,
-                    unfocusedBorderColor = Color.White.copy(alpha = 0.08f),
-                    focusedContainerColor = Color(0xFF0E131D),
-                    unfocusedContainerColor = Color(0xFF0E131D),
-                    focusedTextColor = TextPrimary,
-                    unfocusedTextColor = TextPrimary
-                ),
-                shape = RoundedCornerShape(14.dp)
-            )
-
-            ActionIconPill(
-                icon = Icons.Default.Search,
-                label = "Tìm",
-                accent = ThaiGold,
-                onClick = onExecuteSearch
-            )
-        }
-    }
-}
-
-@Composable
-private fun ActionIconPill(
-    icon: ImageVector,
-    label: String,
-    accent: Color,
-    onClick: () -> Unit
-) {
-    Row(
-        modifier = Modifier
+        modifier = modifier
+            .fillMaxSize()
             .tvFocusableClickable(
-                shape = RoundedCornerShape(99.dp),
-                focusedBorderColor = accent,
-                unfocusedBorderColor = Color.White.copy(alpha = 0.10f),
+                shape = RoundedCornerShape(18.dp),
+                focusedBorderColor = accentColor,
+                unfocusedBorderColor = if (active) accentColor.copy(alpha = 0.35f) else Color.Transparent,
+                focusedScale = 1.03f,
                 onClick = onClick
             )
-            .background(Color(0xFF111723))
-            .padding(horizontal = 11.dp, vertical = 7.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .background(if (active) accentColor.copy(alpha = 0.16f) else Color.Transparent),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = label,
-            tint = accent,
-            modifier = Modifier.size(15.dp)
-        )
-        if (label.isNotEmpty()) {
-            Spacer(modifier = Modifier.width(5.dp))
-            Text(
-                text = label,
-                color = TextPrimary,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold
+        Box {
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = if (active) accentColor else TextSecondary,
+                modifier = Modifier.size(20.dp)
             )
+            if (showBadgeDot) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(EmeraldNeon)
+                )
+            }
         }
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(
+            text = label,
+            color = if (active) TextPrimary else TextSecondary,
+            fontSize = 10.sp,
+            fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
 @Composable
 private fun HeroSpotlightBanner(
     movie: MovieItem,
-    isTv: Boolean,
+    isWide: Boolean,
+    horizPad: androidx.compose.ui.unit.Dp,
     onPlayClick: () -> Unit,
-    onDetailClick: () -> Unit,
-    onStreamToPhoneClick: () -> Unit
+    onDetailClick: () -> Unit
 ) {
-    val horizPad = if (isTv) 24.dp else 14.dp
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = horizPad)
-            .height(if (isTv) 228.dp else 202.dp)
+            .height(if (isWide) 252.dp else 218.dp)
             .clip(RoundedCornerShape(22.dp))
-            .border(1.2.dp, BrandNeonGlassBorderBrush, RoundedCornerShape(22.dp))
+            .border(1.dp, BrandNeonGlassBorderBrush, RoundedCornerShape(22.dp))
             .background(CinemaObsidian)
     ) {
         val heroArt = movie.backdropUrl.ifBlank { movie.posterUrl }
@@ -852,100 +729,86 @@ private fun HeroSpotlightBanner(
             )
         }
 
-        // Multi-stop luxury cinema vignette
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.horizontalGradient(
-                        listOf(
-                            Color(0xFA070A0F),
-                            Color(0xE0070A0F),
-                            Color(0x80070A0F),
-                            Color(0x22070A0F)
-                        )
-                    )
-                )
-        )
+        // Smooth bottom + left cinematic vignette
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(
                     Brush.verticalGradient(
                         listOf(
-                            Color.Transparent,
-                            Color(0x66070A0F),
-                            Color(0xEE070A0F)
+                            Color(0x3306070D),
+                            Color(0x9906070D),
+                            Color(0xF206070D)
                         )
                     )
                 )
         )
+        if (isWide) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.horizontalGradient(
+                            listOf(
+                                Color(0xEC06070D),
+                                Color(0x9906070D),
+                                Color.Transparent
+                            )
+                        )
+                    )
+            )
+        }
 
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(if (isTv) 22.dp else 16.dp),
-            verticalArrangement = Arrangement.SpaceBetween
+                .padding(if (isWide) 22.dp else 14.dp),
+            verticalArrangement = Arrangement.Bottom
         ) {
-            Column(modifier = Modifier.fillMaxWidth(0.84f)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+            // Concise Metadata Line
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(EmeraldPrimary)
+                        .padding(horizontal = 7.dp, vertical = 2.dp)
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(ThaiGold)
-                            .padding(horizontal = 7.dp, vertical = 2.dp)
-                    ) {
-                        Text(
-                            text = "FEATURED • SUB ไทย",
-                            color = CinemaObsidian,
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.Black,
-                            letterSpacing = 0.5.sp
-                        )
-                    }
                     Text(
-                        text = movie.country.displayName.uppercase(),
-                        color = ThaiGold,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.5.sp
+                        text = "AI SUB ĐA NGÔN NGỮ",
+                        color = CinemaObsidian,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Black,
+                        letterSpacing = 0.4.sp
                     )
-                    if (movie.quality.isNotBlank()) {
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .border(0.5.dp, ElectricCyan.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
-                                .padding(horizontal = 5.dp, vertical = 1.dp)
-                        ) {
-                            Text(
-                                text = movie.quality.uppercase(),
-                                color = ElectricCyan,
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                    if (movie.year.isNotBlank()) {
-                        Text(
-                            text = movie.year,
-                            color = TextSecondary,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
                 }
-                Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = movie.title,
-                    color = TextPrimary,
-                    fontSize = if (isTv) 24.sp else 19.sp,
-                    fontWeight = FontWeight.ExtraBold,
+                    text = listOfNotNull(
+                        movie.country.displayName.takeIf { it.isNotBlank() },
+                        movie.year.takeIf { it.isNotBlank() }
+                    ).joinToString(" • "),
+                    color = VioletSoft,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Text(
+                text = movie.title,
+                color = TextPrimary,
+                fontSize = if (isWide) 24.sp else 18.sp,
+                fontWeight = FontWeight.ExtraBold,
+                maxLines = if (isWide) 1 else 2,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            if (isWide && movie.description.isNotBlank()) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = movie.description,
@@ -953,13 +816,20 @@ private fun HeroSpotlightBanner(
                     fontSize = 12.sp,
                     lineHeight = 17.sp,
                     maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth(0.76f)
                 )
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Exactly 2 clean balanced CTA buttons (never overflows on 360dp!)
+            Row(
+                modifier = if (isWide) Modifier else Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
                 Row(
-                    modifier = Modifier
+                    modifier = (if (isWide) Modifier else Modifier.weight(1.3f))
                         .tvFocusableClickable(
                             shape = RoundedCornerShape(99.dp),
                             focusedBorderColor = Color.White,
@@ -967,7 +837,8 @@ private fun HeroSpotlightBanner(
                             onClick = onPlayClick
                         )
                         .background(BrandEmeraldVioletBrush)
-                        .padding(horizontal = 20.dp, vertical = 9.dp),
+                        .padding(horizontal = 18.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
@@ -976,59 +847,42 @@ private fun HeroSpotlightBanner(
                         tint = Color.White,
                         modifier = Modifier.size(18.dp)
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
+                    Spacer(modifier = Modifier.width(5.dp))
                     Text(
-                        text = "Phát Phim",
+                        text = "Xem Ngay",
                         color = Color.White,
                         fontWeight = FontWeight.ExtraBold,
-                        fontSize = 13.sp
+                        fontSize = 13.sp,
+                        maxLines = 1
                     )
                 }
 
-                Box(
-                    modifier = Modifier
+                Row(
+                    modifier = (if (isWide) Modifier else Modifier.weight(1f))
                         .tvFocusableClickable(
                             shape = RoundedCornerShape(99.dp),
                             focusedBorderColor = VioletGlow,
                             unfocusedBorderColor = CinemaGlassBorder,
                             onClick = onDetailClick
                         )
-                        .background(CinemaGlass)
-                        .padding(horizontal = 16.dp, vertical = 9.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "Chi Tiết & Tập",
-                        color = TextPrimary,
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 13.sp
-                    )
-                }
-
-                Row(
-                    modifier = Modifier
-                        .tvFocusableClickable(
-                            shape = RoundedCornerShape(99.dp),
-                            focusedBorderColor = VioletGlow,
-                            unfocusedBorderColor = VioletGlow.copy(alpha = 0.50f),
-                            onClick = onStreamToPhoneClick
-                        )
-                        .background(VioletPrimary.copy(alpha = 0.18f))
-                        .padding(horizontal = 14.dp, vertical = 9.dp),
+                        .background(Color(0xCC13172B))
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
-                        Icons.Default.PhoneAndroid,
+                        Icons.Default.Info,
                         contentDescription = null,
-                        tint = ElectricCyan,
-                        modifier = Modifier.size(15.dp)
+                        tint = TextPrimary,
+                        modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(5.dp))
                     Text(
-                        text = "Điều Khiển ĐT",
-                        color = ElectricCyan,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp
+                        text = "Chi Tiết",
+                        color = TextPrimary,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp,
+                        maxLines = 1
                     )
                 }
             }
@@ -1039,13 +893,12 @@ private fun HeroSpotlightBanner(
 @Composable
 private fun ContinueWatchingRow(
     history: List<WatchProgress>,
-    isTv: Boolean,
+    horizPad: androidx.compose.ui.unit.Dp,
     onResume: (WatchProgress) -> Unit
 ) {
-    val horizPad = if (isTv) 24.dp else 14.dp
     Column {
         Row(
-            modifier = Modifier.padding(horizontal = horizPad, vertical = 4.dp),
+            modifier = Modifier.padding(horizontal = horizPad, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
@@ -1053,19 +906,19 @@ private fun ContinueWatchingRow(
                     .width(3.dp)
                     .height(15.dp)
                     .clip(RoundedCornerShape(2.dp))
-                    .background(ThaiGold)
+                    .background(BrandEmeraldVioletBrush)
             )
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = "Tiếp Tục Xem Dở",
+                text = "Tiếp Tục Xem",
                 color = TextPrimary,
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Bold
             )
         }
         LazyRow(
-            contentPadding = PaddingValues(horizontal = horizPad, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            contentPadding = PaddingValues(horizontal = horizPad, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             items(history, key = { it.movieId }) { item ->
                 val mins = (item.positionMs / 60000L)
@@ -1077,8 +930,7 @@ private fun ContinueWatchingRow(
                     country = CountryCategory.fromSlugOrName(item.countryCode),
                     quality = item.episodeName,
                     posterUrl = item.posterUrl,
-                    providerName = "Xem tiếp",
-                    hasNativeThaiSub = true
+                    providerName = "Xem tiếp"
                 )
                 MovieCard(
                     movie = pseudoMovie,
@@ -1093,11 +945,10 @@ private fun ContinueWatchingRow(
 @Composable
 private fun CatalogSectionRow(
     section: CatalogSection,
-    isTv: Boolean,
+    horizPad: androidx.compose.ui.unit.Dp,
     onMovieFocused: (MovieItem) -> Unit,
     onMovieClick: (MovieItem) -> Unit
 ) {
-    val horizPad = if (isTv) 24.dp else 14.dp
     Column {
         Row(
             modifier = Modifier
@@ -1106,32 +957,27 @@ private fun CatalogSectionRow(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
-                Text(
-                    text = section.title,
-                    color = TextPrimary,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.ExtraBold
-                )
-                if (section.subtitle.isNotBlank()) {
-                    Text(
-                        text = section.subtitle,
-                        color = TextSecondary,
-                        fontSize = 11.sp
-                    )
-                }
-            }
+            Text(
+                text = section.title,
+                color = TextPrimary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.ExtraBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
             Text(
                 text = "${section.movies.size} phim ›",
-                color = ThaiGold,
-                fontSize = 12.sp,
+                color = EmeraldNeon,
+                fontSize = 11.sp,
                 fontWeight = FontWeight.Bold
             )
         }
         Spacer(modifier = Modifier.height(8.dp))
         LazyRow(
-            contentPadding = PaddingValues(horizontal = horizPad, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            contentPadding = PaddingValues(horizontal = horizPad),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             items(section.movies, key = { it.id }) { movie ->
                 MovieCard(
@@ -1149,12 +995,10 @@ private fun SearchResultsBody(
     query: String,
     isSearching: Boolean,
     results: List<MovieItem>,
+    horizPad: androidx.compose.ui.unit.Dp,
     onClearSearch: () -> Unit,
     onMovieClick: (MovieItem) -> Unit
 ) {
-    val isTv = LocalIsTvMode.current
-    val horizPad = if (isTv) 24.dp else 14.dp
-
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1168,48 +1012,46 @@ private fun SearchResultsBody(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "Kết quả cho \"$query\" (${results.size})",
-                color = ThaiGold,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold
+                text = "Kết quả \"$query\" (${results.size})",
+                color = EmeraldNeon,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
             )
+            Spacer(modifier = Modifier.width(8.dp))
             Box(
                 modifier = Modifier
                     .tvFocusableClickable(shape = RoundedCornerShape(99.dp), onClick = onClearSearch)
                     .background(CinemaSurfaceElevated)
                     .padding(horizontal = 12.dp, vertical = 6.dp)
             ) {
-                Text(text = "✖ Đóng tìm kiếm", color = TextPrimary, fontSize = 12.sp)
+                Text(text = "Đóng", color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             }
         }
 
         if (isSearching) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = ThaiGold)
+                CircularProgressIndicator(color = EmeraldNeon)
             }
         } else if (results.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
-                    text = "Không tìm thấy phim phù hợp. Hãy bấm Tìm hoặc thử từ khóa tiếng Anh.",
+                    text = "Không tìm thấy phim phù hợp. Hãy thử bấm nút Tìm hoặc nhập tên tiếng Anh.",
                     color = TextSecondary,
-                    fontSize = 14.sp
+                    fontSize = 13.sp
                 )
             }
         } else {
-            LazyColumn(
-                contentPadding = PaddingValues(bottom = 32.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(minSize = 126.dp),
+                contentPadding = PaddingValues(bottom = 104.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                val columns = if (isTv) 5 else 4
-                items(results.chunked(columns)) { rowItems ->
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        for (m in rowItems) {
-                            MovieCard(
-                                movie = m,
-                                onClick = { onMovieClick(m) }
-                            )
-                        }
-                    }
+                items(results, key = { it.id }) { movie ->
+                    MovieCard(movie = movie, onClick = { onMovieClick(movie) })
                 }
             }
         }

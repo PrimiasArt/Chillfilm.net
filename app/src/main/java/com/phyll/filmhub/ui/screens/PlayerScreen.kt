@@ -30,11 +30,15 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.displayCutoutPadding
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -42,11 +46,13 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Forward10
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.NightlightRound
 import androidx.compose.material.icons.filled.Pause
@@ -57,6 +63,7 @@ import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -665,9 +672,11 @@ fun PlayerScreen(
     }
 
     LaunchedEffect(
+        subtitleConfig.preferredPrimaryLang,
         subtitleConfig.autoTranslateToThai,
         subtitleConfig.dualSubEnabled,
         subtitleConfig.secondaryLang,
+        subtitleConfig.secondaryLangCode,
         subtitleConfig.translationEngine,
         subtitleConfig.geminiModelId,
         geminiApiKey
@@ -1140,23 +1149,35 @@ fun PlayerScreen(
             }
         }
 
-        // 5. Chill-Player 2026 Spatial Glassmorphism OSD HUD
+        // 5. Minimalist, 100% Overflow-Proof 2026 Cinema HUD (Portrait Phone, Landscape Phone, Tablet & TV)
         AnimatedVisibility(
-            visible = showControls && !isLocked && !showSubtitleDrawer && !showFastSnapModal && !isPreFlightBlocking,
+            visible = showControls && !isLocked && !showSubtitleDrawer && !showFastSnapModal && !isPreFlightBlocking && activeChillMenu == ChillPlayerMenu.NONE,
             enter = fadeIn(),
             exit = fadeOut()
         ) {
-            Box(modifier = Modifier.fillMaxSize()) {
-                // Floating Glass Top Capsule Bar
+            val primaryLangBadge = subtitleConfig.resolvedPrimaryLanguage().shortBadge
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                Color(0xB806070D),
+                                Color(0x2206070D),
+                                Color(0x2206070D),
+                                Color(0xCC06070D)
+                            )
+                        )
+                    )
+            ) {
+                // 5a. Clean Floating Top Bar (Back + Title + Max 3 Compact Actions)
                 Row(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .fillMaxWidth()
-                        .padding(horizontal = if (isTv) 28.dp else 14.dp, vertical = 12.dp)
-                        .clip(RoundedCornerShape(99.dp))
-                        .background(CinemaGlass)
-                        .border(1.dp, CinemaGlassBorder, RoundedCornerShape(99.dp))
-                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                        .statusBarsPadding()
+                        .displayCutoutPadding()
+                        .padding(horizontal = if (isTv) 24.dp else 12.dp, vertical = 10.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -1166,41 +1187,40 @@ fun PlayerScreen(
                     ) {
                         Box(
                             modifier = Modifier
+                                .size(38.dp)
                                 .tvFocusableClickable(
                                     shape = CircleShape,
                                     focusedBorderColor = EmeraldNeon,
+                                    unfocusedBorderColor = CinemaGlassBorder,
                                     onClick = {
                                         onSaveProgress(exoPlayer.currentPosition, durationMs)
                                         onExitPlayer()
                                     }
                                 )
-                                .background(Color.White.copy(alpha = 0.08f))
-                                .padding(8.dp)
+                                .background(CinemaGlass),
+                            contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 Icons.AutoMirrored.Filled.ArrowBack,
                                 contentDescription = "Thoát",
                                 tint = TextPrimary,
-                                modifier = Modifier.size(18.dp)
+                                modifier = Modifier.size(19.dp)
                             )
                         }
 
                         Spacer(modifier = Modifier.width(10.dp))
 
-                        Column {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = movie.title,
                                 color = TextPrimary,
-                                fontSize = if (isTv) 16.sp else 13.sp,
+                                fontSize = if (isTv) 16.sp else 13.5.sp,
                                 fontWeight = FontWeight.ExtraBold,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
-                            val nextCueInfo = if (renderState.nextCueStartMs > 0L && renderState.primaryThaiText == null) {
-                                " • Thoại: ${formatDurationMs(renderState.nextCueStartMs)}"
-                            } else ""
                             Text(
-                                text = "${episode.name} • ${renderState.statusBadge}$nextCueInfo",
+                                text = "${episode.name} • ${renderState.statusBadge}",
                                 color = EmeraldNeon,
                                 fontSize = 11.sp,
                                 maxLines = 1,
@@ -1209,112 +1229,13 @@ fun PlayerScreen(
                         }
                     }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        // Aspect Ratio Button (Chill-Player)
-                        Box(
-                            modifier = Modifier
-                                .tvFocusableClickable(
-                                    shape = CircleShape,
-                                    focusedBorderColor = EmeraldNeon,
-                                    unfocusedBorderColor = if (activeChillMenu == ChillPlayerMenu.ASPECT) EmeraldNeon else Color.Transparent,
-                                    onClick = {
-                                        lastUserInteractionTick = System.currentTimeMillis()
-                                        activeChillMenu = if (activeChillMenu == ChillPlayerMenu.ASPECT) ChillPlayerMenu.NONE else ChillPlayerMenu.ASPECT
-                                    }
-                                )
-                                .background(
-                                    if (activeChillMenu == ChillPlayerMenu.ASPECT) EmeraldPrimary.copy(alpha = 0.25f)
-                                    else Color.White.copy(alpha = 0.08f)
-                                )
-                                .padding(8.dp)
-                        ) {
-                            Icon(Icons.Default.AspectRatio, contentDescription = "Tỉ lệ", tint = TextPrimary, modifier = Modifier.size(17.dp))
-                        }
+                    Spacer(modifier = Modifier.width(8.dp))
 
-                        // Picture-in-Picture (PiP on Android 8.0+)
-                        if (!isTv && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && activity != null) {
-                            Box(
-                                modifier = Modifier
-                                    .tvFocusableClickable(
-                                        shape = CircleShape,
-                                        focusedBorderColor = VioletGlow,
-                                        onClick = {
-                                            runCatching {
-                                                val params = PictureInPictureParams.Builder()
-                                                    .setAspectRatio(Rational(16, 9))
-                                                    .build()
-                                                activity.enterPictureInPictureMode(params)
-                                            }
-                                        }
-                                    )
-                                    .background(Color.White.copy(alpha = 0.08f))
-                                    .padding(8.dp)
-                            ) {
-                                Icon(Icons.Default.PictureInPictureAlt, contentDescription = "PiP", tint = VioletGlow, modifier = Modifier.size(17.dp))
-                            }
-                        }
-
-                        // Landscape Full Rotate toggle on Phone
-                        if (!isTv && activity != null) {
-                            Box(
-                                modifier = Modifier
-                                    .tvFocusableClickable(
-                                        shape = CircleShape,
-                                        focusedBorderColor = EmeraldNeon,
-                                        onClick = {
-                                            val nextLand = !isLandscapeRotated
-                                            isLandscapeRotated = nextLand
-                                            activity.requestedOrientation = if (nextLand) {
-                                                ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                                            } else {
-                                                ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-                                            }
-                                        }
-                                    )
-                                    .background(if (isLandscapeRotated) VioletGlow.copy(alpha = 0.28f) else Color.White.copy(alpha = 0.08f))
-                                    .padding(8.dp)
-                            ) {
-                                Icon(Icons.Default.ScreenRotation, contentDescription = "Xoay ngang", tint = TextPrimary, modifier = Modifier.size(17.dp))
-                            }
-                        }
-
-                        // Chill-Player More Menu (Speed / Equalizer + 200% Boost / Sleep Timer)
-                        Box(
-                            modifier = Modifier
-                                .tvFocusableClickable(
-                                    shape = CircleShape,
-                                    focusedBorderColor = VioletGlow,
-                                    unfocusedBorderColor = if (activeChillMenu != ChillPlayerMenu.NONE) VioletGlow else Color.Transparent,
-                                    onClick = {
-                                        lastUserInteractionTick = System.currentTimeMillis()
-                                        activeChillMenu = if (activeChillMenu == ChillPlayerMenu.MORE) ChillPlayerMenu.NONE else ChillPlayerMenu.MORE
-                                    }
-                                )
-                                .background(Color.White.copy(alpha = 0.08f))
-                                .padding(8.dp)
-                        ) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "Tùy chọn phát", tint = TextPrimary, modifier = Modifier.size(17.dp))
-                        }
-
-                        if (isTv) {
-                            Box(
-                                modifier = Modifier
-                                    .tvFocusableClickable(
-                                        shape = CircleShape,
-                                        focusedBorderColor = VioletGlow,
-                                        onClick = {
-                                            lastUserInteractionTick = System.currentTimeMillis()
-                                            onOpenQrCompanion()
-                                        }
-                                    )
-                                    .background(Color.White.copy(alpha = 0.08f))
-                                    .padding(8.dp)
-                            ) {
-                                Icon(Icons.Default.QrCode2, contentDescription = "QR Sub", tint = VioletGlow, modifier = Modifier.size(17.dp))
-                            }
-                        }
-
-                        // Primary Subtitle Studio Pill (Emerald -> Violet Gradient)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Primary Universal AI Subtitle Pill
                         Row(
                             modifier = Modifier
                                 .tvFocusableClickable(
@@ -1328,37 +1249,132 @@ fun PlayerScreen(
                                     }
                                 )
                                 .background(BrandEmeraldVioletBrush)
-                                .padding(horizontal = 12.dp, vertical = 7.dp),
+                                .padding(horizontal = 10.dp, vertical = 7.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(
                                 Icons.Default.ClosedCaption,
-                                contentDescription = "Tùy chỉnh Sub",
+                                contentDescription = "Phụ đề",
                                 tint = Color.White,
-                                modifier = Modifier.size(16.dp)
+                                modifier = Modifier.size(15.dp)
                             )
-                            Spacer(modifier = Modifier.width(5.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = "Sub ไทย",
+                                text = primaryLangBadge,
                                 color = Color.White,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.ExtraBold
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Black,
+                                maxLines = 1
+                            )
+                        }
+
+                        // Rotate Screen Button (Phones)
+                        if (!isTv && activity != null) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .tvFocusableClickable(
+                                        shape = CircleShape,
+                                        focusedBorderColor = EmeraldNeon,
+                                        unfocusedBorderColor = CinemaGlassBorder,
+                                        onClick = {
+                                            lastUserInteractionTick = System.currentTimeMillis()
+                                            val nextLand = !isLandscapeRotated
+                                            isLandscapeRotated = nextLand
+                                            activity.requestedOrientation = if (nextLand) {
+                                                ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                                            } else {
+                                                ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                                            }
+                                        }
+                                    )
+                                    .background(if (isLandscapeRotated) VioletGlow.copy(alpha = 0.28f) else CinemaGlass),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    Icons.Default.ScreenRotation,
+                                    contentDescription = "Xoay ngang",
+                                    tint = TextPrimary,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                            }
+                        }
+
+                        // Unified More Menu (Speed / Equalizer + 200% Boost / Aspect / Sleep / PiP / Auto-Sync)
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .tvFocusableClickable(
+                                    shape = CircleShape,
+                                    focusedBorderColor = VioletGlow,
+                                    unfocusedBorderColor = CinemaGlassBorder,
+                                    onClick = {
+                                        lastUserInteractionTick = System.currentTimeMillis()
+                                        activeChillMenu = ChillPlayerMenu.MORE
+                                    }
+                                )
+                                .background(CinemaGlass),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Default.MoreVert,
+                                contentDescription = "Tùy chọn phát",
+                                tint = TextPrimary,
+                                modifier = Modifier.size(18.dp)
                             )
                         }
                     }
                 }
 
-                // Bottom Floating visionOS Spatial Glass Capsule
+                // 5b. Centered Cinema Transport Controls (-10s • Play/Pause • +10s)
+                Row(
+                    modifier = Modifier.align(Alignment.Center),
+                    horizontalArrangement = Arrangement.spacedBy(26.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    PlayerControlIconBtn(
+                        icon = Icons.Default.Replay10,
+                        contentDesc = "Tua lùi 10s",
+                        onClick = {
+                            lastUserInteractionTick = System.currentTimeMillis()
+                            exoPlayer.seekTo((exoPlayer.currentPosition - 10_000L).coerceAtLeast(0L))
+                        }
+                    )
+
+                    PlayerControlIconBtn(
+                        icon = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDesc = if (isPlaying) "Tạm dừng" else "Phát",
+                        isPrimary = true,
+                        modifier = Modifier.focusRequester(playPauseFocusRequester),
+                        onClick = {
+                            lastUserInteractionTick = System.currentTimeMillis()
+                            if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+                        }
+                    )
+
+                    PlayerControlIconBtn(
+                        icon = Icons.Default.Forward10,
+                        contentDesc = "Tua tới 10s",
+                        onClick = {
+                            lastUserInteractionTick = System.currentTimeMillis()
+                            exoPlayer.seekTo(exoPlayer.currentPosition + 10_000L)
+                        }
+                    )
+                }
+
+                // 5c. Sleek Bottom Capsule: Seekbar + Exactly 4 Clean Equal-Width Utility Actions
                 Column(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
-                        .padding(horizontal = if (isTv) 28.dp else 14.dp, vertical = 12.dp)
-                        .clip(RoundedCornerShape(24.dp))
+                        .navigationBarsPadding()
+                        .displayCutoutPadding()
+                        .padding(horizontal = if (isTv) 28.dp else 12.dp, vertical = 10.dp)
+                        .clip(RoundedCornerShape(20.dp))
                         .background(CinemaGlass)
-                        .border(1.dp, CinemaGlassBorder, RoundedCornerShape(24.dp))
-                        .padding(horizontal = 14.dp, vertical = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                        .border(1.dp, CinemaGlassBorder, RoundedCornerShape(20.dp))
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     if (movie.contentType != ContentType.LIVE_CHANNEL && durationMs > 0L) {
                         Row(
@@ -1380,7 +1396,9 @@ fun PlayerScreen(
                                     positionMs = newVal.toLong()
                                 },
                                 valueRange = 0f..durationMs.toFloat().coerceAtLeast(1f),
-                                modifier = Modifier.weight(1f),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(26.dp),
                                 colors = SliderDefaults.colors(
                                     thumbColor = EmeraldNeon,
                                     activeTrackColor = EmeraldPrimary,
@@ -1396,259 +1414,70 @@ fun PlayerScreen(
                         }
                     }
 
-                    // Row 1: Core Transport + Chill-Player Volume/200% Boost + Speed + Sleep Timer
+                    // Single clean 4-action bottom strip (zero overflow on any width!)
+                    val volPct = (volumeScale * 100).toInt()
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            PlayerControlIconBtn(
-                                icon = Icons.Default.Replay10,
-                                contentDesc = "Tua lùi 10s",
-                                onClick = {
-                                    lastUserInteractionTick = System.currentTimeMillis()
-                                    exoPlayer.seekTo((exoPlayer.currentPosition - 10_000L).coerceAtLeast(0L))
-                                }
-                            )
-
-                            PlayerControlIconBtn(
-                                icon = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                contentDesc = if (isPlaying) "Tạm dừng" else "Phát",
-                                isPrimary = true,
-                                modifier = Modifier.focusRequester(playPauseFocusRequester),
-                                onClick = {
-                                    lastUserInteractionTick = System.currentTimeMillis()
-                                    if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
-                                }
-                            )
-
-                            PlayerControlIconBtn(
-                                icon = Icons.Default.Forward10,
-                                contentDesc = "Tua tới 10s",
-                                onClick = {
-                                    lastUserInteractionTick = System.currentTimeMillis()
-                                    exoPlayer.seekTo(exoPlayer.currentPosition + 10_000L)
-                                }
-                            )
-
-                            if (nextEpisode != null) {
-                                PlayerControlIconBtn(
-                                    icon = Icons.Default.SkipNext,
-                                    contentDesc = "Tập tiếp theo",
-                                    onClick = { onSwitchEpisode(nextEpisode) }
-                                )
-                            }
-                        }
-
-                        // Right utilities cluster: Volume% (BOOST), Speed, Sleep Timer
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            val volPct = (volumeScale * 100).toInt()
-                            Row(
-                                modifier = Modifier
-                                    .tvFocusableClickable(
-                                        shape = RoundedCornerShape(99.dp),
-                                        focusedBorderColor = if (volPct > 100) AmberBoost else EmeraldNeon,
-                                        onClick = {
-                                            lastUserInteractionTick = System.currentTimeMillis()
-                                            activeChillMenu = if (activeChillMenu == ChillPlayerMenu.EQUALIZER) ChillPlayerMenu.NONE else ChillPlayerMenu.EQUALIZER
-                                        }
-                                    )
-                                    .background(Color.White.copy(alpha = 0.08f))
-                                    .padding(horizontal = 9.dp, vertical = 5.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    Icons.Default.VolumeUp,
-                                    contentDescription = "Âm lượng / Boost",
-                                    tint = if (volPct > 100) AmberBoost else EmeraldNeon,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    text = if (volPct > 100) "$volPct% BOOST" else "$volPct%",
-                                    color = if (volPct > 100) AmberBoost else TextPrimary,
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.ExtraBold
-                                )
-                            }
-
-                            Row(
-                                modifier = Modifier
-                                    .tvFocusableClickable(
-                                        shape = RoundedCornerShape(99.dp),
-                                        focusedBorderColor = VioletGlow,
-                                        onClick = {
-                                            lastUserInteractionTick = System.currentTimeMillis()
-                                            activeChillMenu = if (activeChillMenu == ChillPlayerMenu.SPEED) ChillPlayerMenu.NONE else ChillPlayerMenu.SPEED
-                                        }
-                                    )
-                                    .background(Color.White.copy(alpha = 0.08f))
-                                    .padding(horizontal = 9.dp, vertical = 5.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(Icons.Default.Speed, contentDescription = "Tốc độ", tint = VioletGlow, modifier = Modifier.size(14.dp))
-                                Spacer(modifier = Modifier.width(3.dp))
-                                Text(text = "${playbackSpeed}x", color = TextPrimary, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                            }
-
-                            Row(
-                                modifier = Modifier
-                                    .tvFocusableClickable(
-                                        shape = RoundedCornerShape(99.dp),
-                                        focusedBorderColor = VioletGlow,
-                                        onClick = {
-                                            lastUserInteractionTick = System.currentTimeMillis()
-                                            activeChillMenu = if (activeChillMenu == ChillPlayerMenu.SLEEP) ChillPlayerMenu.NONE else ChillPlayerMenu.SLEEP
-                                        }
-                                    )
-                                    .background(
-                                        if (sleepTimerMinutes != null) VioletGlow.copy(alpha = 0.25f)
-                                        else Color.White.copy(alpha = 0.08f)
-                                    )
-                                    .padding(horizontal = 9.dp, vertical = 5.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(Icons.Default.NightlightRound, contentDescription = "Hẹn giờ", tint = VioletGlow, modifier = Modifier.size(14.dp))
-                                Spacer(modifier = Modifier.width(3.dp))
-                                Text(
-                                    text = sleepTimerMinutes?.let { "${it}m" } ?: "Hẹn giờ",
-                                    color = if (sleepTimerMinutes != null) VioletGlow else TextPrimary,
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-                    }
-
-                    // Row 2: Clean Horizontally Scrollable Subtitle Sync & Style Quick Bar
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        val syncStatusSuffix = if (subtitleConfig.syncOffsetMs != 0L) {
-                            " (%+.1fs)".format(subtitleConfig.syncOffsetMs / 1000.0)
-                        } else ""
-                        QuickOsdPill(
-                            label = if (isAutoSyncing) "⏳ Đang Khớp 2 Điểm..." else "🎯 AI Tự Khớp$syncStatusSuffix",
-                            active = isAutoSyncing || subtitleConfig.syncOffsetMs != 0L || subtitleConfig.subSpeedScale != 1.0f,
+                        BottomHudActionChip(
+                            icon = Icons.Default.Lock,
+                            label = "Khóa",
+                            tint = TextPrimary,
+                            modifier = Modifier.weight(1f),
                             onClick = {
-                                lastUserInteractionTick = System.currentTimeMillis()
-                                if (!isAutoSyncing) {
-                                    subtitleManager.autoSyncCurrentSubtitle(
-                                        episode = episode,
-                                        aroundPositionMs = exoPlayer.currentPosition.coerceAtLeast(0L),
-                                        config = subtitleConfig,
-                                        geminiApiKey = geminiApiKey,
-                                        isSilentBackgroundCheck = false,
-                                        onApplyDetectedSync = { newOffsetMs, newScale, _, lockGeminiAudio ->
-                                            applyAndSaveSeriesSync(
-                                                newOffsetMs = newOffsetMs,
-                                                newSpeedScale = newScale,
-                                                lockGeminiAudio = if (lockGeminiAudio) true else null
-                                            )
-                                        }
-                                    )
-                                }
+                                isLocked = true
+                                activeChillMenu = ChillPlayerMenu.NONE
+                                showControls = false
+                                lockHintVisible = false
                             }
                         )
-                        if (selectedTrackId?.startsWith("ai_audio_") != true) {
-                            QuickOsdPill(
-                                label = "⚡ Chọn Câu Khớp",
-                                active = true,
+
+                        BottomHudActionChip(
+                            icon = if (volPct > 100) Icons.Default.VolumeUp else Icons.Default.Speed,
+                            label = if (volPct > 100) "$volPct%" else "${playbackSpeed}x",
+                            tint = if (volPct > 100) AmberBoost else VioletGlow,
+                            modifier = Modifier.weight(1f),
+                            onClick = {
+                                lastUserInteractionTick = System.currentTimeMillis()
+                                activeChillMenu = if (volPct > 100) ChillPlayerMenu.EQUALIZER else ChillPlayerMenu.SPEED
+                            }
+                        )
+
+                        BottomHudActionChip(
+                            icon = Icons.Default.Sync,
+                            label = if (subtitleConfig.syncOffsetMs != 0L) {
+                                "%+.1fs".format(subtitleConfig.syncOffsetMs / 1000.0)
+                            } else "Khớp Sub",
+                            tint = EmeraldNeon,
+                            modifier = Modifier.weight(1f),
+                            onClick = {
+                                lastUserInteractionTick = System.currentTimeMillis()
+                                openFastSnapModal()
+                            }
+                        )
+
+                        if (nextEpisode != null) {
+                            BottomHudActionChip(
+                                icon = Icons.Default.SkipNext,
+                                label = "Tập sau",
+                                tint = EmeraldNeon,
+                                modifier = Modifier.weight(1f),
+                                onClick = { onSwitchEpisode(nextEpisode) }
+                            )
+                        } else {
+                            BottomHudActionChip(
+                                icon = Icons.Default.AspectRatio,
+                                label = aspectRatioMode.displayName.substringBefore(" "),
+                                tint = TextPrimary,
+                                modifier = Modifier.weight(1f),
                                 onClick = {
                                     lastUserInteractionTick = System.currentTimeMillis()
-                                    openFastSnapModal()
+                                    activeChillMenu = ChillPlayerMenu.ASPECT
                                 }
                             )
                         }
-                        if (availableTracks.count { !it.isEmbedded && it.externalRef != null } >= 2) {
-                            QuickOsdPill(
-                                label = "🔄 Đổi Bản Sub",
-                                onClick = {
-                                    lastUserInteractionTick = System.currentTimeMillis()
-                                    applyAndSaveSeriesSync(0L, 1.0f, lockGeminiAudio = false)
-                                    subtitleManager.cycleToNextExternalTrack(
-                                        config = subtitleConfig.copy(syncOffsetMs = 0L, subSpeedScale = 1.0f),
-                                        geminiApiKey = geminiApiKey
-                                    )
-                                }
-                            )
-                        }
-                        QuickOsdPill(
-                            label = "Sub -0.5s",
-                            onClick = {
-                                lastUserInteractionTick = System.currentTimeMillis()
-                                applyAndSaveSeriesSync(subtitleConfig.syncOffsetMs - 500L, subtitleConfig.subSpeedScale)
-                            }
-                        )
-                        QuickOsdPill(
-                            label = "Sub +0.5s",
-                            onClick = {
-                                lastUserInteractionTick = System.currentTimeMillis()
-                                applyAndSaveSeriesSync(subtitleConfig.syncOffsetMs + 500L, subtitleConfig.subSpeedScale)
-                            }
-                        )
-                        QuickOsdPill(
-                            label = "A-",
-                            onClick = {
-                                lastUserInteractionTick = System.currentTimeMillis()
-                                onUpdateSubtitleConfig { cfg ->
-                                    val nextPrimary = (cfg.fontSizeSp - 2f).coerceIn(12f, 52f)
-                                    val nextSecondary = if (cfg.linkPrimarySecondaryStyle) {
-                                        (cfg.secondaryFontSizeSp - 2f).coerceIn(10f, 48f)
-                                    } else cfg.secondaryFontSizeSp
-                                    cfg.copy(fontSizeSp = nextPrimary, secondaryFontSizeSp = nextSecondary)
-                                }
-                            }
-                        )
-                        QuickOsdPill(
-                            label = "A+ (${subtitleConfig.fontSizeSp.toInt()}sp)",
-                            onClick = {
-                                lastUserInteractionTick = System.currentTimeMillis()
-                                onUpdateSubtitleConfig { cfg ->
-                                    val nextPrimary = (cfg.fontSizeSp + 2f).coerceIn(12f, 52f)
-                                    val nextSecondary = if (cfg.linkPrimarySecondaryStyle) {
-                                        (cfg.secondaryFontSizeSp + 2f).coerceIn(10f, 48f)
-                                    } else cfg.secondaryFontSizeSp
-                                    cfg.copy(fontSizeSp = nextPrimary, secondaryFontSizeSp = nextSecondary)
-                                }
-                            }
-                        )
-                        QuickOsdPill(
-                            label = "🎨 ${subtitleConfig.primaryColor.displayName}",
-                            active = true,
-                            onClick = {
-                                lastUserInteractionTick = System.currentTimeMillis()
-                                val colors = SubtitleColorChoice.entries
-                                val nextIdx = (colors.indexOf(subtitleConfig.primaryColor) + 1) % colors.size
-                                val nextColor = colors[nextIdx]
-                                onUpdateSubtitleConfig { cfg ->
-                                    if (cfg.linkPrimarySecondaryStyle) {
-                                        cfg.copy(primaryColor = nextColor, secondaryColor = nextColor)
-                                    } else {
-                                        cfg.copy(primaryColor = nextColor)
-                                    }
-                                }
-                            }
-                        )
-                        QuickOsdPill(
-                            label = if (subtitleConfig.dualSubEnabled) "Sub Kép: BẬT" else "Sub Kép: TẮT",
-                            active = subtitleConfig.dualSubEnabled,
-                            onClick = {
-                                lastUserInteractionTick = System.currentTimeMillis()
-                                onUpdateSubtitleConfig { it.copy(dualSubEnabled = !it.dualSubEnabled) }
-                            }
-                        )
                     }
                 }
             }
@@ -1681,7 +1510,7 @@ fun PlayerScreen(
                 formatTimeFn = ::formatDurationMs
             )
 
-            // Floating Chill-Player Popups (Speed, Equalizer + 200% Boost, Aspect Ratio, Sleep Timer)
+            // Floating Chill-Player Responsive Popups (Speed, Equalizer + 200% Boost, Aspect, Sleep, PiP, AI Sync)
             ChillPlayerMenuOverlay(
                 activeMenu = activeChillMenu,
                 aspectRatio = aspectRatioMode,
@@ -1689,6 +1518,37 @@ fun PlayerScreen(
                 equalizerPreset = equalizerPreset,
                 volumeScale = volumeScale,
                 sleepTimerMinutes = sleepTimerMinutes,
+                canEnterPip = !isTv && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && activity != null,
+                isAutoSyncing = isAutoSyncing,
+                onEnterPip = {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && activity != null) {
+                        runCatching {
+                            val params = PictureInPictureParams.Builder()
+                                .setAspectRatio(Rational(16, 9))
+                                .build()
+                            activity.enterPictureInPictureMode(params)
+                        }
+                    }
+                },
+                onTriggerAiAutoSync = {
+                    if (!isAutoSyncing) {
+                        subtitleManager.autoSyncCurrentSubtitle(
+                            episode = episode,
+                            aroundPositionMs = exoPlayer.currentPosition.coerceAtLeast(0L),
+                            config = subtitleConfig,
+                            geminiApiKey = geminiApiKey,
+                            isSilentBackgroundCheck = false,
+                            onApplyDetectedSync = { newOffsetMs, newScale, _, lockGeminiAudio ->
+                                applyAndSaveSeriesSync(
+                                    newOffsetMs = newOffsetMs,
+                                    newSpeedScale = newScale,
+                                    lockGeminiAudio = if (lockGeminiAudio) true else null
+                                )
+                            }
+                        )
+                    }
+                },
+                onOpenQrCompanion = onOpenQrCompanion,
                 onNavigateMenu = { menu ->
                     lastUserInteractionTick = System.currentTimeMillis()
                     activeChillMenu = menu
@@ -2023,17 +1883,21 @@ private fun QuickBilingualSnapModal(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xEB070A10)),
+            .background(Color(0xEB070A10))
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .displayCutoutPadding()
+            .padding(12.dp),
         contentAlignment = Alignment.Center
     ) {
         Column(
             modifier = Modifier
-                .fillMaxWidth(if (isTv) 0.78f else 0.94f)
-                .height(if (isTv) 510.dp else 460.dp)
-                .clip(RoundedCornerShape(18.dp))
+                .fillMaxWidth(if (isTv) 0.78f else 0.96f)
+                .fillMaxHeight(if (isTv) 0.86f else 0.90f)
+                .clip(RoundedCornerShape(20.dp))
                 .background(CinemaSurface)
-                .border(1.5.dp, ThaiGold.copy(alpha = 0.6f), RoundedCornerShape(18.dp))
-                .padding(horizontal = 20.dp, vertical = 16.dp)
+                .border(1.2.dp, BrandNeonGlassBorderBrush, RoundedCornerShape(20.dp))
+                .padding(horizontal = 14.dp, vertical = 12.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -2126,7 +1990,7 @@ private fun QuickBilingualSnapModal(
                             .padding(horizontal = 12.dp, vertical = 7.dp)
                     ) {
                         Text(
-                            text = "🎙️ Bỏ File Sub Lệch -> Gemini Nghe Phim Tạo Sub ไทย$lockSeriesSuffix",
+                            text = "🎙️ Gemini Nghe Phim Tạo Sub AI$lockSeriesSuffix",
                             color = CinemaObsidian,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.ExtraBold
@@ -2216,7 +2080,7 @@ private fun QuickBilingualSnapModal(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text = "Mốc gốc SRT [${formatDurationMs(cue.startMs)}]  🇹🇭 ${cue.thaiText}",
+                                    text = "[${formatDurationMs(cue.startMs)}]  ${cue.thaiText}",
                                     color = if (isNearest) ThaiGold else TextPrimary,
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.Bold,
@@ -2282,16 +2146,21 @@ private fun PreFlightSubtitleGateOverlay(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xEB070A10)),
+            .background(Color(0xEB070A10))
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .displayCutoutPadding()
+            .padding(14.dp),
         contentAlignment = Alignment.Center
     ) {
         Column(
             modifier = Modifier
-                .fillMaxWidth(if (isTv) 0.62f else 0.90f)
-                .clip(RoundedCornerShape(18.dp))
+                .fillMaxWidth(if (isTv) 0.62f else 0.94f)
+                .clip(RoundedCornerShape(20.dp))
                 .background(CinemaSurface)
-                .border(1.5.dp, ThaiGold.copy(alpha = 0.45f), RoundedCornerShape(18.dp))
-                .padding(24.dp),
+                .border(1.2.dp, BrandNeonGlassBorderBrush, RoundedCornerShape(20.dp))
+                .verticalScroll(rememberScrollState())
+                .padding(20.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
@@ -2413,7 +2282,7 @@ private fun PreFlightSubtitleGateOverlay(
                                 .padding(horizontal = 16.dp, vertical = 10.dp)
                         ) {
                             Text(
-                                text = "🎙️ Dùng Gemini ($geminiModelId) Nghe Phim Tạo Sub ไทย",
+                                text = "🎙️ Gemini ($geminiModelId) Nghe Phim Tạo Sub AI",
                                 color = CinemaObsidian,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.ExtraBold
@@ -2433,7 +2302,7 @@ private fun PreFlightSubtitleGateOverlay(
                                 .padding(horizontal = 16.dp, vertical = 10.dp)
                         ) {
                             Text(
-                                text = "🔐 Quét QR Nạp Gemini Key Tạm (Tự Nghe Phim Tạo Sub ไทย)",
+                                text = "🔐 Quét QR / Nạp Gemini Key (AI Tự Tạo Sub)",
                                 color = CinemaObsidian,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.ExtraBold
@@ -2542,6 +2411,45 @@ private fun selectExoEmbeddedTextTrack(exoPlayer: ExoPlayer, chosen: SubtitleTra
 }
 
 @Composable
+private fun BottomHudActionChip(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    tint: Color,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = modifier
+            .tvFocusableClickable(
+                shape = RoundedCornerShape(12.dp),
+                focusedBorderColor = EmeraldNeon,
+                unfocusedBorderColor = Color.White.copy(alpha = 0.10f),
+                onClick = onClick
+            )
+            .background(Color.White.copy(alpha = 0.06f))
+            .padding(horizontal = 6.dp, vertical = 7.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = label,
+            tint = tint,
+            modifier = Modifier.size(15.dp)
+        )
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(
+            text = label,
+            color = TextPrimary,
+            fontSize = 10.5.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
 private fun PlayerControlIconBtn(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     contentDesc: String,
@@ -2551,25 +2459,25 @@ private fun PlayerControlIconBtn(
 ) {
     Box(
         modifier = modifier
+            .size(if (isPrimary) 62.dp else 46.dp)
             .tvFocusableClickable(
                 shape = CircleShape,
                 focusedBorderColor = if (isPrimary) Color.White else EmeraldNeon,
-                unfocusedBorderColor = if (isPrimary) EmeraldNeon else Color.White.copy(alpha = 0.14f),
+                unfocusedBorderColor = if (isPrimary) EmeraldNeon else Color.White.copy(alpha = 0.18f),
                 onClick = onClick
             )
             .background(
                 brush = if (isPrimary) BrandEmeraldVioletBrush else Brush.horizontalGradient(
-                    listOf(Color.White.copy(alpha = 0.10f), Color.White.copy(alpha = 0.10f))
+                    listOf(Color(0xB80E1222), Color(0xB80E1222))
                 )
-            )
-            .padding(if (isPrimary) 11.dp else 9.dp),
+            ),
         contentAlignment = Alignment.Center
     ) {
         Icon(
             imageVector = icon,
             contentDescription = contentDesc,
             tint = Color.White,
-            modifier = Modifier.size(if (isPrimary) 24.dp else 20.dp)
+            modifier = Modifier.size(if (isPrimary) 30.dp else 22.dp)
         )
     }
 }

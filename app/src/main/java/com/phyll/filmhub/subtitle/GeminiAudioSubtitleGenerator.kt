@@ -2,6 +2,7 @@ package com.phyll.filmhub.subtitle
 
 import com.phyll.filmhub.model.Episode
 import com.phyll.filmhub.model.SubtitleCue
+import com.phyll.filmhub.model.SubtitleLanguageCatalog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -425,15 +426,18 @@ class GeminiAudioSubtitleGenerator(
         windowDurationMs: Long,
         apiKey: String,
         modelId: String,
-        preferTurboFlash: Boolean = false
+        preferTurboFlash: Boolean = false,
+        targetLangCode: String = "th"
     ): Result<ChunkSubtitleResult> = withContext(Dispatchers.IO) {
         runCatching {
             val cleanKey = apiKey.trim()
-            require(cleanKey.isNotEmpty()) { "Chưa có Gemini API Key trong RAM" }
+            require(cleanKey.isNotEmpty()) { "Chưa có Gemini API Key" }
             val cleanModel = modelId.trim().removePrefix("models/").ifBlank { "gemini-3-flash-preview" }
+            val langNorm = SubtitleLanguageCatalog.normalizeCode(targetLangCode)
+                .replace(Regex("[^A-Za-z0-9_-]"), "_")
 
-            // Check subtitle cue cache on disk (contains ONLY Thai subtitle cues, NEVER any API key!)
-            val bucketKey = "${cacheNamespace}_${cleanModel}_${windowStartMs / 1000L}_${windowDurationMs / 1000L}"
+            // Check subtitle cue cache on disk (contains ONLY subtitle cues, NEVER any API key!)
+            val bucketKey = "${cacheNamespace}_${langNorm}_${cleanModel}_${windowStartMs / 1000L}_${windowDurationMs / 1000L}"
             readCachedChunk(bucketKey)?.let { return@runCatching it }
 
             val audioChunk = extractAudioChunk(timeline, windowStartMs, windowDurationMs)
@@ -454,7 +458,8 @@ class GeminiAudioSubtitleGenerator(
                 chunkDurationMs = (audioChunk.actualEndMs - audioChunk.actualStartMs).coerceAtLeast(5_000L),
                 apiKey = cleanKey,
                 modelId = cleanModel,
-                preferTurboFlash = preferTurboFlash
+                preferTurboFlash = preferTurboFlash,
+                targetLangCode = targetLangCode
             )
 
             val result = ChunkSubtitleResult(
@@ -627,16 +632,18 @@ class GeminiAudioSubtitleGenerator(
         chunkDurationMs: Long,
         apiKey: String,
         modelId: String,
-        preferTurboFlash: Boolean = false
+        preferTurboFlash: Boolean = false,
+        targetLangCode: String = "th"
     ): List<SubtitleCue> {
         val durationSec = "%.1f".format(chunkDurationMs / 1000.0)
+        val langSpec = SubtitleLanguageCatalog.resolve(targetLangCode)
         val prompt = """
-            Thai cinema subtitle creator: listen to this $durationSec-second movie audio clip (starts at 0.0s).
-            Transcribe ALL spoken dialogue (any language) directly into natural, concise Cinema Thai (ภาษาไทยธรรมชาติ กระชับ อ่านง่าย).
+            Universal cinema subtitle creator: listen to this $durationSec-second movie audio clip (starts at 0.0s).
+            Transcribe ALL spoken dialogue (from ANY spoken language) directly into ${langSpec.geminiInstructionName}.
             Rules:
             - "s" and "e" = float seconds relative to 0.0 of this clip (0.0 <= s < e <= $durationSec), 1.2s-4.8s per cue.
             - Skip music/silence; if no speech, return [].
-            Return ONLY JSON array: [{"s":1.2,"e":3.6,"t":"บทพูดภาษาไทย"}]
+            Return ONLY JSON array: [{"s":1.2,"e":3.6,"t":"translated subtitle text in ${langSpec.nativeLabel}"}]
         """.trimIndent()
 
         val inlineData = JSONObject()

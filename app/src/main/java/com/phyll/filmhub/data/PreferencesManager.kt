@@ -376,6 +376,13 @@ class PreferencesManager(context: Context) {
         } else {
             false
         }
+        val safeSecondaryLangCode = if (json.contains("secondaryLangCode")) {
+            runCatching { parsed.secondaryLangCode }.getOrNull().orEmpty()
+        } else {
+            ""
+        }
+        val safePrimaryLang = runCatching { parsed.preferredPrimaryLang }.getOrNull()
+            ?.takeIf { it.isNotBlank() } ?: "vi"
 
         // One-time v2.6 migration: disable the old oversized 86dp hardsub slab & shrink huge default box
         val migratedV26 = prefs.getBoolean(KEY_SUBTITLE_V26_MIGRATED, false)
@@ -383,6 +390,8 @@ class PreferencesManager(context: Context) {
             val compactPrimarySize = if (parsed.fontSizeSp >= 25f) 20f else parsed.fontSizeSp.coerceIn(12f, 48f)
             val compactSecondarySize = (compactPrimarySize * 0.80f).coerceIn(12f, 36f)
             val migrated = parsed.copy(
+                preferredPrimaryLang = safePrimaryLang,
+                secondaryLangCode = safeSecondaryLangCode,
                 geminiModelId = safeModel,
                 autoGenerateAudioSubWhenMissing = safeAutoAudio,
                 autoSyncDownloadedSub = safeAutoSync,
@@ -405,6 +414,8 @@ class PreferencesManager(context: Context) {
             migrated
         } else {
             parsed.copy(
+                preferredPrimaryLang = safePrimaryLang,
+                secondaryLangCode = safeSecondaryLangCode,
                 geminiModelId = safeModel,
                 autoGenerateAudioSubWhenMissing = safeAutoAudio,
                 autoSyncDownloadedSub = safeAutoSync,
@@ -468,11 +479,8 @@ class PreferencesManager(context: Context) {
     }
 
     private fun loadControlTargetMode(): ControlTargetMode {
-        if (isTvHardware) return ControlTargetMode.LOCAL_DEVICE
-        val raw = prefs.getString(KEY_CONTROL_TARGET_MODE, null)
-        return raw?.let {
-            runCatching { ControlTargetMode.valueOf(it) }.getOrNull()
-        } ?: if (loadSelectedTvIp() != null) ControlTargetMode.REMOTE_TV else ControlTargetMode.LOCAL_DEVICE
+        // Standalone cinema-first default: play directly on the user's phone/tablet unless they explicitly cast to TV!
+        return ControlTargetMode.LOCAL_DEVICE
     }
 
     companion object {

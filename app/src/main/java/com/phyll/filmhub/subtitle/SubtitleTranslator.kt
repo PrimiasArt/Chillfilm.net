@@ -1,6 +1,7 @@
 package com.phyll.filmhub.subtitle
 
 import com.phyll.filmhub.model.SubtitleCue
+import com.phyll.filmhub.model.SubtitleLanguageCatalog
 import com.phyll.filmhub.model.TranslationEngineMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -75,7 +76,9 @@ class SubtitleTranslator(
     ): String = withContext(Dispatchers.IO) {
         val normalized = normalizeDialogueForTranslation(text)
         if (normalized.isEmpty()) return@withContext ""
-        if (targetLang == "th" && containsThaiScript(normalized)) return@withContext normalized
+        if (SubtitleLanguageCatalog.isTextAlreadyInTargetLanguage(normalized, targetLang)) {
+            return@withContext normalized
+        }
 
         val useGemini = mode == TranslationEngineMode.GEMINI_AI && geminiApiKey.isNotBlank()
         val cleanModel = geminiModelId.trim().removePrefix("models/").ifBlank { "gemini-3-flash-preview" }
@@ -132,7 +135,7 @@ class SubtitleTranslator(
                 results[index] = normalized
                 continue
             }
-            if (targetLang == "th" && containsThaiScript(normalized)) {
+            if (SubtitleLanguageCatalog.isTextAlreadyInTargetLanguage(normalized, targetLang)) {
                 results[index] = cue.text.trim()
                 continue
             }
@@ -182,8 +185,9 @@ class SubtitleTranslator(
             val formBody = texts.joinToString("&") { line ->
                 "q=" + URLEncoder.encode(line, "UTF-8")
             }
+            val neuralTl = URLEncoder.encode(SubtitleLanguageCatalog.neuralTranslateCode(targetLang), "UTF-8")
             val url =
-                "https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=auto&tl=$targetLang"
+                "https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=auto&tl=$neuralTl"
             val request = Request.Builder()
                 .url(url)
                 .header(
@@ -224,12 +228,7 @@ class SubtitleTranslator(
         apiKey: String,
         modelId: String
     ): List<String> {
-        val langLabel = when (targetLang) {
-            "th" -> "natural cinema-quality Thai movie dialogue (ภาษาไทยธรรมชาติแบบซับหนังโรง กระชับ อ่านง่าย)"
-            "vi" -> "natural Vietnamese movie subtitles (Tiếng Việt tự nhiên chuẩn phim chiếu rạp)"
-            "en" -> "natural English movie subtitles"
-            else -> targetLang
-        }
+        val langLabel = SubtitleLanguageCatalog.resolve(targetLang).geminiInstructionName
 
         val inputArray = JSONArray()
         texts.forEachIndexed { idx, line ->

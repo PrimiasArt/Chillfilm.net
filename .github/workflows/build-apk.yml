@@ -32,7 +32,7 @@ jobs:
         run: |
           RUN_NUM="${{ github.run_number }}"
           VERSION_CODE=$((100 + RUN_NUM))
-          VERSION_NAME="3.0.${RUN_NUM}"
+          VERSION_NAME="3.1.${RUN_NUM}"
           BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           echo "version_code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
           echo "version_name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
@@ -42,8 +42,9 @@ jobs:
             "versionCode": ${VERSION_CODE},
             "buildTime": "${BUILD_TIME}",
             "downloadUrl": "https://github.com/PrimiasArt/Chillfilm.net/releases/download/android-apk-latest/ChillFilm-latest.apk",
+            "webAppUrl": "https://primiasart.github.io/Chillfilm.net/",
             "commit": "${{ github.sha }}",
-            "releaseNotes": "ChillFilm v${VERSION_NAME} (Build ${VERSION_CODE}) • 2026 Emerald x Violet UI & Chill-Player Core"
+            "releaseNotes": "ChillFilm x NKI v${VERSION_NAME} (Build ${VERSION_CODE}) • Responsive Mobile UI, Universal AI Multi-Language Subtitles & Standalone Web App"
           }
           EOF
           cat version.json
@@ -82,14 +83,15 @@ jobs:
           name: ChillFilm v${{ steps.ver.outputs.version_name }} (Build ${{ steps.ver.outputs.version_code }})
           make_latest: true
           body: |
-            ## 🎬 ChillFilm Android & TV APK — v${{ steps.ver.outputs.version_name }}
+            ## 🎬 ChillFilm × NKI Ecosystem — v${{ steps.ver.outputs.version_name }}
             - **Phiên bản:** `v${{ steps.ver.outputs.version_name }}` (`versionCode: ${{ steps.ver.outputs.version_code }}`)
-            - **Chữ ký cố định (`chillfilm.keystore`):** Cài đè bản mới trực tiếp **không mất API Key, danh sách TV hay lịch sử xem phim**.
-            - **Điểm nổi bật:**
-              - ✨ Giao diện **2026 Spatial Glassmorphism** phối **Xanh Lục (Emerald) × Tím (Violet)**.
-              - 🎮 Tích hợp trình phát **Chill-Player Engine**: Vuốt tăng/giảm sáng, âm lượng **Audio Boost 200%**, Equalizer (Flat / Bass / Vocal / Movie), khóa cảm ứng, PiP, tốc độ phát, tỉ lệ khung hình, hẹn giờ tắt.
-              - 📡 **App Android Độc Lập**: Quét Wi-Fi, cài/gỡ App lên nhiều TV (`:5555`), lưu API Key cố định trên ĐT & tự đồng bộ sang TV.
-              - 🔄 **Kiểm tra & Cập nhật tự động ngay trong Cài Đặt**.
+            - **Chữ ký cố định (`chillfilm.keystore`):** Cài đè bản mới trực tiếp **không mất API Key, cài đặt phụ đề hay lịch sử xem phim**.
+            - **Nâng cấp lớn trong bản này:**
+              - 🏷 **Bộ nhận diện ChillFilm × NKI**: Logo ứng dụng & TV Banner tùy biến trực tiếp từ biểu tượng **NKI** trên nền 2026 Xanh Lục (Emerald) × Tím (Violet).
+              - 📱 **Tái thiết kế 100% Responsive cho Điện thoại**: Khắc phục triệt để vỡ khung/tràn chữ ở Menu, Chi Tiết, Cài Đặt và Trình phát Video (safe-area tai thỏ/thanh điều hướng, điều khiển phát đặt giữa màn hình, tối giản không rối mắt).
+              - 🌐 **Phụ đề AI Đa Ngôn Ngữ Toàn Cầu**: Không còn giới hạn tiếng Thái — chọn dịch & nghe phim tạo phụ đề sang **mọi ngôn ngữ AI hỗ trợ** (Việt, Anh, Thái, Hàn, Nhật, Trung, Pháp, Đức, Tây Ban Nha... hoặc tự nhập bất kỳ ngôn ngữ nào).
+              - 💻 **Standalone Web App cho PC & Mobile Browser**: Xem trực tiếp trên trình duyệt tại `https://primiasart.github.io/Chillfilm.net/` (kèm Chill-Player Audio Boost 200%, Equalizer, phụ đề AI đa ngôn ngữ).
+              - 📡 **Stream / Cast lên TV** gọn gàng như tính năng phụ tùy chọn.
 
             👉 Tải **`ChillFilm-latest.apk`** (dùng chung cho cả Điện thoại Android & Smart TV/TV360 Box) bên dưới!
           files: |

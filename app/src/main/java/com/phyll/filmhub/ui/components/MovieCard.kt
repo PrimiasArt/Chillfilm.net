@@ -25,6 +25,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -39,13 +40,12 @@ import com.phyll.filmhub.ui.theme.CinemaGlassBorder
 import com.phyll.filmhub.ui.theme.CinemaObsidian
 import com.phyll.filmhub.ui.theme.CinemaSurface
 import com.phyll.filmhub.ui.theme.CinemaSurfaceElevated
-import com.phyll.filmhub.ui.theme.ElectricCyan
 import com.phyll.filmhub.ui.theme.EmeraldNeon
+import com.phyll.filmhub.ui.theme.EmeraldPrimary
 import com.phyll.filmhub.ui.theme.LiveRed
 import com.phyll.filmhub.ui.theme.LocalIsTvMode
 import com.phyll.filmhub.ui.theme.TextPrimary
 import com.phyll.filmhub.ui.theme.TextSecondary
-import com.phyll.filmhub.ui.theme.ThaiGold
 import com.phyll.filmhub.ui.theme.VioletGlow
 import com.phyll.filmhub.ui.theme.VioletPrimary
 import com.phyll.filmhub.ui.theme.tvFocusableClickable
@@ -58,9 +58,18 @@ fun MovieCard(
     onClick: () -> Unit
 ) {
     val isTv = LocalIsTvMode.current
-    val cardWidth = if (isTv) 172.dp else 148.dp
-    val posterHeight = if (isTv) 236.dp else 206.dp
-    val cardShape = RoundedCornerShape(18.dp)
+    val screenWidthDp = LocalConfiguration.current.screenWidthDp
+    val cardWidth = when {
+        isTv || screenWidthDp >= 840 -> 166.dp
+        screenWidthDp >= 520 -> 142.dp
+        else -> 122.dp
+    }
+    val posterHeight = when {
+        isTv || screenWidthDp >= 840 -> 232.dp
+        screenWidthDp >= 520 -> 198.dp
+        else -> 172.dp
+    }
+    val cardShape = RoundedCornerShape(16.dp)
 
     Column(
         modifier = Modifier
@@ -69,7 +78,7 @@ fun MovieCard(
                 shape = cardShape,
                 focusedBorderColor = EmeraldNeon,
                 unfocusedBorderColor = CinemaGlassBorder,
-                borderWidth = 2.dp,
+                borderWidth = 1.5.dp,
                 focusedScale = 1.04f,
                 onFocused = onFocused,
                 onClick = onClick
@@ -86,11 +95,10 @@ fun MovieCard(
                     )
                 )
         ) {
-            // Subtle luxury placeholder behind AsyncImage
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(14.dp),
+                    .padding(12.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
@@ -98,13 +106,13 @@ fun MovieCard(
                     imageVector = Icons.Default.Movie,
                     contentDescription = null,
                     tint = TextSecondary.copy(alpha = 0.35f),
-                    modifier = Modifier.size(28.dp)
+                    modifier = Modifier.size(26.dp)
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
                     text = movie.title.take(24),
                     color = TextSecondary.copy(alpha = 0.7f),
-                    fontSize = 11.sp,
+                    fontSize = 10.sp,
                     fontWeight = FontWeight.Medium,
                     textAlign = TextAlign.Center,
                     maxLines = 2
@@ -129,100 +137,73 @@ fun MovieCard(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .height(74.dp)
+                    .height(68.dp)
                     .background(
                         Brush.verticalGradient(
                             listOf(
                                 Color.Transparent,
                                 Color(0x9906080D),
-                                Color(0xEB06080D)
+                                Color(0xEE06080D)
                             )
                         )
                     )
             )
 
-            // Top Micro-Badges Row (Glass Country Pill + Crisp Sub/LIVE Badge)
-            Row(
+            // Single clean top-right AI SUB / LIVE badge
+            val isLive = movie.contentType == ContentType.LIVE_CHANNEL
+            Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(7.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp)
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(
+                        if (isLive) LiveRed
+                        else Color(0xD9101526)
+                    )
+                    .border(
+                        width = 0.7.dp,
+                        color = if (isLive) Color.Transparent else EmeraldPrimary.copy(alpha = 0.65f),
+                        shape = RoundedCornerShape(7.dp)
+                    )
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
             ) {
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(Color(0xBF080B11))
-                        .border(0.5.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(6.dp))
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                ) {
-                    Text(
-                        text = movie.country.displayName,
-                        color = Color(0xFFE2E8F0),
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        letterSpacing = 0.2.sp
-                    )
-                }
-
-                val badgeBg = when {
-                    movie.contentType == ContentType.LIVE_CHANNEL -> LiveRed
-                    movie.hasNativeThaiSub -> ThaiGold
-                    else -> VioletPrimary.copy(alpha = 0.85f)
-                }
-                val badgeFg = when {
-                    movie.contentType == ContentType.LIVE_CHANNEL -> Color.White
-                    movie.hasNativeThaiSub -> CinemaObsidian
-                    else -> Color.White
-                }
-                val badgeText = when {
-                    movie.contentType == ContentType.LIVE_CHANNEL -> "LIVE"
-                    movie.hasNativeThaiSub -> "SUB ไทย"
-                    else -> "AI ไทย"
-                }
-
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(badgeBg)
-                        .border(
-                            width = 0.5.dp,
-                            color = if (movie.hasNativeThaiSub) Color.Transparent else VioletGlow.copy(alpha = 0.65f),
-                            shape = RoundedCornerShape(8.dp)
-                        )
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                ) {
-                    Text(
-                        text = badgeText,
-                        color = badgeFg,
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        letterSpacing = 0.3.sp
-                    )
-                }
+                Text(
+                    text = if (isLive) "LIVE" else "AI SUB",
+                    color = if (isLive) Color.White else EmeraldNeon,
+                    fontSize = 8.5.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    letterSpacing = 0.3.sp
+                )
             }
 
-            // Bottom-left Quality & Year micro-tag on the poster vignette
+            // Bottom-left Quality / Episode tag
             if (movie.quality.isNotBlank()) {
+                val cleanQuality = movie.quality
+                    .replace("Sub ไทย Gốc", "FHD", ignoreCase = true)
+                    .replace("AI Sub ไทย", "AI", ignoreCase = true)
+                    .replace("Sub ไทย", "HD", ignoreCase = true)
+                    .trim()
+                    .take(10)
+                    .ifBlank { "HD" }
                 Box(
                     modifier = Modifier
                         .align(Alignment.BottomStart)
-                        .padding(horizontal = 8.dp, vertical = if (progressFraction > 0.01f) 9.dp else 6.dp)
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(Color.White.copy(alpha = 0.14f))
+                        .padding(horizontal = 7.dp, vertical = if (progressFraction > 0.01f) 8.dp else 6.dp)
+                        .clip(RoundedCornerShape(5.dp))
+                        .background(Color(0xB806080D))
                         .padding(horizontal = 5.dp, vertical = 1.dp)
                 ) {
                     Text(
-                        text = movie.quality.take(10).uppercase(),
+                        text = cleanQuality.uppercase(),
                         color = TextPrimary,
-                        fontSize = 9.sp,
+                        fontSize = 8.5.sp,
                         fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.4.sp
+                        maxLines = 1
                     )
                 }
             }
 
-            // Watch progress indicator bar
+            // Watch progress bar
             if (progressFraction > 0.01f) {
                 Box(
                     modifier = Modifier
@@ -245,7 +226,7 @@ fun MovieCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(CinemaSurface)
-                .padding(horizontal = 10.dp, vertical = 8.dp)
+                .padding(horizontal = 8.dp, vertical = 7.dp)
         ) {
             Text(
                 text = movie.title,
@@ -259,7 +240,7 @@ fun MovieCard(
             Text(
                 text = listOfNotNull(
                     movie.year.takeIf { it.isNotBlank() },
-                    movie.providerName.takeIf { it.isNotBlank() }
+                    movie.country.displayName.takeIf { it.isNotBlank() }
                 ).joinToString(" • "),
                 color = TextSecondary,
                 fontSize = 10.sp,

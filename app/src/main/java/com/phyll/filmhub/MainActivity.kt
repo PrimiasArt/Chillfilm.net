@@ -13,6 +13,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.LaunchedEffect
@@ -229,10 +230,12 @@ class MainActivity : ComponentActivity() {
                                 deviceUiMode = deviceUiMode,
                                 appUpdateState = appUpdateState,
                                 hasSelectedTv = !isTvHardware && selectedTvIp != null,
+                                isTvHardware = isTvHardware,
                                 onCheckForUpdates = viewModel::checkForAppUpdates,
                                 onDownloadAndInstallUpdate = viewModel::downloadAndInstallAppUpdate,
                                 onOpenInstallPermission = viewModel::openInstallPermissionAndRetry,
                                 onPushUpdateToTv = viewModel::pushDownloadedUpdateToSelectedTv,
+                                onOpenTvManager = viewModel::openTvManager,
                                 onAddProvider = { name, url, type ->
                                     viewModel.addCustomVodProvider(name, url, type)
                                 },
@@ -336,7 +339,8 @@ class MainActivity : ComponentActivity() {
                         exit = fadeOut(),
                         modifier = Modifier
                             .align(Alignment.TopCenter)
-                            .padding(top = 18.dp)
+                            .statusBarsPadding()
+                            .padding(top = 12.dp, start = 16.dp, end = 16.dp)
                     ) {
                         Box(
                             modifier = Modifier

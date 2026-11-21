@@ -57,15 +57,16 @@ fun ThaiCinemaSubtitleOverlay(
     val primaryColor = Color(config.primaryColor.argb)
     val secondaryColor = Color(config.secondaryColor.argb)
 
+    val primaryLang = config.resolvedPrimaryLanguage()
     val primaryText = renderState.primaryThaiText
-        ?: if (previewSampleWhenEmpty) "สวัสดีทุกคน ยินดีต้อนรับสู่ Phyll Cinema" else null
+        ?: if (previewSampleWhenEmpty) primaryLang.samplePreview else null
 
     val secondaryText = renderState.secondaryText
         ?: if (previewSampleWhenEmpty) {
             if (config.dualSubEnabled) {
-                "Sub phụ song ngữ: Tùy chỉnh cỡ chữ & màu sắc riêng hoặc chỉnh tất cả"
+                "Sub phụ (${config.resolvedSecondaryDisplayName()}): Chỉnh cỡ chữ & màu riêng hoặc cùng lúc"
             } else {
-                "Sub phụ (đang tắt — bật Song ngữ để hiện khi xem phim)"
+                "Sub phụ đang tắt — bật Song ngữ để hiện dòng thứ 2"
             }
         } else null
 

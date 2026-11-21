@@ -4,6 +4,7 @@ import com.phyll.filmhub.model.ContentType
 import com.phyll.filmhub.model.Episode
 import com.phyll.filmhub.model.ExternalSubtitleRef
 import com.phyll.filmhub.model.MovieItem
+import com.phyll.filmhub.model.SubtitleLanguageCatalog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -172,7 +173,8 @@ class OnlineSubtitleFetcher(
 
     suspend fun discoverSubtitles(
         movie: MovieItem,
-        episode: Episode
+        episode: Episode,
+        preferredLangCode: String = "th"
     ): List<ExternalSubtitleRef> = withContext(Dispatchers.IO) {
         val season = extractSeasonNumber(movie.originalTitle, movie.title)
         val epFromName = extractEpisodeNumber(episode.name)
@@ -199,7 +201,8 @@ class OnlineSubtitleFetcher(
             imdbId = imdbId,
             isSeries = isSeries,
             season = season,
-            episode = epNum
+            episode = epNum,
+            preferredLangCode = preferredLangCode
         )
     }
 
@@ -207,7 +210,8 @@ class OnlineSubtitleFetcher(
         customQuery: String,
         isSeries: Boolean,
         season: Int = 1,
-        episode: Int = 1
+        episode: Int = 1,
+        preferredLangCode: String = "th"
     ): List<ExternalSubtitleRef> = withContext(Dispatchers.IO) {
         val clean = customQuery.trim()
         if (clean.isEmpty()) return@withContext emptyList()
@@ -227,7 +231,8 @@ class OnlineSubtitleFetcher(
             imdbId = imdbId,
             isSeries = isSeries,
             season = season.coerceAtLeast(1),
-            episode = episode.coerceAtLeast(1)
+            episode = episode.coerceAtLeast(1),
+            preferredLangCode = preferredLangCode
         )
     }
 
@@ -269,16 +274,21 @@ class OnlineSubtitleFetcher(
         imdbId: String,
         isSeries: Boolean,
         season: Int,
-        episode: Int
+        episode: Int,
+        preferredLangCode: String = "th"
     ): List<ExternalSubtitleRef> = coroutineScope {
-        val osRestThaiDeferred = async {
+        val primarySpec = SubtitleLanguageCatalog.resolve(preferredLangCode)
+        val primaryOsId = primarySpec.openSubtitlesId.ifBlank { "eng" }
+
+        val osRestPrimaryDeferred = async {
             withTimeoutOrNull(4_800L) {
-                fetchOpenSubtitlesOrgRest(imdbId, isSeries, season, episode, subLangId = "tha")
+                fetchOpenSubtitlesOrgRest(imdbId, isSeries, season, episode, subLangId = primaryOsId)
             } ?: emptyList()
         }
+        val backupIds = listOf("eng", "vie", "tha").filterNot { it == primaryOsId }.joinToString(",")
         val osRestBackupDeferred = async {
             withTimeoutOrNull(4_800L) {
-                fetchOpenSubtitlesOrgRest(imdbId, isSeries, season, episode, subLangId = "vie,eng")
+                fetchOpenSubtitlesOrgRest(imdbId, isSeries, season, episode, subLangId = backupIds)
             } ?: emptyList()
         }
         val osV3Deferred = async {
@@ -294,7 +304,7 @@ class OnlineSubtitleFetcher(
             }
         }
 
-        val osRestThai = osRestThaiDeferred.await()
+        val osRestPrimary = osRestPrimaryDeferred.await()
         val yifySubs = yifyDeferred.await()
         val osV3Subs = osV3Deferred.await()
         val osRestBackup = osRestBackupDeferred.await()
@@ -310,17 +320,20 @@ class OnlineSubtitleFetcher(
             }
         }
 
-        // 1. NATIVE HUMAN THAI FIRST across ALL major subtitle platforms!
-        appendUnique(osRestThai.filter { it.isThai })
-        appendUnique(yifySubs.filter { it.isThai })
-        appendUnique(osV3Subs.filter { it.isThai })
+        // 1. NATIVE HUMAN TRACKS IN USER'S TARGET LANGUAGE FIRST across ALL major platforms!
+        val isPreferred = { ref: ExternalSubtitleRef ->
+            SubtitleLanguageCatalog.isTrackMatchingLanguage(ref.languageCode, preferredLangCode)
+        }
+        appendUnique(osRestPrimary.filter(isPreferred))
+        appendUnique(yifySubs.filter(isPreferred))
+        appendUnique(osV3Subs.filter(isPreferred))
 
-        // 2. NON-THAI HUMAN SUBTITLES (for AI translation fallback ONLY if Native Thai fails/absent)
-        val nonThaiCandidates = (osV3Subs + yifySubs + osRestBackup).filter { !it.isThai }
-        val sortedNonThai = nonThaiCandidates.sortedBy { mapLanguagePriority(it.languageCode).second }
-        appendUnique(sortedNonThai)
+        // 2. OTHER HUMAN SUBTITLES (for instant AI translation into any target language!)
+        val otherCandidates = (osV3Subs + yifySubs + osRestBackup + osRestPrimary).filterNot(isPreferred)
+        val sortedOthers = otherCandidates.sortedBy { mapLanguagePriority(it.languageCode).second }
+        appendUnique(sortedOthers)
 
-        allMerged.take(20)
+        allMerged.take(24)
     }
 
     /**
@@ -477,7 +490,16 @@ class OnlineSubtitleFetcher(
         langName.contains("chinese") -> "zh"
         langName.contains("korean") -> "ko"
         langName.contains("japanese") -> "ja"
-        langName.contains("indonesian") || langName.contains("malay") -> "id"
+        langName.contains("indonesian") -> "id"
+        langName.contains("malay") -> "ms"
+        langName.contains("french") -> "fr"
+        langName.contains("spanish") -> "es"
+        langName.contains("german") -> "de"
+        langName.contains("russian") -> "ru"
+        langName.contains("portuguese") -> "pt"
+        langName.contains("italian") -> "it"
+        langName.contains("arabic") -> "ar"
+        langName.contains("hindi") -> "hi"
         else -> null
     }
 
@@ -694,29 +716,28 @@ class OnlineSubtitleFetcher(
     }
 
     private fun mapLanguagePriority(rawIso: String): Pair<String, Int> = when (rawIso.lowercase()) {
-        "tha", "th" -> "th" to 1
-        "vie", "vi" -> "vi" to 2
-        "eng", "en" -> "en" to 3
+        "vie", "vi" -> "vi" to 1
+        "eng", "en" -> "en" to 2
+        "tha", "th" -> "th" to 3
         "zho", "zht", "chi", "zh", "zh-cn", "zh-tw", "zh-hans", "zh-hant" -> "zh" to 4
         "kor", "ko" -> "ko" to 5
         "jpn", "ja" -> "ja" to 6
-        "ind", "id", "may", "ms" -> "id" to 7
-        "fre", "fra", "fr" -> "fr" to 8
-        "spa", "spl", "es" -> "es" to 9
-        else -> rawIso.lowercase() to 60
+        "ind", "id" -> "id" to 7
+        "may", "ms" -> "ms" to 8
+        "fre", "fra", "fr" -> "fr" to 9
+        "spa", "spl", "es" -> "es" to 10
+        "ger", "deu", "de" -> "de" to 11
+        "rus", "ru" -> "ru" to 12
+        "por", "pob", "pt" -> "pt" to 13
+        "ita", "it" -> "it" to 14
+        "ara", "ar" -> "ar" to 15
+        "hin", "hi" -> "hi" to 16
+        else -> rawIso.lowercase() to 45
     }
 
     private fun buildPlatformDisplayLabel(platform: String, normLang: String, index: Int): String {
         val suffix = if (index > 1) " #$index" else ""
-        return when (normLang) {
-            "th" -> "ภาษาไทย Gốc ($platform$suffix)"
-            "vi" -> "Tiếng Việt ($platform$suffix -> AI ไทย)"
-            "en" -> "English ($platform$suffix -> AI ไทย)"
-            "zh" -> "Tiếng Trung ($platform$suffix -> AI ไทย)"
-            "ko" -> "Tiếng Hàn ($platform$suffix -> AI ไทย)"
-            "ja" -> "Tiếng Nhật ($platform$suffix -> AI ไทย)"
-            "id" -> "Indonesian ($platform$suffix -> AI ไทย)"
-            else -> "${normLang.uppercase()} ($platform$suffix -> AI ไทย)"
-        }
+        val langSpec = SubtitleLanguageCatalog.resolve(normLang)
+        return "${langSpec.nativeLabel} ($platform$suffix)"
     }
 }
