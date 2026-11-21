@@ -4,6 +4,11 @@
   "buildCommand": null,
   "outputDirectory": "web",
   "cleanUrls": true,
+  "rewrites": [
+    { "source": "/api/catalog/feed", "destination": "/api/catalog?op=feed" },
+    { "source": "/api/catalog/browse", "destination": "/api/catalog?op=browse" },
+    { "source": "/api/catalog/detail", "destination": "/api/catalog?op=detail" }
+  ],
   "functions": {
     "api/ai/*.js": {
       "maxDuration": 60
