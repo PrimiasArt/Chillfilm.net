@@ -1,0 +1,15 @@
+{
+  "name": "chillfilm-nki-cloud",
+  "version": "3.2.0",
+  "private": true,
+  "type": "module",
+  "description": "ChillFilm x NKI All-in-One Vercel Backend (Centralized Gemini AI Gateway, Auto Cloud Sync via Neon Postgres, Shared AI Subtitle Pool via Vercel Blob)",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.2",
+    "@vercel/blob": "^2.0.0",
+    "@vercel/functions": "^3.9.0"
+  }
+}

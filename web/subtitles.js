@@ -147,11 +147,25 @@ export async function fetchOpenSubtitlesV3(imdbId, isSeries, season = 1, episode
   }
 }
 
-export async function translateCueBatch({ cues, targetLang, geminiApiKey, geminiModel }) {
+export async function translateCueBatch({ cues, targetLang, geminiApiKey, geminiModel, cloudTranslator = null }) {
   if (!cues.length) return cues;
   const langSpec = resolveLanguage(targetLang);
 
-  // 1. Gemini AI Cinema Translation when key is set
+  // 1. Centralized Secure NKI Cloud AI Gateway (uses server-side GEMINI_API_KEY — zero key exposed on client!)
+  if (typeof cloudTranslator === 'function') {
+    try {
+      const cloudTranslated = await cloudTranslator({
+        cues,
+        targetLang: langSpec.code,
+        model: geminiModel || 'gemini-3-flash-preview',
+      });
+      if (cloudTranslated && cloudTranslated.length === cues.length) return cloudTranslated;
+    } catch (e) {
+      console.warn('Cloud AI proxy fallback:', e);
+    }
+  }
+
+  // 2. Optional Personal Local Gemini API Key override (only if user explicitly entered one)
   if (geminiApiKey && geminiApiKey.trim().length > 10) {
     try {
       const translated = await translateWithGemini(cues, langSpec, geminiApiKey.trim(), geminiModel || 'gemini-3-flash-preview');
@@ -161,7 +175,7 @@ export async function translateCueBatch({ cues, targetLang, geminiApiKey, gemini
     }
   }
 
-  // 2. Fast Free Neural Translation fallback (works out-of-the-box with zero API key!)
+  // 3. Fast Free Neural Translation fallback (works out-of-the-box with zero API key!)
   return translateWithGoogleFree(cues, langSpec.code);
 }
 

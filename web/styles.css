@@ -1464,3 +1464,162 @@ button {
 @media (min-width: 681px) {
   .mobile-only { display: none !important; }
 }
+
+/* ==================== NKI CLOUD SYNC & ADMIN VAULT ==================== */
+.cloud-pill-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 11px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #f3f4f6;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.cloud-pill-btn:hover {
+  background: rgba(0, 200, 83, 0.16);
+  border-color: rgba(0, 230, 118, 0.45);
+}
+.cloud-pill-btn.connected {
+  background: rgba(0, 200, 83, 0.16);
+  border-color: rgba(0, 230, 118, 0.5);
+  color: #dcfce7;
+}
+.cloud-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #6b7280;
+  flex-shrink: 0;
+}
+.cloud-pill-btn.connected .cloud-dot {
+  background: var(--emerald-neon);
+  box-shadow: 0 0 8px var(--emerald-neon);
+}
+
+.cloud-card {
+  background: linear-gradient(155deg, rgba(0, 200, 83, 0.12), rgba(20, 20, 20, 0.96));
+  border: 1px solid rgba(0, 230, 118, 0.34);
+  border-radius: 10px;
+  padding: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.cloud-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.cloud-card-title {
+  font-size: 14px;
+  font-weight: 800;
+  color: #fff;
+}
+.cloud-card-sub {
+  font-size: 11.5px;
+  color: #9ca3af;
+  margin-top: 2px;
+}
+.cloud-badge {
+  background: var(--emerald);
+  color: #05160c;
+  font-size: 10px;
+  font-weight: 900;
+  padding: 3px 8px;
+  border-radius: 99px;
+  letter-spacing: 0.6px;
+}
+.cloud-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.35);
+  padding: 3px;
+  border-radius: 7px;
+}
+.cloud-tab {
+  padding: 7px 10px;
+  border-radius: 5px;
+  border: none;
+  background: transparent;
+  color: #9ca3af;
+  font-weight: 700;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.cloud-tab.active {
+  background: var(--emerald);
+  color: #06140b;
+}
+.cloud-hint {
+  font-size: 11.5px;
+  color: #86efac;
+  background: rgba(0, 200, 83, 0.12);
+  border: 1px solid rgba(0, 230, 118, 0.25);
+  border-radius: 6px;
+  padding: 7px 10px;
+  margin-top: 6px;
+}
+.cloud-profile-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.admin-vault-box {
+  margin-top: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(12, 12, 12, 0.72);
+  padding: 9px 11px;
+}
+.admin-vault-box > summary,
+.local-key-details > summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 800;
+  color: #a7f3d0;
+  list-style: none;
+}
+.admin-vault-body {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.admin-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 170px;
+  overflow-y: auto;
+}
+.admin-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 12px;
+}
+.local-key-details {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 9px 11px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.local-key-details > summary {
+  color: #cbd5e1;
+  font-size: 12px;
+}

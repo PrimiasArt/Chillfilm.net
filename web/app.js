@@ -8,8 +8,26 @@ import {
   buildSubCacheKey,
   loadCachedEpisodeSub,
   saveCachedEpisodeSub,
-} from './subtitles.js';
-import { UI_LANGUAGES, resolveUiLang, t } from './i18n.js';
+} from './subtitles.js?v=3';
+import { UI_LANGUAGES, resolveUiLang, t } from './i18n.js?v=3';
+import {
+  normalizeMovieSlug,
+  normalizeEpisodeKey,
+  getCloudSession,
+  clearCloudSession,
+  isCloudSignedIn,
+  fetchCloudHealth,
+  cloudLogin,
+  cloudRegister,
+  cloudRefreshMe,
+  cloudFetchAdminConfig,
+  cloudAdminAction,
+  cloudPullState,
+  cloudPushState,
+  cloudFetchSubtitle,
+  cloudSaveSubtitle,
+  cloudTranslateCueBatch,
+} from './sync.js?v=3';
 
 const PHIM_API = 'https://phimapi.com';
 const PHIM_CDN = 'https://phimimg.com';
@@ -79,6 +97,15 @@ const state = {
   subStatusText: 'AI Sub ready',
   pendingSeekSec: 0,
   lastSavedPosTs: 0,
+  // NKI Cloud Auto-Sync
+  cloudSession: getCloudSession(),
+  cloudHealth: null,
+  cloudAuthMode: 'login',
+  pendingCloudProgress: new Map(),
+  lastCloudPullTs: 0,
+  lastCloudPushTs: 0,
+  prefsPushTimer: null,
+  lastCloudSubPushBatch: 0,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -214,8 +241,27 @@ function loadPrefs() {
   }
 }
 
-function savePrefs() {
+function savePrefs(skipCloudPush = false) {
   localStorage.setItem('chillfilm_nki_prefs_v1', JSON.stringify(state.prefs));
+  if (!skipCloudPush && isCloudSignedIn()) {
+    clearTimeout(state.prefsPushTimer);
+    state.prefsPushTimer = setTimeout(() => {
+      const syncablePrefs = {
+        uiLang: state.prefs.uiLang,
+        primaryLang: state.prefs.primaryLang,
+        secondaryLang: state.prefs.secondaryLang,
+        dualSub: state.prefs.dualSub,
+        subEnabled: state.prefs.subEnabled,
+        primarySize: state.prefs.primarySize,
+        secondarySize: state.prefs.secondarySize,
+        primaryColor: state.prefs.primaryColor,
+        secondaryColor: state.prefs.secondaryColor,
+        boxOpacity: state.prefs.boxOpacity,
+        geminiModel: state.prefs.geminiModel,
+      };
+      cloudPushState({ prefs: syncablePrefs, prefsUpdatedAt: Date.now() }).catch(() => {});
+    }, 1800);
+  }
 }
 
 function loadHistory() {
@@ -227,8 +273,8 @@ function loadHistory() {
 }
 
 function buildEpisodePosKey(movieSlug, ep) {
-  const m = String(movieSlug || '').trim().toLowerCase();
-  const epKey = String(ep?.slug || ep?.name || '').trim().toLowerCase();
+  const m = normalizeMovieSlug(movieSlug);
+  const epKey = normalizeEpisodeKey(ep?.name || ep?.slug || '');
   const urlPart = (m === 'direct' || m === 'local')
     ? String(ep?.link_m3u8 || '').split('?')[0].trim().toLowerCase()
     : '';
@@ -247,14 +293,17 @@ function getSavedEpisodePosition(movieSlug, ep) {
   if (!movieSlug || !ep) return 0;
   const map = loadEpisodePosMap();
   const key = buildEpisodePosKey(movieSlug, ep);
-  const entry = map[key];
+  const legacyKey = `${String(movieSlug || '').trim().toLowerCase()}|${String(ep?.slug || ep?.name || '').trim().toLowerCase()}|`;
+  const entry = map[key] || map[legacyKey];
   if (entry && typeof entry.pos === 'number' && entry.pos > 2) {
     if (entry.dur > 30 && entry.pos / entry.dur >= 0.97) return 0;
     return Math.floor(entry.pos);
   }
-  // Fallback: check watch history by movie + episode name or URL
+  const canonicalSlug = normalizeMovieSlug(movieSlug);
+  const canonicalEp = normalizeEpisodeKey(ep?.name || ep?.slug || '');
   const hist = loadHistory().find(
-    (h) => h.slug === movieSlug && (h.epUrl === ep.link_m3u8 || h.epName === ep.name)
+    (h) => normalizeMovieSlug(h.slug) === canonicalSlug &&
+      (h.epUrl === ep.link_m3u8 || h.epName === ep.name || normalizeEpisodeKey(h.epName || h.epSlug) === canonicalEp)
   );
   if (hist && hist.position > 2) {
     if (hist.duration > 30 && hist.position / hist.duration >= 0.97) return 0;
@@ -265,14 +314,19 @@ function getSavedEpisodePosition(movieSlug, ep) {
 
 function getLatestMovieHistory(movieSlug) {
   if (!movieSlug) return null;
-  return loadHistory().find((h) => h.slug === movieSlug) || null;
+  const target = normalizeMovieSlug(movieSlug);
+  return loadHistory().find((h) => normalizeMovieSlug(h.slug) === target) || null;
 }
 
-function saveHistoryItem(movie, ep, currentTime, duration) {
+function saveHistoryItem(movie, ep, currentTime, duration, { immediateCloudFlush = false, useBeacon = false } = {}) {
   if (!movie || !ep) return;
   const pos = Math.floor(currentTime || 0);
   const dur = Math.floor(duration || 0);
   if (pos < 2) return;
+
+  const now = Date.now();
+  const canonicalSlug = normalizeMovieSlug(movie.slug);
+  const canonicalEpKey = normalizeEpisodeKey(ep?.name || ep?.slug || '');
 
   // 1. Update per-episode resume map (persists across ALL episodes of a series)
   const map = loadEpisodePosMap();
@@ -281,7 +335,7 @@ function saveHistoryItem(movie, ep, currentTime, duration) {
   if (isFinished) {
     delete map[epKey];
   } else {
-    map[epKey] = { pos, dur, epName: ep.name, ts: Date.now() };
+    map[epKey] = { pos, dur, epName: ep.name, ts: now };
     const keys = Object.keys(map);
     if (keys.length > 200) {
       keys.sort((a, b) => (map[b].ts || 0) - (map[a].ts || 0));
@@ -294,27 +348,149 @@ function saveHistoryItem(movie, ep, currentTime, duration) {
     // Ignore storage quota
   }
 
-  // 2. Update "Tiếp Tục Xem" movie history strip
-  if (dur < 10) return;
-  const list = loadHistory().filter((h) => h.slug !== movie.slug);
-  list.unshift({
-    slug: movie.slug,
-    name: movie.name,
-    origin_name: movie.origin_name || '',
-    poster: movie.poster,
-    year: movie.year || '',
-    epName: ep.name,
-    epSlug: ep.slug || '',
-    epUrl: ep.link_m3u8,
-    position: isFinished ? 0 : pos,
-    duration: dur,
-    progress: Math.min(1, Math.max(0.02, pos / dur)),
-    ts: Date.now(),
-  });
+  // 2. Update "Continue Watching" movie history strip
+  if (dur >= 10) {
+    const list = loadHistory().filter((h) => normalizeMovieSlug(h.slug) !== canonicalSlug);
+    list.unshift({
+      slug: canonicalSlug,
+      name: movie.name,
+      origin_name: movie.origin_name || '',
+      poster: movie.poster,
+      year: movie.year || '',
+      epName: ep.name,
+      epSlug: canonicalEpKey,
+      epUrl: ep.link_m3u8,
+      position: isFinished ? 0 : pos,
+      duration: dur,
+      progress: Math.min(1, Math.max(0.02, pos / dur)),
+      ts: now,
+    });
+    try {
+      localStorage.setItem('chillfilm_nki_history_v1', JSON.stringify(list.slice(0, 30)));
+    } catch {
+      // Ignore storage quota
+    }
+  }
+
+  // 3. Queue automatic background Cloud Sync to Neon Postgres (Android <-> Web <-> Smart TV)
+  if (isCloudSignedIn() && canonicalSlug !== 'direct' && canonicalSlug !== 'local' && canonicalSlug !== 'unknown') {
+    state.pendingCloudProgress.set(`${canonicalSlug}|${canonicalEpKey}`, {
+      movieSlug: canonicalSlug,
+      episodeKey: canonicalEpKey,
+      title: movie.name || canonicalSlug,
+      posterUrl: movie.poster || '',
+      countryCode: '',
+      episodeName: ep.name || 'Full',
+      streamUrl: ep.link_m3u8 || '',
+      positionMs: (isFinished ? 0 : pos) * 1000,
+      durationMs: dur * 1000,
+      updatedAt: now,
+    });
+    if (immediateCloudFlush || now - state.lastCloudPushTs >= 15000) {
+      flushPendingCloudProgress(useBeacon);
+    }
+  }
+}
+
+function flushPendingCloudProgress(useBeacon = false) {
+  if (!isCloudSignedIn() || state.pendingCloudProgress.size === 0) return;
+  const items = Array.from(state.pendingCloudProgress.values());
+  state.pendingCloudProgress.clear();
+  state.lastCloudPushTs = Date.now();
+  cloudPushState({ watchProgress: items, useBeacon }).catch(() => {});
+}
+
+async function pullCloudStateAndMerge({ silent = true, force = false } = {}) {
+  if (!isCloudSignedIn()) return false;
+  const now = Date.now();
+  if (!force && now - state.lastCloudPullTs < 15000) return false;
+  state.lastCloudPullTs = now;
   try {
-    localStorage.setItem('chillfilm_nki_history_v1', JSON.stringify(list.slice(0, 24)));
-  } catch {
-    // Ignore storage quota
+    const data = await cloudPullState(0);
+    if (!data?.ok) return false;
+
+    const map = loadEpisodePosMap();
+    const histList = loadHistory();
+    const histBySlug = new Map(histList.map((h) => [normalizeMovieSlug(h.slug), h]));
+    let changed = false;
+
+    if (Array.isArray(data.watchProgress)) {
+      for (const item of data.watchProgress) {
+        if (!item?.movieSlug) continue;
+        const slug = normalizeMovieSlug(item.movieSlug);
+        const epKey = normalizeEpisodeKey(item.episodeKey || item.episodeName || 'full');
+        const mapKey = `${slug}|${epKey}|`;
+        const pos = Math.floor((Number(item.positionMs) || 0) / 1000);
+        const dur = Math.floor((Number(item.durationMs) || 0) / 1000);
+        const remoteTs = Number(item.updatedAt || 0);
+
+        const localEntry = map[mapKey];
+        if (!localEntry || remoteTs > (localEntry.ts || 0)) {
+          if (dur > 30 && pos / dur >= 0.97) {
+            delete map[mapKey];
+          } else if (pos >= 2) {
+            map[mapKey] = { pos, dur, epName: item.episodeName || epKey, ts: remoteTs };
+          }
+          changed = true;
+        }
+
+        const existingHist = histBySlug.get(slug);
+        if (!existingHist || remoteTs > (existingHist.ts || 0)) {
+          if (dur >= 10 || pos >= 2) {
+            histBySlug.set(slug, {
+              slug,
+              name: item.title || existingHist?.name || slug,
+              origin_name: existingHist?.origin_name || '',
+              poster: item.posterUrl || existingHist?.poster || '',
+              year: existingHist?.year || '',
+              epName: item.episodeName || epKey,
+              epSlug: epKey,
+              epUrl: item.streamUrl || existingHist?.epUrl || '',
+              position: pos,
+              duration: dur,
+              progress: dur > 0 ? Math.min(1, Math.max(0.02, pos / dur)) : 0.05,
+              ts: remoteTs,
+            });
+            changed = true;
+          }
+        }
+      }
+    }
+
+    if (changed) {
+      const mergedHist = Array.from(histBySlug.values())
+        .sort((a, b) => (b.ts || 0) - (a.ts || 0))
+        .slice(0, 30);
+      try {
+        localStorage.setItem(EP_POS_STORAGE_KEY, JSON.stringify(map));
+        localStorage.setItem('chillfilm_nki_history_v1', JSON.stringify(mergedHist));
+      } catch {
+        // ignore quota
+      }
+      renderHistorySection();
+      if ($('detailView')?.classList.contains('active') && state.currentMovie) {
+        renderDetailView(state.currentMovie);
+      }
+    }
+
+    // Merge synced subtitle preferences if server prefs exist
+    if (data.prefs && typeof data.prefs === 'object') {
+      const p = data.prefs;
+      let prefsChanged = false;
+      ['primaryLang', 'secondaryLang', 'dualSub', 'subEnabled', 'primarySize', 'secondarySize', 'primaryColor', 'secondaryColor', 'boxOpacity', 'geminiModel'].forEach((k) => {
+        if (p[k] !== undefined && p[k] !== state.prefs[k]) {
+          state.prefs[k] = p[k];
+          prefsChanged = true;
+        }
+      });
+      if (prefsChanged) savePrefs(true);
+    }
+
+    if (!silent) showToast('☁️ Cloud Sync completed!');
+    return true;
+  } catch (err) {
+    if (!silent) showToast(`Cloud sync error: ${err.message}`);
+    return false;
   }
 }
 
@@ -836,13 +1012,16 @@ function applyEqPreset(preset) {
   });
 }
 
-function persistCurrentPlaybackProgress() {
+function persistCurrentPlaybackProgress({ immediate = false, useBeacon = false } = {}) {
   const video = $('videoEl');
   if (!state.currentMovie || !state.currentEpisode || !video) return;
   const cur = video.currentTime || 0;
   const dur = video.duration || 0;
   if (cur > 2 && isFinite(cur)) {
-    saveHistoryItem(state.currentMovie, state.currentEpisode, cur, isFinite(dur) ? dur : 0);
+    saveHistoryItem(state.currentMovie, state.currentEpisode, cur, isFinite(dur) ? dur : 0, {
+      immediateCloudFlush: immediate,
+      useBeacon,
+    });
     state.lastSavedPosTs = Date.now();
   }
 }
@@ -987,7 +1166,7 @@ function openPlayer(movie, episode, startSec = 0) {
 function minimizePlayer() {
   const modal = $('playerModal');
   if (!modal.classList.contains('open')) return;
-  persistCurrentPlaybackProgress();
+  persistCurrentPlaybackProgress({ immediate: true });
   renderHistorySection();
   if ($('detailView').classList.contains('active') && state.currentMovie) {
     renderDetailView(state.currentMovie);
@@ -1015,7 +1194,7 @@ function restorePlayer() {
 
 function closePlayer() {
   const video = $('videoEl');
-  persistCurrentPlaybackProgress();
+  persistCurrentPlaybackProgress({ immediate: true });
   renderHistorySection();
   if ($('detailView').classList.contains('active') && state.currentMovie) {
     renderDetailView(state.currentMovie);
@@ -1056,11 +1235,11 @@ function updateSubStatusBadge(text) {
   $('hudSubLangPill').textContent = `CC • ${lang.badge}`;
 }
 
-async function persistCurrentSubCache(isFullyTranslated, translatedCount) {
+async function persistCurrentSubCache(isFullyTranslated, translatedCount, { skipCloudPush = false } = {}) {
   if (!state.currentMovie || !state.currentEpisode || state.primaryCues.length < 3) return;
   const targetLang = resolveLanguage(state.prefs.primaryLang);
   const key = buildSubCacheKey(state.currentMovie.slug, state.currentEpisode, targetLang.code);
-  await saveCachedEpisodeSub(key, {
+  const payload = {
     primaryLangCode: targetLang.code,
     secondaryLangCode: state.prefs.dualSub ? state.prefs.secondaryLang : '',
     sourceLangCode: state.lastSubSourceLang || 'auto',
@@ -1070,7 +1249,21 @@ async function persistCurrentSubCache(isFullyTranslated, translatedCount) {
     secondaryCues: state.secondaryCues,
     isFullyTranslated,
     translatedCount: translatedCount ?? state.primaryCues.length,
-  });
+  };
+  await saveCachedEpisodeSub(key, payload);
+
+  // Auto-upload translated subtitle to Shared NKI Cloud Pool (Vercel Blob) so Android & TV load it in <150ms!
+  if (!skipCloudPush && isCloudSignedIn()) {
+    const now = Date.now();
+    if (isFullyTranslated || now - state.lastCloudSubPushBatch >= 25000) {
+      state.lastCloudSubPushBatch = now;
+      cloudSaveSubtitle({
+        movieSlug: state.currentMovie.slug,
+        episodeNameOrSlug: state.currentEpisode.name || state.currentEpisode.slug,
+        ...payload,
+      }).catch(() => {});
+    }
+  }
 }
 
 async function autoLoadSubtitlesForMovie(movie, episode) {
@@ -1084,9 +1277,28 @@ async function autoLoadSubtitlesForMovie(movie, episode) {
   const targetLang = resolveLanguage(state.prefs.primaryLang);
   const cacheKey = buildSubCacheKey(movie.slug, episode, targetLang.code);
 
-  // STEP 0: INSTANT RESTORE FROM INDEXEDDB (TRANSLATE ONCE, LOAD INSTANTLY FOREVER!)
-  const cached = await loadCachedEpisodeSub(cacheKey);
+  // STEP 0A: INSTANT RESTORE FROM LOCAL INDEXEDDB (<10ms)
+  let cached = await loadCachedEpisodeSub(cacheKey);
+  let fromCloud = false;
   if (runId !== state.subTranslationRunId) return;
+
+  // STEP 0B: SHARED NKI CLOUD SUBTITLE POOL ON VERCEL BLOB (<150ms, 0 GEMINI TOKENS!)
+  if ((!cached || (cached.primaryCues?.length || 0) < 3) && isCloudSignedIn()) {
+    updateSubStatusBadge(`☁️ Checking NKI Cloud Sub (${targetLang.badge})...`);
+    const cloudBundle = await cloudFetchSubtitle(movie.slug, episode.name || episode.slug, targetLang.code);
+    if (runId !== state.subTranslationRunId) return;
+    if (cloudBundle && Array.isArray(cloudBundle.primaryCues) && cloudBundle.primaryCues.length >= 3) {
+      cached = {
+        ...cloudBundle,
+        trackLabel: cloudBundle.sourcePlatform || `☁️ NKI Cloud ${targetLang.badge}`,
+        translatedCount: cloudBundle.primaryCues.length,
+      };
+      fromCloud = true;
+      // Save cloud subtitle to local IndexedDB for instant offline reuse next time
+      saveCachedEpisodeSub(cacheKey, cached).catch(() => {});
+    }
+  }
+
   if (cached && cached.primaryCues?.length >= 3) {
     state.sourceCues = cached.sourceCues?.length ? cached.sourceCues : cached.primaryCues;
     state.primaryCues = cached.primaryCues;
@@ -1100,7 +1312,11 @@ async function autoLoadSubtitlesForMovie(movie, episode) {
       state.secondaryCues = state.sourceCues;
     }
 
-    updateSubStatusBadge(`💾 Sub ${targetLang.badge} • Đã lưu (${state.primaryCues.length} câu)`);
+    updateSubStatusBadge(
+      fromCloud
+        ? `☁️ Sub ${targetLang.badge} • NKI Cloud (${state.primaryCues.length})`
+        : `💾 Sub ${targetLang.badge} • Saved (${state.primaryCues.length})`
+    );
     renderActiveSubtitle(($('videoEl').currentTime || 0) * 1000);
 
     // Hydrate OpenSubtitles track list silently in background (non-blocking) for track switcher
@@ -1193,6 +1409,7 @@ async function translateSecondaryInBackground(runId, cues, sourceLangCode) {
       targetLang: secCode,
       geminiApiKey: state.prefs.geminiApiKey,
       geminiModel: state.prefs.geminiModel,
+      cloudTranslator: isCloudSignedIn() ? cloudTranslateCueBatch : null,
     });
     if (runId !== state.subTranslationRunId) return;
     for (let j = 0; j < translated.length; j++) workingSec[i + j] = translated[j];
@@ -1250,6 +1467,7 @@ async function applyLoadedSourceCues(cues, sourceLangCode = 'auto', opts = {}) {
         targetLang: targetLang.code,
         geminiApiKey: state.prefs.geminiApiKey,
         geminiModel: state.prefs.geminiModel,
+        cloudTranslator: isCloudSignedIn() ? cloudTranslateCueBatch : null,
       });
       if (runId !== state.subTranslationRunId) return;
       for (let j = 0; j < translated.length; j++) {
@@ -1431,6 +1649,196 @@ function openMoreModal() {
   $('moreModal').classList.add('open');
 }
 
+function updateCloudHeaderBadge() {
+  const session = getCloudSession();
+  state.cloudSession = session;
+  const btn = $('openCloudBtn');
+  const txt = $('cloudBtnText');
+  if (btn && txt) {
+    if (session?.user) {
+      btn.classList.add('connected');
+      txt.textContent = session.user.username.slice(0, 12);
+    } else {
+      btn.classList.remove('connected');
+      txt.textContent = 'Cloud';
+    }
+  }
+  if ($('aiDot')) {
+    $('aiDot').style.display = (session?.serverAiReady || state.prefs.geminiApiKey) ? 'block' : 'none';
+  }
+}
+
+async function renderCloudCard() {
+  updateCloudHeaderBadge();
+  const session = getCloudSession();
+  const statusEl = $('cloudServerStatus');
+  const roleBadge = $('cloudRoleBadge');
+  const authWrap = $('cloudAuthFormWrap');
+  const connWrap = $('cloudConnectedWrap');
+  const adminDetails = $('adminVaultDetails');
+
+  // Check health in background to detect Bootstrap Admin / Server AI readiness
+  fetchCloudHealth().then((h) => {
+    state.cloudHealth = h;
+    if (statusEl) {
+      if (!h.ok) {
+        statusEl.textContent = '⚠️ Cloud server unreachable';
+      } else if (session?.user) {
+        statusEl.textContent = h.serverAiReady
+          ? '🟢 Server Gemini AI Active • Auto-Sync Neon + Blob'
+          : '🟡 Cloud Sync Active • Admin needs to set Gemini API Key';
+      } else if (!h.hasAdmin) {
+        statusEl.textContent = '👑 First user to create an account becomes ADMIN';
+      } else {
+        statusEl.textContent = h.registrationMode === 'INVITE_ONLY'
+          ? '🔒 Sign in or register with an Admin Invite Code'
+          : '🟢 Sign in to auto-sync history, AI subs & centralized Gemini';
+      }
+    }
+    syncCloudAuthFormFields();
+  }).catch(() => {
+    if (statusEl) statusEl.textContent = 'Offline / Local Mode';
+  });
+
+  if (session?.user) {
+    if (authWrap) authWrap.style.display = 'none';
+    if (connWrap) connWrap.style.display = 'block';
+    if (roleBadge) {
+      roleBadge.style.display = 'inline-block';
+      roleBadge.textContent = session.user.role || 'MEMBER';
+    }
+    if ($('cloudProfileName')) {
+      $('cloudProfileName').textContent = `${session.user.displayName || session.user.username} (@${session.user.username})`;
+    }
+    const used = session.user.todayUsage?.requests ?? 0;
+    const lim = session.user.dailyAiLimit;
+    const quotaText = session.user.role === 'ADMIN' || !lim ? `${used} / ∞ AI today` : `${used} / ${lim} AI today`;
+    if ($('cloudQuotaSummary')) {
+      $('cloudQuotaSummary').textContent = `${session.serverAiReady ? '🟢 Centralized AI Active' : '⚠️ AI Key Pending'} • ${quotaText}`;
+    }
+    if (adminDetails) {
+      adminDetails.style.display = session.user.role === 'ADMIN' ? 'block' : 'none';
+      if (session.user.role === 'ADMIN' && adminDetails.open) {
+        loadAdminVaultPanel();
+      }
+    }
+  } else {
+    if (authWrap) authWrap.style.display = 'block';
+    if (connWrap) connWrap.style.display = 'none';
+    if (roleBadge) roleBadge.style.display = 'none';
+    if (adminDetails) adminDetails.style.display = 'none';
+    syncCloudAuthFormFields();
+  }
+}
+
+function syncCloudAuthFormFields() {
+  const isReg = state.cloudAuthMode === 'register';
+  $('cloudTabLogin')?.classList.toggle('active', !isReg);
+  $('cloudTabRegister')?.classList.toggle('active', isReg);
+  if ($('cloudDisplayNameInput')) $('cloudDisplayNameInput').style.display = isReg ? 'block' : 'none';
+  const needInvite = isReg && state.cloudHealth?.hasAdmin && state.cloudHealth?.registrationMode === 'INVITE_ONLY';
+  if ($('cloudInviteInput')) $('cloudInviteInput').style.display = needInvite ? 'block' : 'none';
+  const hint = $('cloudBootstrapHint');
+  if (hint) {
+    if (isReg && state.cloudHealth && !state.cloudHealth.hasAdmin) {
+      hint.style.display = 'block';
+      hint.textContent = '👑 No Admin exists yet — creating this account will automatically make you the permanent ADMIN and lock sign-ups to Invite-Only!';
+    } else if (needInvite) {
+      hint.style.display = 'block';
+      hint.textContent = '🔒 Admin enabled Invite-Only mode. Enter the NKI-XXXX-XXXX code shared by the Admin.';
+    } else {
+      hint.style.display = 'none';
+    }
+  }
+  if ($('cloudAuthSubmitBtn')) {
+    $('cloudAuthSubmitBtn').textContent = isReg ? '✨ Create NKI Account & Sync' : '☁️ Sign In & Auto-Sync';
+  }
+}
+
+async function loadAdminVaultPanel() {
+  const box = $('adminVaultStatusBox');
+  if (!box) return;
+  try {
+    const data = await cloudFetchAdminConfig();
+    const cfg = data.config || {};
+    box.innerHTML = [
+      `🔑 <strong>Vercel Env Key:</strong> ${cfg.hasEnvKey ? '✅ Configured' : '❌ Not set'}`,
+      `🔐 <strong>Admin Vault Key:</strong> ${cfg.hasVaultKey ? `✅ Override (${escapeHtml(cfg.maskedVaultKey)})` : 'Using Vercel Env'}`,
+      `☁️ <strong>Shared AI Subtitles Cached:</strong> ${cfg.cachedSubtitlesCount || 0} episodes`,
+    ].join('<br>');
+
+    if ($('adminDefaultModelSelect') && cfg.defaultModel) {
+      $('adminDefaultModelSelect').value = cfg.defaultModel;
+    }
+    if ($('adminRegModeSelect') && cfg.registrationMode) {
+      $('adminRegModeSelect').value = cfg.registrationMode;
+    }
+
+    const invWrap = $('adminInvitesList');
+    if (invWrap) {
+      invWrap.innerHTML = (data.invites || []).length
+        ? data.invites.map((inv) => `
+            <div class="admin-row">
+              <div>
+                <div style="font-weight:800;color:${inv.active ? '#86efac' : '#9ca3af'};">${escapeHtml(inv.code)} ${inv.active ? '' : '(Revoked)'}</div>
+                <div style="font-size:11px;color:var(--muted);">${escapeHtml(inv.label)} • Used ${inv.usedCount}/${inv.maxUses} • ${inv.dailyAiLimit}/day</div>
+              </div>
+              <div style="display:flex;gap:5px;">
+                <button class="btn-glass" data-copy-invite="${escapeHtml(inv.code)}" style="padding:4px 8px;font-size:11px;">Copy</button>
+                ${inv.active ? `<button class="btn-glass" data-revoke-invite="${escapeHtml(inv.code)}" style="padding:4px 8px;font-size:11px;color:#fca5a5;">Revoke</button>` : ''}
+              </div>
+            </div>
+          `).join('')
+        : '<div style="font-size:11.5px;color:var(--muted);">No invite codes yet. Click "+ New Invite Code" to invite family/devices.</div>';
+
+      invWrap.querySelectorAll('[data-copy-invite]').forEach((btn) => {
+        btn.onclick = () => {
+          navigator.clipboard?.writeText(btn.dataset.copyInvite).catch(() => {});
+          showToast(`📋 Copied Invite Code: ${btn.dataset.copyInvite}`);
+        };
+      });
+      invWrap.querySelectorAll('[data-revoke-invite]').forEach((btn) => {
+        btn.onclick = async () => {
+          await cloudAdminAction({ action: 'revokeInvite', code: btn.dataset.revokeInvite });
+          showToast(`Revoked ${btn.dataset.revokeInvite}`);
+          loadAdminVaultPanel();
+        };
+      });
+    }
+
+    const usrWrap = $('adminUsersList');
+    if (usrWrap) {
+      usrWrap.innerHTML = (data.users || []).map((u) => `
+        <div class="admin-row">
+          <div>
+            <div style="font-weight:700;">@${escapeHtml(u.username)} <span style="font-size:10px;color:#86efac;">${escapeHtml(u.role)}</span></div>
+            <div style="font-size:11px;color:var(--muted);">Status: ${escapeHtml(u.status)} • Today AI: ${u.todayUsage?.requests || 0}/${u.dailyAiLimit || '∞'}</div>
+          </div>
+          ${u.role !== 'ADMIN' ? `
+            <button class="btn-glass" data-toggle-user="${escapeHtml(u.id)}" data-next-status="${u.status === 'ACTIVE' ? 'REVOKED' : 'ACTIVE'}" style="padding:4px 8px;font-size:11px;color:${u.status === 'ACTIVE' ? '#fca5a5' : '#86efac'};">
+              ${u.status === 'ACTIVE' ? 'Revoke' : 'Restore'}
+            </button>
+          ` : ''}
+        </div>
+      `).join('');
+
+      usrWrap.querySelectorAll('[data-toggle-user]').forEach((btn) => {
+        btn.onclick = async () => {
+          await cloudAdminAction({
+            action: 'updateUser',
+            userId: btn.dataset.toggleUser,
+            status: btn.dataset.nextStatus,
+          });
+          showToast(`Updated member status -> ${btn.dataset.nextStatus}`);
+          loadAdminVaultPanel();
+        };
+      });
+    }
+  } catch (err) {
+    box.textContent = `Admin Vault error: ${err.message}`;
+  }
+}
+
 function openSettingsModal() {
   $('geminiKeyInput').value = state.prefs.geminiApiKey || '';
   $('geminiModelSelect').value = state.prefs.geminiModel || 'gemini-3-flash-preview';
@@ -1443,6 +1851,7 @@ function openSettingsModal() {
   $('defaultLangSelect').innerHTML = SUBTITLE_LANGUAGES.map(
     (l) => `<option value="${l.code}" ${l.code === state.prefs.primaryLang ? 'selected' : ''}>${l.badge} — ${l.name} (${l.native})</option>`
   ).join('');
+  renderCloudCard();
   $('settingsModal').classList.add('open');
 }
 
@@ -1513,9 +1922,105 @@ function init() {
     }
   });
 
+  $('openCloudBtn')?.addEventListener('click', openSettingsModal);
   $('openCastBtn').onclick = openTvCastModal;
   $('openSettingsBtn').onclick = openSettingsModal;
   $('refreshBtn').onclick = () => loadCategory(state.activeCategory);
+
+  // NKI Cloud Sync & Admin Vault Bindings
+  $('cloudTabLogin')?.addEventListener('click', () => {
+    state.cloudAuthMode = 'login';
+    syncCloudAuthFormFields();
+  });
+  $('cloudTabRegister')?.addEventListener('click', () => {
+    state.cloudAuthMode = 'register';
+    syncCloudAuthFormFields();
+  });
+  $('cloudAuthSubmitBtn')?.addEventListener('click', async () => {
+    const username = $('cloudUsernameInput')?.value.trim() || '';
+    const password = $('cloudPasswordInput')?.value || '';
+    const displayName = $('cloudDisplayNameInput')?.value.trim() || '';
+    const inviteCode = $('cloudInviteInput')?.value.trim() || '';
+    if (!username || !password) return showToast('Enter username and password');
+    const btn = $('cloudAuthSubmitBtn');
+    const prevTxt = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '⏳ Connecting...';
+    try {
+      if (state.cloudAuthMode === 'register') {
+        await cloudRegister({ username, password, displayName, inviteCode });
+        showToast('👑 NKI Cloud account created & synced!');
+      } else {
+        await cloudLogin(username, password);
+        showToast('☁️ Signed into NKI Cloud! Auto-syncing...');
+      }
+      if ($('cloudPasswordInput')) $('cloudPasswordInput').value = '';
+      await pullCloudStateAndMerge({ silent: true, force: true });
+      renderCloudCard();
+    } catch (err) {
+      showToast(err.message || 'Authentication failed');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = prevTxt;
+    }
+  });
+  $('cloudSyncNowBtn')?.addEventListener('click', async () => {
+    flushPendingCloudProgress(false);
+    await cloudRefreshMe().catch(() => {});
+    await pullCloudStateAndMerge({ silent: false, force: true });
+    renderCloudCard();
+  });
+  $('cloudLogoutBtn')?.addEventListener('click', () => {
+    clearCloudSession();
+    renderCloudCard();
+    showToast('Signed out of NKI Cloud');
+  });
+  $('adminVaultDetails')?.addEventListener('toggle', () => {
+    if ($('adminVaultDetails').open) loadAdminVaultPanel();
+  });
+  $('adminSaveVaultBtn')?.addEventListener('click', async () => {
+    const keyVal = $('adminVaultKeyInput')?.value.trim() || '';
+    if (!keyVal) return showToast('Paste a Gemini API Key first');
+    try {
+      await cloudAdminAction({ action: 'updateConfig', geminiApiKey: keyVal });
+      $('adminVaultKeyInput').value = '';
+      showToast('🔐 Server Gemini API Key encrypted & updated!');
+      loadAdminVaultPanel();
+    } catch (err) {
+      showToast(err.message || 'Failed to save key');
+    }
+  });
+  $('adminSavePolicyBtn')?.addEventListener('click', async () => {
+    try {
+      await cloudAdminAction({
+        action: 'updateConfig',
+        defaultModel: $('adminDefaultModelSelect')?.value,
+        registrationMode: $('adminRegModeSelect')?.value,
+      });
+      showToast('✅ Global AI model & access policy updated!');
+      loadAdminVaultPanel();
+    } catch (err) {
+      showToast(err.message || 'Policy update failed');
+    }
+  });
+  $('adminCreateInviteBtn')?.addEventListener('click', async () => {
+    try {
+      const res = await cloudAdminAction({
+        action: 'createInvite',
+        label: 'NKI Member',
+        maxUses: 5,
+        dailyAiLimit: 150,
+      });
+      const code = res?.invite?.code;
+      if (code) {
+        navigator.clipboard?.writeText(code).catch(() => {});
+        showToast(`🎟 Created & Copied Invite Code: ${code}`);
+      }
+      loadAdminVaultPanel();
+    } catch (err) {
+      showToast(err.message || 'Invite creation failed');
+    }
+  });
 
   // Close backdrops
   document.querySelectorAll('.backdrop').forEach((bd) => {
@@ -1605,7 +2110,7 @@ function init() {
   video.addEventListener('pause', () => {
     $('playPauseBtn').textContent = '▶';
     if ($('miniPlayBtn')) $('miniPlayBtn').textContent = '▶';
-    persistCurrentPlaybackProgress();
+    persistCurrentPlaybackProgress({ immediate: true });
     setControlsVisible(true);
   });
   video.addEventListener('timeupdate', () => {
@@ -1616,13 +2121,24 @@ function init() {
     if (dur > 0) $('seekRange').value = String((cur / dur) * 1000);
     renderActiveSubtitle(cur * 1000);
     if (!video.paused && cur > 2 && Date.now() - state.lastSavedPosTs >= 3000) {
-      persistCurrentPlaybackProgress();
+      persistCurrentPlaybackProgress({ immediate: false });
     }
   });
-  window.addEventListener('pagehide', persistCurrentPlaybackProgress);
-  window.addEventListener('beforeunload', persistCurrentPlaybackProgress);
+  const onLeavePage = () => {
+    persistCurrentPlaybackProgress({ immediate: true, useBeacon: true });
+    flushPendingCloudProgress(true);
+  };
+  window.addEventListener('pagehide', onLeavePage);
+  window.addEventListener('beforeunload', onLeavePage);
+  window.addEventListener('focus', () => {
+    if (isCloudSignedIn()) pullCloudStateAndMerge({ silent: true });
+  });
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') persistCurrentPlaybackProgress();
+    if (document.visibilityState === 'hidden') {
+      onLeavePage();
+    } else if (document.visibilityState === 'visible' && isCloudSignedIn()) {
+      pullCloudStateAndMerge({ silent: true });
+    }
   });
   $('seekRange').addEventListener('input', (e) => {
     const dur = video.duration || 0;
@@ -1844,7 +2360,11 @@ function init() {
     b.onclick = () => sendTvRemoteKey(b.dataset.tvkey);
   });
 
-  if (state.prefs.geminiApiKey) $('aiDot').style.display = 'block';
+  updateCloudHeaderBadge();
+  if (isCloudSignedIn()) {
+    cloudRefreshMe().then(() => updateCloudHeaderBadge()).catch(() => {});
+    pullCloudStateAndMerge({ silent: true, force: true });
+  }
 }
 
 document.addEventListener('DOMContentLoaded', init);

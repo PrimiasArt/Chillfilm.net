@@ -15,7 +15,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Sarabun:wght@500;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=2" />
+  <link rel="stylesheet" href="./styles.css?v=3" />
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js" defer></script>
 </head>
 <body>
@@ -47,6 +47,10 @@
         <div class="lang-menu" id="langMenu"></div>
       </div>
       <button class="icon-btn mobile-only" id="mobileSearchToggle" title="Search" aria-label="Search">🔍</button>
+      <button class="cloud-pill-btn" id="openCloudBtn" title="NKI Cloud Sync & AI">
+        <span class="cloud-dot" id="cloudStatusDot"></span>
+        <span id="cloudBtnText">Cloud</span>
+      </button>
       <button class="icon-btn" id="openCastBtn" title="Cast & Connect TV" aria-label="Cast TV">📡</button>
       <button class="icon-btn" id="openSettingsBtn" title="Settings" aria-label="Settings">
         ⚙️
@@ -319,8 +323,89 @@
         <button class="icon-btn" data-close="settingsModal">✕</button>
       </div>
       <div class="modal-body">
-        <div class="info-box" id="settingsPrivacyBox">
-          🔐 <strong>Local Privacy:</strong> Your Gemini API Key is saved locally in your browser (<code>localStorage</code>) — never sent to third-party servers. Free Neural AI translation works even without a key!
+        <!-- NKI CLOUD SYNC & CENTRALIZED SECURE AI GATEWAY -->
+        <div class="cloud-card" id="cloudSyncCard">
+          <div class="cloud-card-head">
+            <div>
+              <div class="cloud-card-title">☁️ NKI Cloud Sync &amp; Centralized AI</div>
+              <div class="cloud-card-sub" id="cloudServerStatus">Checking NKI Cloud server...</div>
+            </div>
+            <span class="cloud-badge" id="cloudRoleBadge" style="display:none;">MEMBER</span>
+          </div>
+
+          <!-- Signed Out Auth Form -->
+          <div id="cloudAuthFormWrap">
+            <div class="cloud-tabs">
+              <button class="cloud-tab active" id="cloudTabLogin" type="button">Sign In</button>
+              <button class="cloud-tab" id="cloudTabRegister" type="button">Create Account</button>
+            </div>
+            <div class="field-group" style="margin-top:8px;">
+              <input class="field-input" id="cloudUsernameInput" placeholder="Username (e.g. admin or email)" autocomplete="username" />
+              <input class="field-input" id="cloudPasswordInput" type="password" placeholder="Password (min 6 chars)" autocomplete="current-password" />
+              <input class="field-input" id="cloudDisplayNameInput" placeholder="Display Name (optional)" style="display:none;" />
+              <input class="field-input" id="cloudInviteInput" placeholder="Invite Code (e.g. NKI-XXXX-XXXX)" style="display:none;" />
+            </div>
+            <div class="cloud-hint" id="cloudBootstrapHint" style="display:none;"></div>
+            <button class="btn-grad" id="cloudAuthSubmitBtn" type="button" style="width:100%;margin-top:8px;">☁️ Sign In &amp; Auto-Sync</button>
+          </div>
+
+          <!-- Signed In Summary -->
+          <div id="cloudConnectedWrap" style="display:none;">
+            <div class="cloud-profile-row">
+              <div>
+                <div style="font-weight:800;font-size:14px;" id="cloudProfileName">@user</div>
+                <div style="font-size:11.5px;color:var(--muted);" id="cloudQuotaSummary">Server AI Ready • Auto-syncing Web ↔ Android</div>
+              </div>
+              <div style="display:flex;gap:6px;">
+                <button class="btn-glass" id="cloudSyncNowBtn" type="button" style="padding:6px 10px;font-size:12px;">🔄 Sync</button>
+                <button class="btn-glass" id="cloudLogoutBtn" type="button" style="padding:6px 10px;font-size:12px;color:#fca5a5;">Sign Out</button>
+              </div>
+            </div>
+
+            <!-- Admin Vault & Invite Manager (Visible ONLY to ADMIN) -->
+            <details class="admin-vault-box" id="adminVaultDetails" style="display:none;">
+              <summary>🔐 NKI Admin Vault &amp; Access Control</summary>
+              <div class="admin-vault-body">
+                <div class="info-box" id="adminVaultStatusBox" style="font-size:12px;">
+                  Loading Admin Vault...
+                </div>
+                <div class="field-group">
+                  <span class="field-label">UPDATE SERVER GEMINI API KEY (ENCRYPTED AES-256-GCM)</span>
+                  <div style="display:flex;gap:6px;">
+                    <input class="field-input" id="adminVaultKeyInput" type="password" placeholder="Paste new AIzaSy... to rotate server key" />
+                    <button class="btn-grad" id="adminSaveVaultBtn" type="button" style="white-space:nowrap;">Save Key</button>
+                  </div>
+                </div>
+                <div class="field-group">
+                  <span class="field-label">GLOBAL DEFAULT MODEL &amp; REGISTRATION POLICY</span>
+                  <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                    <select class="field-select" id="adminDefaultModelSelect" style="flex:1;min-width:160px;">
+                      <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
+                      <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+                      <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview</option>
+                      <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+                    </select>
+                    <select class="field-select" id="adminRegModeSelect" style="flex:1;min-width:140px;">
+                      <option value="INVITE_ONLY">🔒 Invite-Only</option>
+                      <option value="OPEN">🌐 Open Sign-Up</option>
+                    </select>
+                    <button class="btn-glass" id="adminSavePolicyBtn" type="button">Apply</button>
+                  </div>
+                </div>
+                <div class="field-group">
+                  <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+                    <span class="field-label" style="margin:0;">MEMBER INVITE CODES</span>
+                    <button class="btn-grad" id="adminCreateInviteBtn" type="button" style="padding:5px 10px;font-size:11.5px;">+ New Invite Code</button>
+                  </div>
+                  <div id="adminInvitesList" class="admin-list"></div>
+                </div>
+                <div class="field-group">
+                  <span class="field-label">REGISTERED DEVICES / MEMBERS</span>
+                  <div id="adminUsersList" class="admin-list"></div>
+                </div>
+              </div>
+            </details>
+          </div>
         </div>
 
         <div class="field-group">
@@ -334,11 +419,6 @@
         </div>
 
         <div class="field-group">
-          <span class="field-label" id="geminiKeyLabelText">GOOGLE GEMINI API KEY (OPTIONAL — CINEMA TRANSLATION)</span>
-          <input class="field-input" id="geminiKeyInput" type="password" placeholder="AIzaSy..." />
-        </div>
-
-        <div class="field-group">
           <span class="field-label" id="geminiModelLabelText">GEMINI AI MODEL</span>
           <select class="field-select" id="geminiModelSelect">
             <option value="gemini-3-flash-preview">gemini-3-flash-preview (Ultra Fast)</option>
@@ -347,6 +427,16 @@
             <option value="gemini-2.5-pro">gemini-2.5-pro</option>
           </select>
         </div>
+
+        <details class="local-key-details">
+          <summary id="geminiKeyLabelText">🔑 Optional: Personal Local Gemini API Key Override</summary>
+          <div style="margin-top:8px;display:flex;flex-direction:column;gap:8px;">
+            <div class="info-box" id="settingsPrivacyBox" style="font-size:11.5px;">
+              When signed into <strong>NKI Cloud</strong>, you do NOT need a local key — server AI handles translation securely. Only enter a key here if you want offline/personal override.
+            </div>
+            <input class="field-input" id="geminiKeyInput" type="password" placeholder="AIzaSy... (leave blank to use NKI Cloud AI)" />
+          </div>
+        </details>
 
         <button class="btn-grad" id="saveSettingsBtn" style="width:100%;">💾 Save Settings</button>
 
@@ -411,6 +501,6 @@
 
   <div class="toast" id="toast"></div>
 
-  <script type="module" src="./app.js?v=2"></script>
+  <script type="module" src="./app.js?v=3"></script>
 </body>
 </html>

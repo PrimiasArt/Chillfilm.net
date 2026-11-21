@@ -1,5 +1,8 @@
 package com.phyll.filmhub.ui.screens
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -65,6 +68,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.phyll.filmhub.R
+import com.phyll.filmhub.cloud.AdminVaultSnapshot
+import com.phyll.filmhub.cloud.CloudHealthInfo
+import com.phyll.filmhub.cloud.CloudSession
 import com.phyll.filmhub.model.DeviceUiMode
 import com.phyll.filmhub.model.SubtitleLanguageCatalog
 import com.phyll.filmhub.model.SubtitleStyleConfig
@@ -104,6 +110,20 @@ fun SettingsSourcesScreen(
     deviceUiMode: DeviceUiMode,
     currentAppLanguage: AppLanguage = AppLanguage.EN,
     onSelectAppLanguage: (AppLanguage) -> Unit = {},
+    cloudSession: CloudSession? = null,
+    cloudHealth: CloudHealthInfo = CloudHealthInfo(),
+    cloudSyncBusy: Boolean = false,
+    adminVaultSnapshot: AdminVaultSnapshot? = null,
+    onCloudLogin: (String, String) -> Unit = { _, _ -> },
+    onCloudRegister: (String, String, String, String) -> Unit = { _, _, _, _ -> },
+    onCloudLogout: () -> Unit = {},
+    onCloudSyncNow: () -> Unit = {},
+    onLoadAdminVault: () -> Unit = {},
+    onAdminSaveServerKey: (String) -> Unit = {},
+    onAdminSavePolicy: (String, String) -> Unit = { _, _ -> },
+    onAdminCreateInvite: ((String) -> Unit) -> Unit = {},
+    onAdminRevokeInvite: (String) -> Unit = {},
+    onAdminToggleMemberStatus: (String, String) -> Unit = { _, _ -> },
     appUpdateState: AppUpdateUiState = AppUpdateUiState(),
     hasSelectedTv: Boolean = false,
     isTvHardware: Boolean = false,
@@ -147,6 +167,15 @@ fun SettingsSourcesScreen(
     var customModelInput by remember(subtitleConfig.geminiModelId) {
         mutableStateOf(subtitleConfig.geminiModelId)
     }
+
+    // NKI Cloud Sync & Admin Vault UI state
+    var cloudIsRegisterMode by remember { mutableStateOf(false) }
+    var cloudUserInput by remember { mutableStateOf("") }
+    var cloudPassInput by remember { mutableStateOf("") }
+    var cloudDisplayNameInput by remember { mutableStateOf("") }
+    var cloudInviteInput by remember { mutableStateOf("") }
+    var showAdminVault by remember { mutableStateOf(false) }
+    var adminNewKeyInput by remember { mutableStateOf("") }
 
     fun flushPendingKeyIfTyped() {
         val pending = geminiInput.trim()
@@ -264,6 +293,407 @@ fun SettingsSourcesScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(Icons.Default.QrCode2, contentDescription = "QR Companion", tint = VioletSoft, modifier = Modifier.size(19.dp))
+                    }
+                }
+            }
+
+            // 1a. NKI Cloud Auto-Sync & Centralized Secure AI Gateway
+            SectionBox(
+                title = "☁️ NKI Cloud Sync & Centralized AI",
+                subtitle = when {
+                    cloudSession != null && cloudSession.serverAiReady ->
+                        "🟢 Connected (@${cloudSession.username}) • Centralized Gemini AI Active • Auto-syncing Web ↔ Android"
+                    cloudSession != null ->
+                        "🟡 Connected (@${cloudSession.username}) • Auto-syncing history & subtitles"
+                    !cloudHealth.hasAdmin && cloudHealth.ok ->
+                        "👑 First account created becomes ADMIN and locks registration to Invite-Only"
+                    else ->
+                        "Sign in once to auto-sync watch history, AI subtitles & use server Gemini AI without entering an API Key"
+                }
+            ) {
+                if (cloudSession == null) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(false to "Sign In", true to "Create Account").forEach { (isReg, label) ->
+                                val selected = cloudIsRegisterMode == isReg
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .tvFocusableClickable(
+                                            shape = RoundedCornerShape(8.dp),
+                                            focusedBorderColor = EmeraldNeon,
+                                            unfocusedBorderColor = if (selected) EmeraldNeon else CinemaGlassBorder,
+                                            onClick = { cloudIsRegisterMode = isReg }
+                                        )
+                                        .background(if (selected) EmeraldPrimary.copy(alpha = 0.25f) else CinemaSurfaceElevated)
+                                        .padding(vertical = 9.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = label,
+                                        color = if (selected) EmeraldNeon else TextPrimary,
+                                        fontSize = 12.5.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+
+                        OutlinedTextField(
+                            value = cloudUserInput,
+                            onValueChange = { cloudUserInput = it },
+                            label = { Text("Username (e.g. admin or email)", fontSize = 12.sp) },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = CinemaGlassBorder,
+                                focusedTextColor = TextPrimary,
+                                unfocusedTextColor = TextPrimary
+                            )
+                        )
+                        OutlinedTextField(
+                            value = cloudPassInput,
+                            onValueChange = { cloudPassInput = it },
+                            label = { Text("Password (min 6 chars)", fontSize = 12.sp) },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = CinemaGlassBorder,
+                                focusedTextColor = TextPrimary,
+                                unfocusedTextColor = TextPrimary
+                            )
+                        )
+                        if (cloudIsRegisterMode) {
+                            OutlinedTextField(
+                                value = cloudDisplayNameInput,
+                                onValueChange = { cloudDisplayNameInput = it },
+                                label = { Text("Display Name (optional)", fontSize = 12.sp) },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = EmeraldNeon,
+                                    unfocusedBorderColor = CinemaGlassBorder,
+                                    focusedTextColor = TextPrimary,
+                                    unfocusedTextColor = TextPrimary
+                                )
+                            )
+                            if (cloudHealth.hasAdmin && cloudHealth.registrationMode == "INVITE_ONLY") {
+                                OutlinedTextField(
+                                    value = cloudInviteInput,
+                                    onValueChange = { cloudInviteInput = it.uppercase() },
+                                    label = { Text("Admin Invite Code (NKI-XXXX-XXXX)", fontSize = 12.sp) },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = EmeraldNeon,
+                                        unfocusedBorderColor = CinemaGlassBorder,
+                                        focusedTextColor = TextPrimary,
+                                        unfocusedTextColor = TextPrimary
+                                    )
+                                )
+                            }
+                        }
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .tvFocusableClickable(
+                                    shape = RoundedCornerShape(8.dp),
+                                    focusedBorderColor = EmeraldNeon,
+                                    unfocusedBorderColor = EmeraldPrimary,
+                                    onClick = {
+                                        if (!cloudSyncBusy) {
+                                            if (cloudIsRegisterMode) {
+                                                onCloudRegister(cloudUserInput, cloudPassInput, cloudDisplayNameInput, cloudInviteInput)
+                                            } else {
+                                                onCloudLogin(cloudUserInput, cloudPassInput)
+                                            }
+                                            cloudPassInput = ""
+                                        }
+                                    }
+                                )
+                                .background(EmeraldPrimary)
+                                .padding(vertical = 11.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = when {
+                                    cloudSyncBusy -> "⏳ Connecting to NKI Cloud..."
+                                    cloudIsRegisterMode -> "✨ Create NKI Account & Auto-Sync"
+                                    else -> "☁️ Sign In & Auto-Sync"
+                                },
+                                color = CinemaObsidian,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        }
+                    }
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        val quotaStr = if (cloudSession.role == "ADMIN" || cloudSession.dailyAiLimit <= 0) {
+                            "${cloudSession.todayAiRequests} / ∞ AI today"
+                        } else {
+                            "${cloudSession.todayAiRequests} / ${cloudSession.dailyAiLimit} AI today"
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "${cloudSession.displayName} (@${cloudSession.username}) • ${cloudSession.role}",
+                                    color = EmeraldNeon,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                                Text(
+                                    text = quotaStr,
+                                    color = TextSecondary,
+                                    fontSize = 11.5.sp
+                                )
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Box(
+                                    modifier = Modifier
+                                        .tvFocusableClickable(
+                                            shape = RoundedCornerShape(8.dp),
+                                            focusedBorderColor = EmeraldNeon,
+                                            unfocusedBorderColor = CinemaGlassBorder,
+                                            onClick = onCloudSyncNow
+                                        )
+                                        .background(CinemaSurfaceElevated)
+                                        .padding(horizontal = 12.dp, vertical = 7.dp)
+                                ) {
+                                    Text(
+                                        text = if (cloudSyncBusy) "⏳" else "🔄 Sync",
+                                        color = TextPrimary,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .tvFocusableClickable(
+                                            shape = RoundedCornerShape(8.dp),
+                                            focusedBorderColor = LiveRed,
+                                            unfocusedBorderColor = CinemaGlassBorder,
+                                            onClick = onCloudLogout
+                                        )
+                                        .background(CinemaSurfaceElevated)
+                                        .padding(horizontal = 12.dp, vertical = 7.dp)
+                                ) {
+                                    Text("Sign Out", color = LiveRed, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+
+                        if (cloudSession.role == "ADMIN") {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .tvFocusableClickable(
+                                        shape = RoundedCornerShape(8.dp),
+                                        focusedBorderColor = EmeraldNeon,
+                                        unfocusedBorderColor = EmeraldPrimary.copy(alpha = 0.5f),
+                                        onClick = {
+                                            showAdminVault = !showAdminVault
+                                            if (showAdminVault) onLoadAdminVault()
+                                        }
+                                    )
+                                    .background(EmeraldPrimary.copy(alpha = 0.14f))
+                                    .padding(horizontal = 12.dp, vertical = 9.dp)
+                            ) {
+                                Text(
+                                    text = if (showAdminVault) "🔐 Hide NKI Admin Vault & Invite Manager ▲" else "🔐 Open NKI Admin Vault & Invite Manager ▼",
+                                    color = EmeraldNeon,
+                                    fontSize = 12.5.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
+                            if (showAdminVault) {
+                                val snap = adminVaultSnapshot
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(CinemaObsidian.copy(alpha = 0.72f))
+                                        .border(1.dp, CinemaGlassBorder, RoundedCornerShape(8.dp))
+                                        .padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(
+                                        text = if (snap != null) {
+                                            "Env Key: ${if (snap.hasEnvKey) "✅" else "❌"} • Vault: ${if (snap.hasVaultKey) snap.maskedVaultKey else "Env"} • Cloud Subs: ${snap.cachedSubtitlesCount}"
+                                        } else {
+                                            "Loading Admin Vault..."
+                                        },
+                                        color = TextSecondary,
+                                        fontSize = 11.5.sp
+                                    )
+                                    OutlinedTextField(
+                                        value = adminNewKeyInput,
+                                        onValueChange = { adminNewKeyInput = it },
+                                        label = { Text("Rotate Server Gemini API Key (AES-256-GCM)", fontSize = 11.5.sp) },
+                                        singleLine = true,
+                                        visualTransformation = PasswordVisualTransformation(),
+                                        modifier = Modifier.fillMaxWidth(),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedBorderColor = EmeraldNeon,
+                                            unfocusedBorderColor = CinemaGlassBorder,
+                                            focusedTextColor = TextPrimary,
+                                            unfocusedTextColor = TextPrimary
+                                        )
+                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .tvFocusableClickable(
+                                                    shape = RoundedCornerShape(8.dp),
+                                                    focusedBorderColor = EmeraldNeon,
+                                                    unfocusedBorderColor = EmeraldPrimary,
+                                                    onClick = {
+                                                        if (adminNewKeyInput.isNotBlank()) {
+                                                            onAdminSaveServerKey(adminNewKeyInput)
+                                                            adminNewKeyInput = ""
+                                                        }
+                                                    }
+                                                )
+                                                .background(EmeraldPrimary)
+                                                .padding(vertical = 8.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text("🔐 Save Server Key", color = CinemaObsidian, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                                        }
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .tvFocusableClickable(
+                                                    shape = RoundedCornerShape(8.dp),
+                                                    focusedBorderColor = EmeraldNeon,
+                                                    unfocusedBorderColor = CinemaGlassBorder,
+                                                    onClick = {
+                                                        onAdminCreateInvite { code ->
+                                                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                                            cm?.setPrimaryClip(ClipData.newPlainText("NKI Invite", code))
+                                                        }
+                                                    }
+                                                )
+                                                .background(CinemaSurfaceElevated)
+                                                .padding(vertical = 8.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text("🎟 + New Invite", color = EmeraldNeon, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                    if (snap != null) {
+                                        val nextRegMode = if (snap.registrationMode == "INVITE_ONLY") "OPEN" else "INVITE_ONLY"
+                                        Box(
+                                            modifier = Modifier
+                                                .tvFocusableClickable(
+                                                    shape = RoundedCornerShape(8.dp),
+                                                    focusedBorderColor = EmeraldNeon,
+                                                    unfocusedBorderColor = CinemaGlassBorder,
+                                                    onClick = { onAdminSavePolicy(snap.defaultModel, nextRegMode) }
+                                                )
+                                                .background(CinemaSurfaceElevated)
+                                                .padding(horizontal = 10.dp, vertical = 7.dp)
+                                        ) {
+                                            Text(
+                                                text = "Sign-up Policy: ${if (snap.registrationMode == "INVITE_ONLY") "🔒 Invite-Only (Tap to Open)" else "🌐 Open (Tap to Lock Invite-Only)"}",
+                                                color = TextPrimary,
+                                                fontSize = 11.5.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
+
+                                        snap.invites.take(6).forEach { inv ->
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(
+                                                    text = "${inv.code} (${inv.usedCount}/${inv.maxUses})${if (!inv.active) " [Revoked]" else ""}",
+                                                    color = if (inv.active) EmeraldNeon else TextSecondary,
+                                                    fontSize = 11.5.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .tvFocusableClickable(
+                                                                shape = RoundedCornerShape(6.dp),
+                                                                focusedBorderColor = EmeraldNeon,
+                                                                unfocusedBorderColor = CinemaGlassBorder,
+                                                                onClick = {
+                                                                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                                                    cm?.setPrimaryClip(ClipData.newPlainText("NKI Invite", inv.code))
+                                                                }
+                                                            )
+                                                            .background(CinemaSurfaceElevated)
+                                                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                                                    ) {
+                                                        Text("Copy", color = TextPrimary, fontSize = 11.sp)
+                                                    }
+                                                    if (inv.active) {
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .tvFocusableClickable(
+                                                                    shape = RoundedCornerShape(6.dp),
+                                                                    focusedBorderColor = LiveRed,
+                                                                    unfocusedBorderColor = CinemaGlassBorder,
+                                                                    onClick = { onAdminRevokeInvite(inv.code) }
+                                                                )
+                                                                .background(CinemaSurfaceElevated)
+                                                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                                        ) {
+                                                            Text("Revoke", color = LiveRed, fontSize = 11.sp)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        snap.users.filter { it.role != "ADMIN" }.take(8).forEach { member ->
+                                            val nextStatus = if (member.status == "ACTIVE") "REVOKED" else "ACTIVE"
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(
+                                                    text = "@${member.username} (${member.status} • ${member.todayRequests}/${member.dailyAiLimit})",
+                                                    color = TextPrimary,
+                                                    fontSize = 11.5.sp
+                                                )
+                                                Box(
+                                                    modifier = Modifier
+                                                        .tvFocusableClickable(
+                                                            shape = RoundedCornerShape(6.dp),
+                                                            focusedBorderColor = EmeraldNeon,
+                                                            unfocusedBorderColor = CinemaGlassBorder,
+                                                            onClick = { onAdminToggleMemberStatus(member.id, nextStatus) }
+                                                        )
+                                                        .background(CinemaSurfaceElevated)
+                                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                                ) {
+                                                    Text(
+                                                        text = if (member.status == "ACTIVE") "Revoke" else "Restore",
+                                                        color = if (member.status == "ACTIVE") LiveRed else EmeraldNeon,
+                                                        fontSize = 11.sp
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

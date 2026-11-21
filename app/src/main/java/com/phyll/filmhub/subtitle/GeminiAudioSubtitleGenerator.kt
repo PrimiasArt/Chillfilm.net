@@ -1,5 +1,6 @@
 package com.phyll.filmhub.subtitle
 
+import com.phyll.filmhub.cloud.CloudSyncClient
 import com.phyll.filmhub.model.Episode
 import com.phyll.filmhub.model.SubtitleCue
 import com.phyll.filmhub.model.SubtitleLanguageCatalog
@@ -635,6 +636,26 @@ class GeminiAudioSubtitleGenerator(
         preferTurboFlash: Boolean = false,
         targetLangCode: String = "th"
     ): List<SubtitleCue> {
+        val base64Audio = encodeBase64(audioBytes)
+        // Route via centralized NKI Cloud AI Proxy when signed in (ZERO Gemini API Key needed on phone/TV!)
+        if (CloudSyncClient.canUseServerAi()) {
+            val cloudCues = CloudSyncClient.transcribeAudioViaCloudSync(
+                audioBase64 = base64Audio,
+                mimeType = mimeType,
+                chunkStartOffsetMs = chunkStartOffsetMs,
+                chunkDurationMs = chunkDurationMs,
+                targetLang = targetLangCode,
+                modelId = modelId,
+                preferTurboFlash = preferTurboFlash
+            )
+            if (cloudCues != null) {
+                return cloudCues
+            }
+            if (apiKey.isBlank()) {
+                error("NKI Cloud AI audio proxy unavailable")
+            }
+        }
+
         val durationSec = "%.1f".format(chunkDurationMs / 1000.0)
         val langSpec = SubtitleLanguageCatalog.resolve(targetLangCode)
         val prompt = """
@@ -648,7 +669,7 @@ class GeminiAudioSubtitleGenerator(
 
         val inlineData = JSONObject()
             .put("mime_type", mimeType)
-            .put("data", encodeBase64(audioBytes))
+            .put("data", base64Audio)
 
         val contentsArray = JSONArray().put(
             JSONObject().put(

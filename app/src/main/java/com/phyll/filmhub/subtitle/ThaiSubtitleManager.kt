@@ -1,5 +1,6 @@
 package com.phyll.filmhub.subtitle
 
+import com.phyll.filmhub.cloud.CloudSyncClient
 import com.phyll.filmhub.model.ActiveSubtitleRenderState
 import com.phyll.filmhub.model.ContentType
 import com.phyll.filmhub.model.Episode
@@ -148,6 +149,12 @@ class ThaiSubtitleManager(
     private val rejectedTrackIdsForEpisode = ConcurrentHashMap.newKeySet<String>()
     private var autoSyncCallback: ((Long, Float, String, Boolean) -> Unit)? = null
 
+    @Volatile
+    private var lastCloudSubtitleUploadMs: Long = 0L
+
+    private fun hasAiAccess(geminiApiKey: String): Boolean =
+        geminiApiKey.isNotBlank() || CloudSyncClient.canUseServerAi()
+
     private var preFlightJob: Job? = null
     private var translationJob: Job? = null
     private var liveCueJob: Job? = null
@@ -213,10 +220,47 @@ class ThaiSubtitleManager(
         val searchDisplay = movie.originalTitle.ifBlank { movie.title }
 
         preFlightJob = scope.launch {
-            // STEP 0: INSTANT RESTORE FROM PERSISTENT SUBTITLE STORAGE (TRANSLATE ONCE, LOAD INSTANTLY FOREVER!)
+            // STEP 0A: INSTANT RESTORE FROM PERSISTENT SUBTITLE STORAGE (TRANSLATE ONCE, LOAD INSTANTLY FOREVER!)
             if (movie.contentType != ContentType.LIVE_CHANNEL) {
-                val cached = withContext(Dispatchers.IO) {
+                var cached = withContext(Dispatchers.IO) {
                     loadEpisodeSubCache(movie, episode, targetLang.code)
+                }
+                // STEP 0B: SHARED NKI CLOUD SUBTITLE POOL ON VERCEL BLOB (<150ms, 0 GEMINI TOKENS!)
+                if ((cached == null || cached.primaryCues.size < 3) && CloudSyncClient.isSignedIn()) {
+                    _preFlightState.value = PreFlightSubtitleState(
+                        isPreparing = true,
+                        stepTitle = "☁️ Checking NKI Cloud Subtitles (${targetLang.shortBadge})...",
+                        stepDetail = "$searchDisplay • ${episode.name}",
+                        progressFraction = 0.08f,
+                        searchedQuery = searchDisplay
+                    )
+                    val cloudHit = CloudSyncClient.fetchCloudSubtitle(
+                        rawMovieSlug = movie.detailLookupId ?: movie.id,
+                        rawEpisodeNameOrId = episode.name.ifBlank { episode.id },
+                        langCode = targetLang.code
+                    )
+                    if (cloudHit != null && cloudHit.primaryCues.size >= 3) {
+                        val hydrated = SavedEpisodeSubtitleBundle(
+                            movieId = movie.id,
+                            episodeId = episode.id,
+                            primaryLangCode = cloudHit.primaryLangCode,
+                            secondaryLangCode = cloudHit.secondaryLangCode,
+                            sourceLangCode = cloudHit.sourceLangCode,
+                            sourcePlatform = "☁️ ${cloudHit.sourcePlatform.ifBlank { "NKI Cloud" }}",
+                            isAiAudio = cloudHit.isAiAudio,
+                            completedAudioSlots = cloudHit.completedAudioSlots,
+                            translatedCueIds = cloudHit.primaryCues.mapTo(HashSet()) { it.id },
+                            sourceCues = cloudHit.sourceCues,
+                            primaryCues = cloudHit.primaryCues,
+                            secondaryCues = cloudHit.secondaryCues,
+                            isFullyTranslated = cloudHit.isFullyTranslated,
+                            savedAtMs = cloudHit.savedAtMs
+                        )
+                        withContext(Dispatchers.IO) {
+                            saveEpisodeSubCache(movie, episode, hydrated, uploadToCloud = false)
+                        }
+                        cached = hydrated
+                    }
                 }
                 if (cached != null && cached.primaryCues.size >= 3) {
                     restoreFromSavedBundle(
@@ -234,7 +278,7 @@ class ThaiSubtitleManager(
 
             // Fast-path for 100-episode series where viewer (or Ep 1 auto-failover) locked Gemini Audio mode!
             if (seriesProfile?.preferGeminiAudioSub == true &&
-                geminiApiKey.isNotBlank() &&
+                hasAiAccess(geminiApiKey) &&
                 movie.contentType != ContentType.LIVE_CHANNEL
             ) {
                 startGeminiRollingAudioSubtitles(
@@ -282,7 +326,7 @@ class ThaiSubtitleManager(
                     // in background so if no .SRT exists, Gemini Audio Subtitles start with 0ms download wait!
                     if (timeline != null &&
                         !subsDef.isCompleted &&
-                        geminiApiKey.isNotBlank() &&
+                        hasAiAccess(geminiApiKey) &&
                         config.autoGenerateAudioSubWhenMissing &&
                         externalRefs.isEmpty()
                     ) {
@@ -475,7 +519,8 @@ class ThaiSubtitleManager(
 
         val targetLang = config.resolvedPrimaryLanguage()
         val cleanModel = config.geminiModelId.ifBlank { "gemini-3-flash-preview" }
-        if (config.autoGenerateAudioSubWhenMissing && geminiApiKey.isNotBlank()) {
+        val aiReady = hasAiAccess(geminiApiKey)
+        if (config.autoGenerateAudioSubWhenMissing && aiReady) {
             startGeminiRollingAudioSubtitles(
                 movie = movie,
                 episode = episode,
@@ -484,7 +529,7 @@ class ThaiSubtitleManager(
                 geminiApiKey = geminiApiKey,
                 onReadyToPlay = onReadyToPlay
             )
-        } else if (config.autoGenerateAudioSubWhenMissing && geminiApiKey.isBlank()) {
+        } else if (config.autoGenerateAudioSubWhenMissing && !aiReady) {
             currentBadge = "Chưa có Sub rời — Nạp Gemini Key để AI tự nghe phim"
             _renderState.value = ActiveSubtitleRenderState(statusBadge = currentBadge)
             _preFlightState.value = PreFlightSubtitleState(
@@ -1479,7 +1524,7 @@ class ThaiSubtitleManager(
                         return@launch
                     }
 
-                    if (_selectedTrackId.value?.startsWith("ai_audio_") == true && geminiApiKey.isNotBlank()) {
+                    if (_selectedTrackId.value?.startsWith("ai_audio_") == true && hasAiAccess(geminiApiKey)) {
                         startGeminiRollingAudioSubtitles(
                             movie = movie,
                             episode = ep,
@@ -2050,7 +2095,7 @@ class ThaiSubtitleManager(
 
         // All downloaded .SRT releases are wrong/mismatched for this video -> switch directly to Gemini Rolling Audio!
         val movie = activeMovieRef
-        if (movie != null && geminiApiKey.isNotBlank()) {
+        if (movie != null && hasAiAccess(geminiApiKey)) {
             val targetLang = config.resolvedPrimaryLanguage()
             val msg = "🎙️ Sub rời không khớp bản cắt -> Đã chuyển sang Gemini Nghe Phim Tạo Sub ${targetLang.shortBadge}!"
             _autoSyncFeedback.value = msg
@@ -2250,7 +2295,7 @@ class ThaiSubtitleManager(
                     )
                 }
             }
-        } else if (cached.isAiAudio && !cached.isFullyTranslated && geminiApiKey.isNotBlank()) {
+        } else if (cached.isAiAudio && !cached.isFullyTranslated && hasAiAccess(geminiApiKey)) {
             startGeminiRollingAudioSubtitles(
                 movie = movie,
                 episode = episode,
@@ -2305,17 +2350,18 @@ class ThaiSubtitleManager(
             savedAtMs = System.currentTimeMillis()
         )
         scope.launch(Dispatchers.IO) {
-            saveEpisodeSubCache(movie, episode, bundle)
+            saveEpisodeSubCache(movie, episode, bundle, uploadToCloud = true)
         }
     }
 
     internal fun saveEpisodeSubCache(
         movie: MovieItem,
         episode: Episode,
-        bundle: SavedEpisodeSubtitleBundle
+        bundle: SavedEpisodeSubtitleBundle,
+        uploadToCloud: Boolean = false
     ): Boolean {
         val targetFile = episodeSubCacheFile(movie, episode, bundle.primaryLangCode) ?: return false
-        return runCatching {
+        val savedLocal = runCatching {
             synchronized(episodeCacheLock) {
                 targetFile.parentFile?.mkdirs()
                 val root = JSONObject().apply {
@@ -2351,6 +2397,30 @@ class ThaiSubtitleManager(
             }
             true
         }.getOrDefault(false)
+
+        if (uploadToCloud && CloudSyncClient.isSignedIn() && bundle.primaryCues.size >= 3) {
+            val now = System.currentTimeMillis()
+            if (bundle.isFullyTranslated || now - lastCloudSubtitleUploadMs >= 25_000L) {
+                lastCloudSubtitleUploadMs = now
+                scope.launch(Dispatchers.IO) {
+                    CloudSyncClient.uploadCloudSubtitle(
+                        rawMovieSlug = movie.detailLookupId ?: movie.id,
+                        rawEpisodeNameOrId = episode.name.ifBlank { episode.id },
+                        primaryLangCode = bundle.primaryLangCode,
+                        secondaryLangCode = bundle.secondaryLangCode,
+                        sourceLangCode = bundle.sourceLangCode,
+                        sourcePlatform = bundle.sourcePlatform.ifBlank { "NKI Android" },
+                        isAiAudio = bundle.isAiAudio,
+                        isFullyTranslated = bundle.isFullyTranslated,
+                        completedAudioSlots = bundle.completedAudioSlots,
+                        sourceCues = bundle.sourceCues,
+                        primaryCues = bundle.primaryCues,
+                        secondaryCues = bundle.secondaryCues
+                    )
+                }
+            }
+        }
+        return savedLocal
     }
 
     internal fun loadEpisodeSubCache(

@@ -5,6 +5,9 @@ import android.os.Build
 import android.view.Window
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.phyll.filmhub.cloud.AdminVaultSnapshot
+import com.phyll.filmhub.cloud.CloudHealthInfo
+import com.phyll.filmhub.cloud.CloudSyncClient
 import com.phyll.filmhub.companion.CompanionEvent
 import com.phyll.filmhub.companion.CompanionHttpServer
 import com.phyll.filmhub.companion.CompanionPlayerTelemetry
@@ -149,6 +152,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
     val appUpdateState: StateFlow<AppUpdateUiState> = _appUpdateState.asStateFlow()
 
+    private val _cloudHealth = MutableStateFlow(CloudHealthInfo())
+    val cloudHealth: StateFlow<CloudHealthInfo> = _cloudHealth.asStateFlow()
+
+    private val _cloudSyncBusy = MutableStateFlow(false)
+    val cloudSyncBusy: StateFlow<Boolean> = _cloudSyncBusy.asStateFlow()
+
+    private val _adminVaultSnapshot = MutableStateFlow<AdminVaultSnapshot?>(null)
+    val adminVaultSnapshot: StateFlow<AdminVaultSnapshot?> = _adminVaultSnapshot.asStateFlow()
+
+    private val pendingCloudProgress = LinkedHashMap<String, WatchProgress>()
+    @Volatile
+    private var lastCloudPullMs: Long = 0L
+    @Volatile
+    private var lastCloudPushMs: Long = 0L
+
     private var catalogJob: Job? = null
     private var searchJob: Job? = null
     private var tvPollJob: Job? = null
@@ -181,6 +199,199 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         refreshCatalog()
+        refreshCloudHealth()
+        if (prefs.cloudSession.value != null) {
+            pullCloudState(silent = true, force = true)
+        }
+    }
+
+    fun onAppForegrounded() {
+        if (prefs.cloudSession.value != null) {
+            pullCloudState(silent = true, force = false)
+        }
+    }
+
+    fun onAppBackgrounded() {
+        flushPendingCloudProgress()
+    }
+
+    fun refreshCloudHealth() {
+        viewModelScope.launch {
+            val h = CloudSyncClient.fetchHealth()
+            _cloudHealth.value = h
+            if (prefs.cloudSession.value != null) {
+                CloudSyncClient.refreshMe().onSuccess { updated ->
+                    prefs.saveCloudSession(updated)
+                }
+            }
+        }
+    }
+
+    fun cloudLogin(username: String, password: String) {
+        if (username.isBlank() || password.isBlank()) {
+            showBanner("Enter username and password")
+            return
+        }
+        viewModelScope.launch {
+            _cloudSyncBusy.value = true
+            CloudSyncClient.login(username, password)
+                .onSuccess { session ->
+                    prefs.saveCloudSession(session)
+                    showBanner("☁️ Signed in as @${session.username} • Auto-Sync Active!")
+                    pullCloudState(silent = true, force = true)
+                    if (session.role == "ADMIN") {
+                        loadAdminVault()
+                    }
+                }
+                .onFailure { err ->
+                    showBanner("Cloud sign-in failed: ${err.message.orEmpty()}")
+                }
+            _cloudSyncBusy.value = false
+        }
+    }
+
+    fun cloudRegister(username: String, password: String, displayName: String, inviteCode: String) {
+        if (username.isBlank() || password.length < 6) {
+            showBanner("Username required & password min 6 characters")
+            return
+        }
+        viewModelScope.launch {
+            _cloudSyncBusy.value = true
+            CloudSyncClient.register(username, password, displayName, inviteCode)
+                .onSuccess { session ->
+                    prefs.saveCloudSession(session)
+                    val roleTag = if (session.role == "ADMIN") "👑 ADMIN" else "☁️ Member"
+                    showBanner("$roleTag @${session.username} created & synced!")
+                    pullCloudState(silent = true, force = true)
+                    if (session.role == "ADMIN") {
+                        loadAdminVault()
+                    }
+                }
+                .onFailure { err ->
+                    showBanner("Registration failed: ${err.message.orEmpty()}")
+                }
+            _cloudSyncBusy.value = false
+        }
+    }
+
+    fun cloudLogout() {
+        prefs.saveCloudSession(null)
+        _adminVaultSnapshot.value = null
+        synchronized(pendingCloudProgress) { pendingCloudProgress.clear() }
+        showBanner("Signed out of NKI Cloud")
+    }
+
+    fun pullCloudState(silent: Boolean = true, force: Boolean = false) {
+        if (!CloudSyncClient.isSignedIn()) return
+        val now = System.currentTimeMillis()
+        if (!force && now - lastCloudPullMs < 15_000L) return
+        lastCloudPullMs = now
+        viewModelScope.launch {
+            if (!silent) _cloudSyncBusy.value = true
+            flushPendingCloudProgress()
+            CloudSyncClient.refreshMe().onSuccess { updated ->
+                prefs.saveCloudSession(updated)
+            }
+            CloudSyncClient.pullState()
+                .onSuccess { res ->
+                    prefs.mergeCloudWatchProgress(res.watchProgress)
+                    if (!silent) showBanner("☁️ Cloud Sync complete (${res.watchProgress.size} items)")
+                }
+                .onFailure { err ->
+                    if (!silent) showBanner("Sync error: ${err.message.orEmpty()}")
+                }
+            if (!silent) _cloudSyncBusy.value = false
+        }
+    }
+
+    fun flushPendingCloudProgress() {
+        if (!CloudSyncClient.isSignedIn()) return
+        val batch = synchronized(pendingCloudProgress) {
+            if (pendingCloudProgress.isEmpty()) return
+            val list = pendingCloudProgress.values.toList()
+            pendingCloudProgress.clear()
+            list
+        }
+        lastCloudPushMs = System.currentTimeMillis()
+        viewModelScope.launch(Dispatchers.IO) {
+            CloudSyncClient.pushWatchProgress(batch)
+        }
+    }
+
+    fun loadAdminVault() {
+        if (prefs.cloudSession.value?.role != "ADMIN") return
+        viewModelScope.launch {
+            CloudSyncClient.fetchAdminConfig()
+                .onSuccess { snap -> _adminVaultSnapshot.value = snap }
+                .onFailure { err -> showBanner("Admin Vault error: ${err.message.orEmpty()}") }
+        }
+    }
+
+    fun adminSaveServerGeminiKey(apiKey: String) {
+        if (apiKey.trim().length < 15) {
+            showBanner("Paste a valid Gemini API Key")
+            return
+        }
+        viewModelScope.launch {
+            _cloudSyncBusy.value = true
+            CloudSyncClient.adminUpdateConfig(geminiApiKey = apiKey.trim())
+                .onSuccess {
+                    showBanner("🔐 Server Gemini API Key encrypted & updated!")
+                    loadAdminVault()
+                    refreshCloudHealth()
+                }
+                .onFailure { err -> showBanner("Failed: ${err.message.orEmpty()}") }
+            _cloudSyncBusy.value = false
+        }
+    }
+
+    fun adminSaveGlobalPolicy(defaultModel: String, registrationMode: String) {
+        viewModelScope.launch {
+            _cloudSyncBusy.value = true
+            CloudSyncClient.adminUpdateConfig(defaultModel = defaultModel, registrationMode = registrationMode)
+                .onSuccess {
+                    showBanner("✅ Updated global AI model & policy!")
+                    loadAdminVault()
+                }
+                .onFailure { err -> showBanner("Failed: ${err.message.orEmpty()}") }
+            _cloudSyncBusy.value = false
+        }
+    }
+
+    fun adminCreateInviteCode(onCreated: (String) -> Unit = {}) {
+        viewModelScope.launch {
+            _cloudSyncBusy.value = true
+            CloudSyncClient.adminCreateInvite(label = "NKI Member", maxUses = 5, dailyAiLimit = 150)
+                .onSuccess { inv ->
+                    showBanner("🎟 Invite Code: ${inv.code}")
+                    onCreated(inv.code)
+                    loadAdminVault()
+                }
+                .onFailure { err -> showBanner("Failed: ${err.message.orEmpty()}") }
+            _cloudSyncBusy.value = false
+        }
+    }
+
+    fun adminRevokeInviteCode(code: String) {
+        viewModelScope.launch {
+            CloudSyncClient.adminRevokeInvite(code)
+                .onSuccess {
+                    showBanner("Revoked invite $code")
+                    loadAdminVault()
+                }
+                .onFailure { err -> showBanner("Failed: ${err.message.orEmpty()}") }
+        }
+    }
+
+    fun adminToggleMemberStatus(userId: String, nextStatus: String) {
+        viewModelScope.launch {
+            CloudSyncClient.adminUpdateUserStatus(userId, nextStatus)
+                .onSuccess {
+                    showBanner("Updated member -> $nextStatus")
+                    loadAdminVault()
+                }
+                .onFailure { err -> showBanner("Failed: ${err.message.orEmpty()}") }
+        }
     }
 
     fun attachWindowForStream(window: Window?) {
@@ -399,15 +610,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             return
         }
+        val targetEpKey = CloudSyncClient.normalizeEpisodeKey(progress.episodeName.ifBlank { progress.episodeId })
         val cached = repository.getCachedMovie(progress.movieId)
         if (cached != null) {
             val ep = cached.servers.flatMap { it.episodes }
-                .firstOrNull { it.id == progress.episodeId }
+                .firstOrNull {
+                    it.id == progress.episodeId ||
+                        CloudSyncClient.normalizeEpisodeKey(it.name.ifBlank { it.id }) == targetEpKey ||
+                        (progress.streamUrl.isNotBlank() && it.streamUrl == progress.streamUrl)
+                }
                 ?: cached.firstPlayableEpisode
             if (ep != null) {
                 startTargetAwarePlayback(cached, ep, progress.positionMs)
                 return
             }
+        }
+        if (progress.movieId.startsWith("modern_")) {
+            val slug = CloudSyncClient.normalizeMovieSlug(progress.movieId)
+            showBanner("☁️ Loading synced movie details...")
+            viewModelScope.launch {
+                val stub = MovieItem(
+                    id = "modern_$slug",
+                    title = progress.title,
+                    posterUrl = progress.posterUrl,
+                    backdropUrl = progress.posterUrl,
+                    detailLookupId = slug
+                )
+                val resolved = repository.resolveMovieDetail(stub, prefs.customProviders.value)
+                val eps = resolved.servers.flatMap { it.episodes }
+                val matchedEp = eps.firstOrNull {
+                    CloudSyncClient.normalizeEpisodeKey(it.name.ifBlank { it.id }) == targetEpKey ||
+                        (progress.streamUrl.isNotBlank() && it.streamUrl == progress.streamUrl)
+                } ?: resolved.firstPlayableEpisode
+                if (matchedEp != null) {
+                    startTargetAwarePlayback(resolved, matchedEp, progress.positionMs)
+                } else if (progress.streamUrl.isNotBlank()) {
+                    val adHoc = repository.registerAdHocStream(progress.title, progress.streamUrl)
+                    adHoc.firstPlayableEpisode?.let { ep ->
+                        startTargetAwarePlayback(adHoc, ep, progress.positionMs)
+                    }
+                }
+            }
+            return
         }
         val adHoc = repository.registerAdHocStream(progress.title, progress.streamUrl)
         adHoc.firstPlayableEpisode?.let { ep ->
@@ -419,7 +663,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val effectiveStartMs = if (startPositionMs > 0L) {
             startPositionMs
         } else {
-            prefs.getEpisodeResumePositionMs(movie.id, episode.id, episode.streamUrl)
+            prefs.getEpisodeResumePositionMs(movie.id, episode.id, episode.streamUrl, episode.name)
         }
         _activePlaybackSession.value = ActivePlaybackSession(
             movie = movie,
@@ -432,6 +676,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun minimizePlayer() {
         if (_activePlaybackSession.value != null) {
             _isPlayerMinimized.value = true
+            flushPendingCloudProgress()
         }
     }
 
@@ -442,6 +687,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun closePlayerSession() {
+        flushPendingCloudProgress()
         _activePlaybackSession.value = null
         _isPlayerMinimized.value = false
         _playerTelemetry.value = CompanionPlayerTelemetry(isActive = false)
@@ -455,7 +701,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val effectiveStartMs = if (startPositionMs > 0L) {
             startPositionMs
         } else {
-            prefs.getEpisodeResumePositionMs(movie.id, episode.id, episode.streamUrl)
+            prefs.getEpisodeResumePositionMs(movie.id, episode.id, episode.streamUrl, episode.name)
         }
         val selectedIp = prefs.selectedTvIp.value
         if (!isTvHardware &&
@@ -616,20 +862,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         immediateCommit: Boolean = false
     ) {
         if (positionMs < 2_000L) return
-        prefs.saveWatchProgress(
-            WatchProgress(
-                movieId = movie.id,
-                title = movie.title,
-                posterUrl = movie.posterUrl,
-                countryCode = movie.country.code,
-                streamUrl = episode.streamUrl,
-                episodeId = episode.id,
-                episodeName = episode.name,
-                positionMs = positionMs,
-                durationMs = durationMs
-            ),
-            immediateCommit = immediateCommit
+        val progress = WatchProgress(
+            movieId = movie.id,
+            title = movie.title,
+            posterUrl = movie.posterUrl,
+            countryCode = movie.country.code,
+            streamUrl = episode.streamUrl,
+            episodeId = episode.id,
+            episodeName = episode.name,
+            positionMs = positionMs,
+            durationMs = durationMs
         )
+        prefs.saveWatchProgress(progress, immediateCommit = immediateCommit)
+        if (CloudSyncClient.isSignedIn()) {
+            val slug = CloudSyncClient.normalizeMovieSlug(movie.detailLookupId ?: movie.id)
+            if (slug != "unknown" && slug != "direct" && slug != "local") {
+                val epKey = CloudSyncClient.normalizeEpisodeKey(episode.name.ifBlank { episode.id })
+                synchronized(pendingCloudProgress) {
+                    pendingCloudProgress["$slug::$epKey"] = progress.copy(movieId = "modern_$slug")
+                }
+                val now = System.currentTimeMillis()
+                if (immediateCommit || now - lastCloudPushMs >= 15_000L) {
+                    flushPendingCloudProgress()
+                }
+            }
+        }
     }
 
     fun addCustomVodProvider(

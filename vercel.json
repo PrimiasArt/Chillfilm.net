@@ -2,9 +2,16 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": null,
   "buildCommand": null,
-  "installCommand": null,
   "outputDirectory": "web",
   "cleanUrls": true,
+  "functions": {
+    "api/ai/*.js": {
+      "maxDuration": 60
+    },
+    "api/**/*.js": {
+      "maxDuration": 30
+    }
+  },
   "headers": [
     {
       "source": "/(.*)",
@@ -14,13 +21,22 @@
       ]
     },
     {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store, max-age=0" },
+        { "key": "Access-Control-Allow-Origin", "value": "*" },
+        { "key": "Access-Control-Allow-Methods", "value": "GET, POST, PUT, DELETE, OPTIONS" },
+        { "key": "Access-Control-Allow-Headers", "value": "Content-Type, Authorization" }
+      ]
+    },
+    {
       "source": "/assets/(.*)",
       "headers": [
         { "key": "Cache-Control", "value": "public, max-age=86400, must-revalidate" }
       ]
     },
     {
-      "source": "/(app\\.js|subtitles\\.js|i18n\\.js|styles\\.css)",
+      "source": "/(app\\.js|subtitles\\.js|sync\\.js|i18n\\.js|styles\\.css)",
       "headers": [
         { "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }
       ]

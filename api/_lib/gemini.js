@@ -1,0 +1,241 @@
+const LANGUAGE_INSTRUCTIONS = {
+  vi: 'natural cinema-quality Vietnamese movie subtitles',
+  en: 'natural cinema-quality English movie subtitles',
+  th: 'natural cinema-quality Thai movie subtitles (ภาษาไทยธรรมชาติ)',
+  zh: 'natural cinema-quality Simplified Chinese subtitles',
+  'zh-tw': 'natural cinema-quality Traditional Chinese subtitles',
+  ko: 'natural cinema-quality Korean movie subtitles',
+  ja: 'natural cinema-quality Japanese movie subtitles',
+  fr: 'natural cinema-quality French movie subtitles',
+  es: 'natural cinema-quality Spanish movie subtitles',
+  de: 'natural cinema-quality German movie subtitles',
+  id: 'natural cinema-quality Indonesian movie subtitles',
+  ru: 'natural cinema-quality Russian movie subtitles',
+  pt: 'natural cinema-quality Portuguese movie subtitles',
+  it: 'natural cinema-quality Italian movie subtitles',
+  ar: 'natural cinema-quality Modern Standard Arabic subtitles',
+  hi: 'natural cinema-quality Hindi movie subtitles',
+  ms: 'natural cinema-quality Malay movie subtitles',
+  lo: 'natural cinema-quality Lao movie subtitles',
+  km: 'natural cinema-quality Khmer movie subtitles',
+};
+
+export function resolveLangInstruction(targetLang) {
+  const clean = String(targetLang || 'vi').trim();
+  const key = clean.toLowerCase();
+  return LANGUAGE_INSTRUCTIONS[key] || `natural cinema-quality movie subtitles in ${clean}`;
+}
+
+export function buildLowLatencyGenConfig(modelId, includeThinkingConfig = true) {
+  const cfg = {
+    temperature: 0.15,
+    responseMimeType: 'application/json',
+  };
+  if (!includeThinkingConfig) return cfg;
+  const clean = String(modelId || '').trim().replace(/^models\//, '').toLowerCase();
+  if (clean.startsWith('gemini-3') && clean.includes('flash')) {
+    cfg.thinkingConfig = { thinkingLevel: 'MINIMAL' };
+  } else if (clean.startsWith('gemini-3')) {
+    cfg.thinkingConfig = { thinkingLevel: 'LOW' };
+  } else if (clean.startsWith('gemini-2.5') && clean.includes('flash')) {
+    cfg.thinkingConfig = { thinkingBudget: 0 };
+  } else if (clean.startsWith('gemini-2.5')) {
+    cfg.thinkingConfig = { thinkingBudget: 128 };
+  }
+  return cfg;
+}
+
+export function buildModelFallbackChain(preferredModel, preferTurboFlash = false) {
+  const clean = String(preferredModel || 'gemini-3-flash-preview')
+    .trim()
+    .replace(/^models\//, '') || 'gemini-3-flash-preview';
+  const ordered = preferTurboFlash && clean.toLowerCase().includes('pro')
+    ? ['gemini-3-flash-preview', 'gemini-2.5-flash', clean, 'gemini-2.0-flash']
+    : [clean, 'gemini-2.5-flash', 'gemini-2.0-flash'];
+  return [...new Set(ordered)];
+}
+
+async function callGeminiWithFallback({ apiKey, contents, preferredModel, preferTurboFlash = false }) {
+  const chain = buildModelFallbackChain(preferredModel, preferTurboFlash);
+  let lastError = 'Gemini request failed';
+
+  for (let i = 0; i < chain.length; i++) {
+    const model = chain[i];
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+
+    for (const useThinking of [true, false]) {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents,
+          generationConfig: buildLowLatencyGenConfig(model, useThinking),
+        }),
+      });
+
+      const bodyText = await res.text();
+      if (!res.ok) {
+        let errDetail = '';
+        try {
+          errDetail = JSON.parse(bodyText)?.error?.message || '';
+        } catch {
+          errDetail = bodyText.slice(0, 140);
+        }
+        lastError = `Gemini (${model}) HTTP ${res.status}: ${errDetail.slice(0, 140)}`;
+        if (useThinking && res.status === 400 && errDetail.toLowerCase().includes('thinking')) {
+          continue; // retry same model without thinkingConfig
+        }
+        const retryable = [404, 429, 500, 502, 503].includes(res.status) ||
+          (res.status === 400 && errDetail.toLowerCase().includes('model'));
+        if (!retryable || i === chain.length - 1) {
+          throw new Error(lastError);
+        }
+        break; // move to next model in chain
+      }
+
+      const json = JSON.parse(bodyText);
+      const parts = json?.candidates?.[0]?.content?.parts || [];
+      let rawText = '';
+      for (const p of parts) {
+        if (!p.thought && p.text) rawText = String(p.text).trim();
+      }
+      return { rawText, modelUsed: model };
+    }
+  }
+  throw new Error(lastError);
+}
+
+/**
+ * Translates an array of dialogue texts (`string[]` or `{i, t}[]`) via server-side Gemini API.
+ */
+export async function translateTextsServerSide({ texts, targetLang, apiKey, preferredModel }) {
+  const langInstruction = resolveLangInstruction(targetLang);
+  const inputPayload = texts.map((t, idx) => ({
+    i: idx,
+    t: String(t || '').replace(/\r?\n/g, ' ').trim(),
+  }));
+
+  const prompt = [
+    `Cinema subtitle translator: translate each movie dialogue line into ${langInstruction}.`,
+    'Keep concise, natural, idiomatic, easy to read on screen.',
+    'Return ONLY JSON array: [{"i":0,"t":"..."}]',
+    'Input:',
+    JSON.stringify(inputPayload),
+  ].join('\n');
+
+  const { rawText, modelUsed } = await callGeminiWithFallback({
+    apiKey,
+    preferredModel,
+    contents: [{ parts: [{ text: prompt }] }],
+  });
+
+  const cleaned = rawText
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/```\s*$/, '')
+    .trim();
+  const s = cleaned.indexOf('[');
+  const e = cleaned.lastIndexOf(']');
+  if (s < 0 || e <= s) {
+    throw new Error('Gemini returned non-JSON output');
+  }
+  const arr = JSON.parse(cleaned.slice(s, e + 1));
+  const map = new Map();
+  arr.forEach((o, idx) => {
+    const key = typeof o?.i === 'number' ? o.i : idx;
+    if (typeof o?.t === 'string') map.set(key, o.t.trim());
+  });
+  const translated = texts.map((orig, idx) => map.get(idx) || String(orig || ''));
+  return { translated, modelUsed };
+}
+
+function parseFlexibleSeconds(val) {
+  if (typeof val === 'number' && Number.isFinite(val)) return val;
+  const s = String(val ?? '').trim();
+  if (!s) return null;
+  if (s.includes(':')) {
+    const parts = s.split(':').map(Number);
+    if (parts.some((n) => !Number.isFinite(n))) return null;
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+  }
+  const n = Number(s.replace(',', '.'));
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Transcribes + translates a base64 audio chunk into time-aligned subtitles via server-side Gemini.
+ */
+export async function transcribeAudioChunkServerSide({
+  audioBase64,
+  mimeType,
+  chunkStartOffsetMs,
+  chunkDurationMs,
+  targetLang,
+  apiKey,
+  preferredModel,
+  preferTurboFlash = false,
+}) {
+  const durationSec = (Number(chunkDurationMs || 60000) / 1000).toFixed(1);
+  const langInstruction = resolveLangInstruction(targetLang);
+  const prompt = [
+    `Universal cinema subtitle creator: listen to this ${durationSec}-second movie audio clip (starts at 0.0s).`,
+    `Transcribe ALL spoken dialogue (from ANY spoken language) directly into ${langInstruction}.`,
+    'Rules:',
+    `- "s" and "e" = float seconds relative to 0.0 of this clip (0.0 <= s < e <= ${durationSec}), 1.2s-4.8s per cue.`,
+    '- Skip music/silence; if no speech, return [].',
+    'Return ONLY JSON array: [{"s":1.2,"e":3.6,"t":"translated subtitle text"}]',
+  ].join('\n');
+
+  const { rawText, modelUsed } = await callGeminiWithFallback({
+    apiKey,
+    preferredModel,
+    preferTurboFlash,
+    contents: [
+      {
+        parts: [
+          {
+            inline_data: {
+              mime_type: mimeType || 'audio/aac',
+              data: audioBase64,
+            },
+          },
+          { text: prompt },
+        ],
+      },
+    ],
+  });
+
+  const cleaned = rawText
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/```\s*$/, '')
+    .trim();
+
+  const cues = [];
+  const s = cleaned.indexOf('[');
+  const e = cleaned.lastIndexOf(']');
+  if (s >= 0 && e > s) {
+    const arr = JSON.parse(cleaned.slice(s, e + 1));
+    const maxRelMs = Number(chunkDurationMs || 60000) + 5000;
+    const baseOffset = Number(chunkStartOffsetMs || 0);
+    for (let i = 0; i < arr.length; i++) {
+      const obj = arr[i];
+      if (!obj) continue;
+      const text = String(obj.t || obj.text || '').trim();
+      if (!text) continue;
+      const sSec = parseFlexibleSeconds(obj.s ?? obj.start);
+      if (sSec === null) continue;
+      const eSec = parseFlexibleSeconds(obj.e ?? obj.end) ?? (sSec + 2.5);
+      const relStart = Math.max(0, Math.min(maxRelMs, Math.round(sSec * 1000)));
+      const relEnd = Math.max(relStart + 400, Math.min(maxRelMs + 2000, Math.round(eSec * 1000)));
+      cues.push({
+        id: i + 1,
+        startMs: baseOffset + relStart,
+        endMs: baseOffset + relEnd,
+        text,
+      });
+    }
+  }
+  return { cues, modelUsed };
+}

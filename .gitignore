@@ -14,3 +14,8 @@ dist-apks/
 releases/
 *.apk
 tmp/
+node_modules/
+.vercel/
+.env
+.env.*
+!.env.example

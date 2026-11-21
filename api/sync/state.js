@@ -1,0 +1,159 @@
+import { metric } from '@vercel/functions';
+import {
+  ensureSchema,
+  getSql,
+  normalizeEpisodeKey,
+  normalizeMovieSlug,
+} from '../_lib/db.js';
+import {
+  jsonResponse,
+  optionsResponse,
+  readJsonBody,
+  requireAuth,
+} from '../_lib/auth.js';
+
+export async function OPTIONS() {
+  return optionsResponse();
+}
+
+export async function GET(request) {
+  const startedAt = performance.now();
+  try {
+    const auth = await requireAuth(request);
+    if (auth.errorResponse) return auth.errorResponse;
+    const { user } = auth;
+
+    const url = new URL(request.url);
+    const since = Math.max(0, Number(url.searchParams.get('since') || 0));
+
+    await ensureSchema();
+    const sql = getSql();
+
+    const [progressRows, prefsRows] = await Promise.all([
+      since > 0
+        ? sql`
+            SELECT movie_slug, episode_key, title, poster_url, country_code, episode_name, stream_url, position_ms, duration_ms, updated_at
+            FROM nki_watch_progress
+            WHERE user_id = ${user.id} AND updated_at > ${since}
+            ORDER BY updated_at DESC
+            LIMIT 250
+          `
+        : sql`
+            SELECT movie_slug, episode_key, title, poster_url, country_code, episode_name, stream_url, position_ms, duration_ms, updated_at
+            FROM nki_watch_progress
+            WHERE user_id = ${user.id}
+            ORDER BY updated_at DESC
+            LIMIT 250
+          `,
+      sql`SELECT prefs_json, updated_at FROM nki_user_prefs WHERE user_id = ${user.id} LIMIT 1`,
+    ]);
+
+    metric('sync.state', 1, { direction: 'pull', outcome: 'success' });
+    return jsonResponse({
+      ok: true,
+      serverTime: Date.now(),
+      watchProgress: progressRows.map((r) => ({
+        movieSlug: r.movie_slug,
+        episodeKey: r.episode_key,
+        title: r.title,
+        posterUrl: r.poster_url,
+        countryCode: r.country_code,
+        episodeName: r.episode_name,
+        streamUrl: r.stream_url,
+        positionMs: Number(r.position_ms || 0),
+        durationMs: Number(r.duration_ms || 0),
+        updatedAt: Number(r.updated_at || 0),
+      })),
+      prefs: prefsRows.length ? prefsRows[0].prefs_json : null,
+      prefsUpdatedAt: prefsRows.length ? Number(prefsRows[0].updated_at || 0) : 0,
+    });
+  } catch (err) {
+    console.error('[api/sync/state GET] error:', err);
+    metric('sync.state', 1, { direction: 'pull', outcome: 'error' });
+    return jsonResponse({ error: err?.message || 'Sync pull failed' }, 500);
+  } finally {
+    metric('sync.state.duration_ms', performance.now() - startedAt, { direction: 'pull' });
+  }
+}
+
+export async function POST(request) {
+  const startedAt = performance.now();
+  try {
+    const body = await readJsonBody(request);
+    if (!body) return jsonResponse({ error: 'Invalid JSON payload' }, 400);
+
+    const auth = await requireAuth(request, body);
+    if (auth.errorResponse) return auth.errorResponse;
+    const { user } = auth;
+
+    await ensureSchema();
+    const sql = getSql();
+    const now = Date.now();
+    let upsertedCount = 0;
+
+    if (Array.isArray(body.watchProgress) && body.watchProgress.length > 0) {
+      const items = body.watchProgress.slice(0, 120);
+      for (const raw of items) {
+        if (!raw) continue;
+        const movieSlug = normalizeMovieSlug(raw.movieSlug || raw.movieId || raw.slug);
+        if (!movieSlug || movieSlug === 'unknown') continue;
+        const episodeName = String(raw.episodeName || raw.epName || 'Full').trim().slice(0, 80);
+        const episodeKey = normalizeEpisodeKey(raw.episodeKey || episodeName || raw.episodeId);
+        const title = String(raw.title || raw.name || movieSlug).trim().slice(0, 180);
+        const posterUrl = String(raw.posterUrl || raw.poster || '').trim().slice(0, 500);
+        const countryCode = String(raw.countryCode || '').trim().slice(0, 20);
+        const streamUrl = String(raw.streamUrl || '').trim().slice(0, 700);
+        const positionMs = Math.max(0, Math.round(Number(raw.positionMs ?? (Number(raw.pos || 0) * 1000))));
+        const durationMs = Math.max(0, Math.round(Number(raw.durationMs ?? (Number(raw.dur || 0) * 1000))));
+        const updatedAt = Math.min(now + 60_000, Math.max(1, Math.round(Number(raw.updatedAt || now))));
+
+        await sql`
+          INSERT INTO nki_watch_progress (
+            user_id, movie_slug, episode_key, title, poster_url, country_code, episode_name, stream_url, position_ms, duration_ms, updated_at
+          )
+          VALUES (
+            ${user.id}, ${movieSlug}, ${episodeKey}, ${title}, ${posterUrl}, ${countryCode}, ${episodeName}, ${streamUrl}, ${positionMs}, ${durationMs}, ${updatedAt}
+          )
+          ON CONFLICT (user_id, movie_slug, episode_key) DO UPDATE SET
+            title = EXCLUDED.title,
+            poster_url = CASE WHEN EXCLUDED.poster_url <> '' THEN EXCLUDED.poster_url ELSE nki_watch_progress.poster_url END,
+            country_code = CASE WHEN EXCLUDED.country_code <> '' THEN EXCLUDED.country_code ELSE nki_watch_progress.country_code END,
+            episode_name = EXCLUDED.episode_name,
+            stream_url = CASE WHEN EXCLUDED.stream_url <> '' THEN EXCLUDED.stream_url ELSE nki_watch_progress.stream_url END,
+            position_ms = EXCLUDED.position_ms,
+            duration_ms = GREATEST(EXCLUDED.duration_ms, nki_watch_progress.duration_ms),
+            updated_at = EXCLUDED.updated_at
+          WHERE EXCLUDED.updated_at >= nki_watch_progress.updated_at
+        `;
+        upsertedCount++;
+      }
+    }
+
+    if (body.prefs && typeof body.prefs === 'object') {
+      const prefsUpdatedAt = Math.min(now + 60_000, Math.max(1, Math.round(Number(body.prefsUpdatedAt || now))));
+      const prefsJson = JSON.stringify(body.prefs);
+      await sql`
+        INSERT INTO nki_user_prefs (user_id, prefs_json, updated_at)
+        VALUES (${user.id}, ${prefsJson}::jsonb, ${prefsUpdatedAt})
+        ON CONFLICT (user_id) DO UPDATE SET
+          prefs_json = EXCLUDED.prefs_json,
+          updated_at = EXCLUDED.updated_at
+        WHERE EXCLUDED.updated_at >= nki_user_prefs.updated_at
+      `;
+    }
+
+    await sql`UPDATE nki_users SET last_seen_at = ${now} WHERE id = ${user.id}`;
+    metric('sync.state', 1, { direction: 'push', outcome: 'success' });
+    return jsonResponse({
+      ok: true,
+      upsertedCount,
+      serverTime: now,
+    });
+  } catch (err) {
+    console.error('[api/sync/state POST] error:', err);
+    metric('sync.state', 1, { direction: 'push', outcome: 'error' });
+    return jsonResponse({ error: err?.message || 'Sync push failed' }, 500);
+  } finally {
+    metric('sync.state.duration_ms', performance.now() - startedAt, { direction: 'push' });
+  }
+}

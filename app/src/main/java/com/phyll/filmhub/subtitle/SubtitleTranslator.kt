@@ -1,5 +1,6 @@
 package com.phyll.filmhub.subtitle
 
+import com.phyll.filmhub.cloud.CloudSyncClient
 import com.phyll.filmhub.model.SubtitleCue
 import com.phyll.filmhub.model.SubtitleLanguageCatalog
 import com.phyll.filmhub.model.TranslationEngineMode
@@ -80,7 +81,8 @@ class SubtitleTranslator(
             return@withContext normalized
         }
 
-        val useGemini = mode == TranslationEngineMode.GEMINI_AI && geminiApiKey.isNotBlank()
+        val useCloudAi = CloudSyncClient.canUseServerAi()
+        val useGemini = useCloudAi || (mode == TranslationEngineMode.GEMINI_AI && geminiApiKey.isNotBlank())
         val cleanModel = geminiModelId.trim().removePrefix("models/").ifBlank { "gemini-3-flash-preview" }
         val enginePrefix = if (useGemini) "gem_$cleanModel" else "neural"
         val cacheKey = "${enginePrefix}_$targetLang|${sha256Short(normalized)}"
@@ -91,7 +93,21 @@ class SubtitleTranslator(
             return@withContext it
         }
 
-        val translated = if (useGemini) {
+        val translated = if (useCloudAi) {
+            runCatching {
+                CloudSyncClient.translateTextsViaCloudSync(listOf(normalized), targetLang, cleanModel)?.firstOrNull()
+            }
+                .getOrNull()
+                ?.takeIf { it.isNotBlank() }
+                ?: if (geminiApiKey.isNotBlank()) {
+                    runCatching {
+                        translateBatchWithGemini(listOf(normalized), targetLang, geminiApiKey, cleanModel).firstOrNull()
+                    }.getOrNull()?.takeIf { it.isNotBlank() }
+                        ?: translateBatchWithNeuralPost(listOf(normalized), targetLang).firstOrNull().orEmpty()
+                } else {
+                    translateBatchWithNeuralPost(listOf(normalized), targetLang).firstOrNull().orEmpty()
+                }
+        } else if (useGemini) {
             runCatching {
                 translateBatchWithGemini(listOf(normalized), targetLang, geminiApiKey, cleanModel).firstOrNull()
             }
@@ -121,7 +137,8 @@ class SubtitleTranslator(
     ): List<SubtitleCue> = withContext(Dispatchers.IO) {
         if (cues.isEmpty()) return@withContext emptyList()
 
-        val useGemini = mode == TranslationEngineMode.GEMINI_AI && geminiApiKey.isNotBlank()
+        val useCloudAi = CloudSyncClient.canUseServerAi()
+        val useGemini = useCloudAi || (mode == TranslationEngineMode.GEMINI_AI && geminiApiKey.isNotBlank())
         val cleanModel = geminiModelId.trim().removePrefix("models/").ifBlank { "gemini-3-flash-preview" }
         val enginePrefix = if (useGemini) "gem_$cleanModel" else "neural"
 
@@ -150,7 +167,19 @@ class SubtitleTranslator(
         }
 
         if (pendingTexts.isNotEmpty()) {
-            val translatedPending: List<String> = if (useGemini) {
+            val translatedPending: List<String> = if (useCloudAi) {
+                runCatching { CloudSyncClient.translateTextsViaCloudSync(pendingTexts, targetLang, cleanModel) }
+                    .getOrNull()
+                    ?.takeIf { it.size == pendingTexts.size }
+                    ?: if (geminiApiKey.isNotBlank()) {
+                        runCatching { translateBatchWithGemini(pendingTexts, targetLang, geminiApiKey, cleanModel) }
+                            .getOrNull()
+                            ?.takeIf { it.size == pendingTexts.size }
+                            ?: translateBatchWithNeuralPost(pendingTexts, targetLang)
+                    } else {
+                        translateBatchWithNeuralPost(pendingTexts, targetLang)
+                    }
+            } else if (useGemini) {
                 runCatching { translateBatchWithGemini(pendingTexts, targetLang, geminiApiKey, cleanModel) }
                     .getOrNull()
                     ?.takeIf { it.size == pendingTexts.size }

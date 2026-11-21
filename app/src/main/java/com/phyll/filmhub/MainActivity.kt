@@ -54,6 +54,7 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         delayedStopWipeJob?.cancel()
         delayedStopWipeJob = null
+        viewModel.onAppForegrounded()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -78,6 +79,10 @@ class MainActivity : ComponentActivity() {
             val promptQrOnStartup by viewModel.prefs.promptQrOnStartup.collectAsState()
             val deviceUiMode by viewModel.prefs.deviceUiMode.collectAsState()
             val appLanguage by viewModel.prefs.appLanguage.collectAsState()
+            val cloudSession by viewModel.prefs.cloudSession.collectAsState()
+            val cloudHealth by viewModel.cloudHealth.collectAsState()
+            val cloudSyncBusy by viewModel.cloudSyncBusy.collectAsState()
+            val adminVaultSnapshot by viewModel.adminVaultSnapshot.collectAsState()
             val watchHistory by viewModel.prefs.watchHistory.collectAsState()
             val favoriteIds by viewModel.prefs.favoriteIds.collectAsState()
             val customProviders by viewModel.prefs.customProviders.collectAsState()
@@ -141,7 +146,7 @@ class MainActivity : ComponentActivity() {
                                 searchQuery = searchQuery,
                                 searchResults = searchResults,
                                 isSearching = isSearching,
-                                hasSessionGeminiKey = geminiApiKey.isNotBlank(),
+                                hasSessionGeminiKey = geminiApiKey.isNotBlank() || cloudSession?.serverAiReady == true,
                                 activeGeminiModel = subtitleConfig.geminiModelId,
                                 companionLanUrl = companionLanUrl,
                                 isTvHardware = isTvHardware,
@@ -203,6 +208,20 @@ class MainActivity : ComponentActivity() {
                                 deviceUiMode = deviceUiMode,
                                 currentAppLanguage = appLanguage,
                                 onSelectAppLanguage = viewModel::setAppLanguage,
+                                cloudSession = cloudSession,
+                                cloudHealth = cloudHealth,
+                                cloudSyncBusy = cloudSyncBusy,
+                                adminVaultSnapshot = adminVaultSnapshot,
+                                onCloudLogin = viewModel::cloudLogin,
+                                onCloudRegister = viewModel::cloudRegister,
+                                onCloudLogout = viewModel::cloudLogout,
+                                onCloudSyncNow = { viewModel.pullCloudState(silent = false, force = true) },
+                                onLoadAdminVault = viewModel::loadAdminVault,
+                                onAdminSaveServerKey = viewModel::adminSaveServerGeminiKey,
+                                onAdminSavePolicy = viewModel::adminSaveGlobalPolicy,
+                                onAdminCreateInvite = viewModel::adminCreateInviteCode,
+                                onAdminRevokeInvite = viewModel::adminRevokeInviteCode,
+                                onAdminToggleMemberStatus = viewModel::adminToggleMemberStatus,
                                 appUpdateState = appUpdateState,
                                 hasSelectedTv = !isTvHardware && selectedTvIp != null,
                                 isTvHardware = isTvHardware,
@@ -390,6 +409,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        viewModel.onAppBackgrounded()
         super.onStop()
     }
 

@@ -6,6 +6,8 @@ import android.content.res.Configuration
 import android.util.Base64
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
+import com.phyll.filmhub.cloud.CloudSession
+import com.phyll.filmhub.cloud.CloudSyncClient
 import com.phyll.filmhub.model.ControlTargetMode
 import com.phyll.filmhub.model.DeviceUiMode
 import com.phyll.filmhub.model.ManagedTvDevice
@@ -80,6 +82,21 @@ class PreferencesManager(context: Context) {
     private val _appLanguage = MutableStateFlow(loadAppLanguage())
     val appLanguage: StateFlow<AppLanguage> = _appLanguage.asStateFlow()
 
+    private val _cloudSession = MutableStateFlow(loadCloudSession().also { CloudSyncClient.applySession(it) })
+    val cloudSession: StateFlow<CloudSession?> = _cloudSession.asStateFlow()
+
+    fun saveCloudSession(session: CloudSession?) {
+        _cloudSession.value = session
+        CloudSyncClient.applySession(session)
+        val editor = prefs.edit()
+        if (session == null) {
+            editor.remove(KEY_CLOUD_SESSION_V1)
+        } else {
+            editor.putString(KEY_CLOUD_SESSION_V1, gson.toJson(session))
+        }
+        editor.commit()
+    }
+
     fun setAppLanguage(language: AppLanguage) {
         _appLanguage.value = language
         prefs.edit().putString(KEY_APP_UI_LANGUAGE, language.code).commit()
@@ -99,13 +116,22 @@ class PreferencesManager(context: Context) {
 
     private val episodeResumeCache: MutableMap<String, WatchProgress> = loadEpisodeResumeMap().toMutableMap()
 
-    fun getEpisodeResumePositionMs(movieId: String, episodeId: String, streamUrl: String = ""): Long {
+    fun getEpisodeResumePositionMs(movieId: String, episodeId: String, streamUrl: String = "", episodeName: String = ""): Long {
+        val targetSlug = CloudSyncClient.normalizeMovieSlug(movieId)
+        val targetEpKey = CloudSyncClient.normalizeEpisodeKey(episodeName.ifBlank { episodeId })
         val byEp = episodeResumeCache["$movieId::$episodeId"]
+            ?: episodeResumeCache["$targetSlug::$targetEpKey"]
             ?: episodeResumeCache.values.firstOrNull {
-                it.movieId == movieId && (it.episodeId == episodeId || (streamUrl.isNotBlank() && it.streamUrl == streamUrl))
+                (it.movieId == movieId || CloudSyncClient.normalizeMovieSlug(it.movieId) == targetSlug) &&
+                    (it.episodeId == episodeId ||
+                        CloudSyncClient.normalizeEpisodeKey(it.episodeName.ifBlank { it.episodeId }) == targetEpKey ||
+                        (streamUrl.isNotBlank() && it.streamUrl == streamUrl))
             }
             ?: _watchHistory.value.firstOrNull {
-                it.movieId == movieId && (it.episodeId == episodeId || (streamUrl.isNotBlank() && it.streamUrl == streamUrl))
+                (it.movieId == movieId || CloudSyncClient.normalizeMovieSlug(it.movieId) == targetSlug) &&
+                    (it.episodeId == episodeId ||
+                        CloudSyncClient.normalizeEpisodeKey(it.episodeName.ifBlank { it.episodeId }) == targetEpKey ||
+                        (streamUrl.isNotBlank() && it.streamUrl == streamUrl))
             }
             ?: return 0L
         if (byEp.positionMs < 3_000L) return 0L
@@ -116,9 +142,12 @@ class PreferencesManager(context: Context) {
     }
 
     fun getLatestMovieWatchProgress(movieId: String): WatchProgress? {
-        val fromHistory = _watchHistory.value.firstOrNull { it.movieId == movieId }
+        val targetSlug = CloudSyncClient.normalizeMovieSlug(movieId)
+        val fromHistory = _watchHistory.value.firstOrNull {
+            it.movieId == movieId || CloudSyncClient.normalizeMovieSlug(it.movieId) == targetSlug
+        }
         val fromMap = episodeResumeCache.values
-            .filter { it.movieId == movieId }
+            .filter { it.movieId == movieId || CloudSyncClient.normalizeMovieSlug(it.movieId) == targetSlug }
             .maxByOrNull { it.updatedAt }
         val best = when {
             fromHistory != null && fromMap != null -> if (fromMap.updatedAt >= fromHistory.updatedAt) fromMap else fromHistory
@@ -127,6 +156,73 @@ class PreferencesManager(context: Context) {
         if (best.positionMs < 3_000L) return null
         if (best.durationMs > 30_000L && best.positionMs >= (best.durationMs * 0.96).toLong()) return null
         return best
+    }
+
+    /**
+     * Merges remote watch progress rows pulled from Neon Postgres using Last-Write-Wins on updatedAt.
+     */
+    fun mergeCloudWatchProgress(remoteItems: List<WatchProgress>): Boolean {
+        if (remoteItems.isEmpty()) return false
+        var changed = false
+        val historyBySlug = LinkedHashMap<String, WatchProgress>()
+        for (h in _watchHistory.value) {
+            historyBySlug[CloudSyncClient.normalizeMovieSlug(h.movieId)] = h
+        }
+
+        for (remote in remoteItems) {
+            val slug = CloudSyncClient.normalizeMovieSlug(remote.movieId)
+            val epKey = CloudSyncClient.normalizeEpisodeKey(remote.episodeName.ifBlank { remote.episodeId })
+            val canonicalMapKey = "$slug::$epKey"
+
+            val existingEp = episodeResumeCache[canonicalMapKey]
+                ?: episodeResumeCache.values.firstOrNull {
+                    CloudSyncClient.normalizeMovieSlug(it.movieId) == slug &&
+                        CloudSyncClient.normalizeEpisodeKey(it.episodeName.ifBlank { it.episodeId }) == epKey
+                }
+            if (existingEp == null || remote.updatedAt > existingEp.updatedAt) {
+                val mergedEp = if (existingEp != null) {
+                    remote.copy(
+                        movieId = existingEp.movieId,
+                        posterUrl = remote.posterUrl.ifBlank { existingEp.posterUrl },
+                        streamUrl = remote.streamUrl.ifBlank { existingEp.streamUrl }
+                    )
+                } else {
+                    remote
+                }
+                episodeResumeCache[canonicalMapKey] = mergedEp
+                episodeResumeCache["${mergedEp.movieId}::${mergedEp.episodeId}"] = mergedEp
+                changed = true
+            }
+
+            val existingHist = historyBySlug[slug]
+            if (existingHist == null || remote.updatedAt > existingHist.updatedAt) {
+                val mergedHist = if (existingHist != null) {
+                    remote.copy(
+                        movieId = existingHist.movieId,
+                        posterUrl = remote.posterUrl.ifBlank { existingHist.posterUrl },
+                        streamUrl = remote.streamUrl.ifBlank { existingHist.streamUrl }
+                    )
+                } else {
+                    remote
+                }
+                historyBySlug[slug] = mergedHist
+                changed = true
+            }
+        }
+
+        if (changed) {
+            val mergedHistory = historyBySlug.values
+                .sortedByDescending { it.updatedAt }
+                .take(40)
+            _watchHistory.value = mergedHistory
+            prefs.edit()
+                .putString(KEY_WATCH_HISTORY, gson.toJson(mergedHistory))
+                .putString(KEY_EPISODE_RESUME_MAP, gson.toJson(episodeResumeCache.values.distinctBy {
+                    "${CloudSyncClient.normalizeMovieSlug(it.movieId)}::${CloudSyncClient.normalizeEpisodeKey(it.episodeName.ifBlank { it.episodeId })}"
+                }.take(200)))
+                .apply()
+        }
+        return changed
     }
 
     fun getSeriesSubtitleProfile(seriesId: String): SeriesSubtitleProfile? {
@@ -556,6 +652,13 @@ class PreferencesManager(context: Context) {
         return AppLanguage.fromCode(prefs.getString(KEY_APP_UI_LANGUAGE, AppLanguage.EN.code))
     }
 
+    private fun loadCloudSession(): CloudSession? {
+        val raw = prefs.getString(KEY_CLOUD_SESSION_V1, null) ?: return null
+        return runCatching { gson.fromJson(raw, CloudSession::class.java) }
+            .getOrNull()
+            ?.takeIf { it.token.isNotBlank() }
+    }
+
     private fun loadControlTargetMode(): ControlTargetMode {
         // Standalone cinema-first default: play directly on the user's phone/tablet unless they explicitly cast to TV!
         return ControlTargetMode.LOCAL_DEVICE
@@ -592,6 +695,7 @@ class PreferencesManager(context: Context) {
         private const val KEY_PROMPT_QR_ON_STARTUP = "prompt_qr_on_startup_v1"
         private const val KEY_UI_MODE_V25 = "device_ui_mode_v25"
         private const val KEY_APP_UI_LANGUAGE = "app_ui_language_v1"
+        private const val KEY_CLOUD_SESSION_V1 = "nki_cloud_session_v1"
         private const val KEY_WATCH_HISTORY = "watch_history_v1"
         private const val KEY_EPISODE_RESUME_MAP = "episode_resume_map_v1"
         private const val KEY_FAVORITES = "favorite_movie_ids"
