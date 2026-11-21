@@ -1061,4 +1061,23 @@ class SubtitleAndCatalogTest {
             tempDir.deleteRecursively()
         }
     }
+
+    @Test
+    fun appInterfaceStringsDefaultToEnglishAndSupportFiveLanguages() {
+        assertEquals(com.phyll.filmhub.ui.i18n.AppLanguage.EN, com.phyll.filmhub.ui.i18n.AppLanguage.fromCode(null))
+        assertEquals(com.phyll.filmhub.ui.i18n.AppLanguage.EN, com.phyll.filmhub.ui.i18n.AppLanguage.fromCode("unknown"))
+        assertEquals(5, com.phyll.filmhub.ui.i18n.AppLanguage.entries.size)
+
+        val en = com.phyll.filmhub.ui.i18n.AppStrings.forLanguage(com.phyll.filmhub.ui.i18n.AppLanguage.EN)
+        val vi = com.phyll.filmhub.ui.i18n.AppStrings.forLanguage(com.phyll.filmhub.ui.i18n.AppLanguage.VI)
+        val th = com.phyll.filmhub.ui.i18n.AppStrings.forLanguage(com.phyll.filmhub.ui.i18n.AppLanguage.TH)
+        val zh = com.phyll.filmhub.ui.i18n.AppStrings.forLanguage(com.phyll.filmhub.ui.i18n.AppLanguage.ZH)
+        val ko = com.phyll.filmhub.ui.i18n.AppStrings.forLanguage(com.phyll.filmhub.ui.i18n.AppLanguage.KO)
+
+        assertEquals("Watch Now", en.watchNow)
+        assertEquals("Xem Ngay", vi.watchNow)
+        assertEquals("ดูเลย", th.watchNow)
+        assertEquals("立即播放", zh.watchNow)
+        assertEquals("지금 시청", ko.watchNow)
+    }
 }

@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.PlayArrow
@@ -84,6 +85,8 @@ import com.phyll.filmhub.model.ManagedTvDevice
 import com.phyll.filmhub.model.MovieItem
 import com.phyll.filmhub.model.WatchProgress
 import com.phyll.filmhub.ui.components.MovieCard
+import com.phyll.filmhub.ui.i18n.AppLanguage
+import com.phyll.filmhub.ui.i18n.LocalAppStrings
 import com.phyll.filmhub.ui.theme.AmbientCinemaBackdropBrush
 import com.phyll.filmhub.ui.theme.BrandEmeraldVioletBrush
 import com.phyll.filmhub.ui.theme.BrandNeonGlassBorderBrush
@@ -118,6 +121,8 @@ fun HomeScreen(
     controlTargetMode: ControlTargetMode = ControlTargetMode.LOCAL_DEVICE,
     selectedTvDevice: ManagedTvDevice? = null,
     isRemoteTvOnline: Boolean = false,
+    currentAppLanguage: AppLanguage = AppLanguage.EN,
+    onSelectAppLanguage: (AppLanguage) -> Unit = {},
     onSelectCountry: (CountryCategory) -> Unit,
     onSearchQueryChange: (String) -> Unit,
     onExecuteSearch: (String) -> Unit,
@@ -135,8 +140,10 @@ fun HomeScreen(
     onVoiceError: () -> Unit
 ) {
     val isTv = LocalIsTvMode.current
+    val s = LocalAppStrings.current
     val focusManager = LocalFocusManager.current
     var showSearchBar by remember { mutableStateOf(searchQuery.isNotBlank() || isTv) }
+    var showLanguagePicker by remember { mutableStateOf(false) }
 
     var spotlightMovie by remember(sections) {
         mutableStateOf(sections.firstOrNull()?.movies?.firstOrNull())
@@ -242,14 +249,44 @@ fun HomeScreen(
                     }
                 }
 
-                // Right Action Cluster: ONLY 3 crisp compact circular icons (zero overflow on 360dp!)
+                // Right Action Cluster: Compact Language Switcher + Search + Cast + Refresh (zero overflow!)
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // Quick 5-Language UI Switcher Pill (EN / VI / TH / ZH / KO)
+                    Row(
+                        modifier = Modifier
+                            .height(36.dp)
+                            .tvFocusableClickable(
+                                shape = RoundedCornerShape(99.dp),
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = if (showLanguagePicker) EmeraldNeon else CinemaGlassBorder,
+                                onClick = { showLanguagePicker = !showLanguagePicker }
+                            )
+                            .background(if (showLanguagePicker) EmeraldPrimary.copy(alpha = 0.22f) else CinemaGlass)
+                            .padding(horizontal = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Language,
+                            contentDescription = s.languageLabel,
+                            tint = EmeraldNeon,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Text(
+                            text = currentAppLanguage.shortBadge,
+                            color = TextPrimary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Black,
+                            maxLines = 1
+                        )
+                    }
+
                     HeaderGlassIconBtn(
                         icon = Icons.Default.Search,
-                        contentDesc = "Tìm phim",
+                        contentDesc = s.searchAction,
                         tint = if (showSearchBar || searchQuery.isNotBlank()) EmeraldNeon else TextPrimary,
                         active = showSearchBar || searchQuery.isNotBlank(),
                         onClick = {
@@ -263,7 +300,7 @@ fun HomeScreen(
                     // Optional Secondary TV Cast / Stream Button
                     HeaderGlassIconBtn(
                         icon = if (isTvHardware) Icons.Default.Tv else Icons.Default.Cast,
-                        contentDesc = "Stream / Kết nối TV",
+                        contentDesc = s.castTvDesc,
                         tint = if (isRemoteTvOnline) EmeraldNeon else VioletSoft,
                         showDot = isRemoteTvOnline,
                         onClick = {
@@ -273,10 +310,52 @@ fun HomeScreen(
 
                     HeaderGlassIconBtn(
                         icon = Icons.Default.Refresh,
-                        contentDesc = "Làm mới",
+                        contentDesc = s.refreshDesc,
                         tint = TextSecondary,
                         onClick = onRefresh
                     )
+                }
+            }
+
+            // 1b. Quick 5-Language Interface Switcher Strip (EN - VI - TH - ZH - KO)
+            AnimatedVisibility(
+                visible = showLanguagePicker,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
+            ) {
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = horizPad, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(bottom = 6.dp)
+                ) {
+                    items(AppLanguage.entries) { lang ->
+                        val active = lang == currentAppLanguage
+                        Box(
+                            modifier = Modifier
+                                .tvFocusableClickable(
+                                    shape = RoundedCornerShape(99.dp),
+                                    focusedBorderColor = EmeraldNeon,
+                                    unfocusedBorderColor = if (active) EmeraldNeon else CinemaGlassBorder,
+                                    onClick = {
+                                        onSelectAppLanguage(lang)
+                                        showLanguagePicker = false
+                                    }
+                                )
+                                .background(
+                                    if (active) BrandEmeraldVioletBrush
+                                    else Brush.horizontalGradient(listOf(CinemaSurfaceElevated, CinemaSurfaceElevated))
+                                )
+                                .padding(horizontal = 12.dp, vertical = 7.dp)
+                        ) {
+                            Text(
+                                text = "${lang.shortBadge} • ${lang.nativeName}",
+                                color = if (active) Color.White else TextPrimary,
+                                fontSize = 12.sp,
+                                fontWeight = if (active) FontWeight.ExtraBold else FontWeight.SemiBold,
+                                maxLines = 1
+                            )
+                        }
+                    }
                 }
             }
 
@@ -301,7 +380,7 @@ fun HomeScreen(
                         singleLine = true,
                         placeholder = {
                             Text(
-                                text = "Tìm tên phim, diễn viên hoặc dán link YouTube...",
+                                text = s.searchPlaceholder,
                                 color = TextSecondary,
                                 fontSize = 13.sp,
                                 maxLines = 1,
@@ -402,7 +481,7 @@ fun HomeScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "Tìm",
+                            text = s.searchAction,
                             color = Color.White,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.ExtraBold
@@ -434,7 +513,7 @@ fun HomeScreen(
                             .padding(horizontal = 14.dp, vertical = 7.dp)
                     ) {
                         Text(
-                            text = country.displayName,
+                            text = s.countryName(country),
                             color = if (isSelected) Color.White else Color(0xFFD1D5DB),
                             fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
                             fontSize = 12.sp,
@@ -496,7 +575,7 @@ fun HomeScreen(
                                     CircularProgressIndicator(color = EmeraldNeon)
                                     Spacer(modifier = Modifier.height(12.dp))
                                     Text(
-                                        text = "Đang tải kho phim ChillFilm...",
+                                        text = s.loadingCatalog,
                                         color = TextSecondary,
                                         fontSize = 13.sp
                                     )
@@ -595,6 +674,7 @@ private fun FloatingBottomNavBar(
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val s = LocalAppStrings.current
     Box(
         modifier = modifier
             .fillMaxWidth()
@@ -614,7 +694,7 @@ private fun FloatingBottomNavBar(
         ) {
             BottomNavTab(
                 icon = Icons.Default.Home,
-                label = "Khám phá",
+                label = s.navDiscover,
                 active = !isSearchActive && selectedCountry != CountryCategory.LIVE_TV && selectedCountry != CountryCategory.YOUTUBE,
                 accentColor = EmeraldNeon,
                 modifier = Modifier.weight(1f),
@@ -622,7 +702,7 @@ private fun FloatingBottomNavBar(
             )
             BottomNavTab(
                 icon = Icons.Default.Movie,
-                label = "Phim bộ",
+                label = s.navSeries,
                 active = !isSearchActive && selectedCountry == CountryCategory.LIVE_TV,
                 accentColor = EmeraldNeon,
                 modifier = Modifier.weight(1f),
@@ -630,7 +710,7 @@ private fun FloatingBottomNavBar(
             )
             BottomNavTab(
                 icon = Icons.Default.SmartDisplay,
-                label = "YouTube",
+                label = s.navYouTube,
                 active = !isSearchActive && selectedCountry == CountryCategory.YOUTUBE,
                 accentColor = VioletSoft,
                 modifier = Modifier.weight(1f),
@@ -638,7 +718,7 @@ private fun FloatingBottomNavBar(
             )
             BottomNavTab(
                 icon = Icons.Default.Settings,
-                label = "Cài đặt",
+                label = s.navSettings,
                 active = false,
                 accentColor = if (hasGeminiKey) EmeraldNeon else VioletSoft,
                 showBadgeDot = hasGeminiKey,
@@ -710,6 +790,7 @@ private fun HeroSpotlightBanner(
     onPlayClick: () -> Unit,
     onDetailClick: () -> Unit
 ) {
+    val s = LocalAppStrings.current
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -777,7 +858,7 @@ private fun HeroSpotlightBanner(
                         .padding(horizontal = 7.dp, vertical = 2.dp)
                 ) {
                     Text(
-                        text = "AI SUB ĐA NGÔN NGỮ",
+                        text = s.aiSubMultiBadge,
                         color = CinemaObsidian,
                         fontSize = 9.sp,
                         fontWeight = FontWeight.Black,
@@ -786,7 +867,7 @@ private fun HeroSpotlightBanner(
                 }
                 Text(
                     text = listOfNotNull(
-                        movie.country.displayName.takeIf { it.isNotBlank() },
+                        s.countryName(movie.country).takeIf { it.isNotBlank() },
                         movie.year.takeIf { it.isNotBlank() }
                     ).joinToString(" • "),
                     color = VioletSoft,
@@ -849,7 +930,7 @@ private fun HeroSpotlightBanner(
                     )
                     Spacer(modifier = Modifier.width(5.dp))
                     Text(
-                        text = "Xem Ngay",
+                        text = s.watchNow,
                         color = Color.White,
                         fontWeight = FontWeight.ExtraBold,
                         fontSize = 13.sp,
@@ -878,7 +959,7 @@ private fun HeroSpotlightBanner(
                     )
                     Spacer(modifier = Modifier.width(5.dp))
                     Text(
-                        text = "Chi Tiết",
+                        text = s.detailsBtn,
                         color = TextPrimary,
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 13.sp,
@@ -896,6 +977,7 @@ private fun ContinueWatchingRow(
     horizPad: androidx.compose.ui.unit.Dp,
     onResume: (WatchProgress) -> Unit
 ) {
+    val s = LocalAppStrings.current
     Column {
         Row(
             modifier = Modifier.padding(horizontal = horizPad, vertical = 2.dp),
@@ -910,7 +992,7 @@ private fun ContinueWatchingRow(
             )
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = "Tiếp Tục Xem",
+                text = s.continueWatching,
                 color = TextPrimary,
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Bold
@@ -930,7 +1012,7 @@ private fun ContinueWatchingRow(
                     country = CountryCategory.fromSlugOrName(item.countryCode),
                     quality = item.episodeName,
                     posterUrl = item.posterUrl,
-                    providerName = "Xem tiếp"
+                    providerName = s.resumeLabel
                 )
                 MovieCard(
                     movie = pseudoMovie,
@@ -949,6 +1031,7 @@ private fun CatalogSectionRow(
     onMovieFocused: (MovieItem) -> Unit,
     onMovieClick: (MovieItem) -> Unit
 ) {
+    val s = LocalAppStrings.current
     Column {
         Row(
             modifier = Modifier
@@ -968,7 +1051,7 @@ private fun CatalogSectionRow(
             )
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = "${section.movies.size} phim ›",
+                text = "${section.movies.size} ${s.moviesCountSuffix}",
                 color = EmeraldNeon,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold
@@ -999,6 +1082,7 @@ private fun SearchResultsBody(
     onClearSearch: () -> Unit,
     onMovieClick: (MovieItem) -> Unit
 ) {
+    val s = LocalAppStrings.current
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1012,7 +1096,7 @@ private fun SearchResultsBody(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "Kết quả \"$query\" (${results.size})",
+                text = "${s.searchResultsPrefix} \"$query\" (${results.size})",
                 color = EmeraldNeon,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
@@ -1027,7 +1111,7 @@ private fun SearchResultsBody(
                     .background(CinemaSurfaceElevated)
                     .padding(horizontal = 12.dp, vertical = 6.dp)
             ) {
-                Text(text = "Đóng", color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Text(text = s.closeAction, color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             }
         }
 
@@ -1038,7 +1122,7 @@ private fun SearchResultsBody(
         } else if (results.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
-                    text = "Không tìm thấy phim phù hợp. Hãy thử bấm nút Tìm hoặc nhập tên tiếng Anh.",
+                    text = s.noSearchResults,
                     color = TextSecondary,
                     fontSize = 13.sp
                 )

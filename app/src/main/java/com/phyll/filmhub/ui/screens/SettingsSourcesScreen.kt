@@ -71,6 +71,8 @@ import com.phyll.filmhub.model.SubtitleStyleConfig
 import com.phyll.filmhub.model.TranslationEngineMode
 import com.phyll.filmhub.model.VodProviderConfig
 import com.phyll.filmhub.model.VodProviderType
+import com.phyll.filmhub.ui.i18n.AppLanguage
+import com.phyll.filmhub.ui.i18n.LocalAppStrings
 import com.phyll.filmhub.ui.theme.AmbientCinemaBackdropBrush
 import com.phyll.filmhub.ui.theme.BrandEmeraldVioletBrush
 import com.phyll.filmhub.ui.theme.BrandNeonGlassBorderBrush
@@ -100,6 +102,8 @@ fun SettingsSourcesScreen(
     discoveredGeminiModels: List<String>,
     promptQrOnStartup: Boolean,
     deviceUiMode: DeviceUiMode,
+    currentAppLanguage: AppLanguage = AppLanguage.EN,
+    onSelectAppLanguage: (AppLanguage) -> Unit = {},
     appUpdateState: AppUpdateUiState = AppUpdateUiState(),
     hasSelectedTv: Boolean = false,
     isTvHardware: Boolean = false,
@@ -128,6 +132,7 @@ fun SettingsSourcesScreen(
 ) {
     val context = LocalContext.current
     val isTv = LocalIsTvMode.current
+    val s = LocalAppStrings.current
 
     var directTitle by remember { mutableStateOf("") }
     var directStreamUrl by remember { mutableStateOf("") }
@@ -228,7 +233,7 @@ fun SettingsSourcesScreen(
                     Spacer(modifier = Modifier.width(8.dp))
                     Column {
                         Text(
-                            text = "Cài Đặt ChillFilm",
+                            text = s.settingsTitle,
                             color = TextPrimary,
                             fontSize = if (isCompact) 16.sp else 19.sp,
                             fontWeight = FontWeight.ExtraBold,
@@ -259,6 +264,41 @@ fun SettingsSourcesScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(Icons.Default.QrCode2, contentDescription = "QR Companion", tint = VioletSoft, modifier = Modifier.size(19.dp))
+                    }
+                }
+            }
+
+            // 1b. App Interface Language Switcher (Default: English • EN / VI / TH / ZH / KO)
+            SectionBox(
+                title = "🌐 ${s.uiLanguageSectionTitle}",
+                subtitle = s.uiLanguageSectionDesc
+            ) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    AppLanguage.entries.forEach { lang ->
+                        val active = lang == currentAppLanguage
+                        Box(
+                            modifier = Modifier
+                                .tvFocusableClickable(
+                                    shape = RoundedCornerShape(99.dp),
+                                    focusedBorderColor = EmeraldNeon,
+                                    unfocusedBorderColor = if (active) EmeraldNeon else CinemaGlassBorder,
+                                    onClick = { onSelectAppLanguage(lang) }
+                                )
+                                .background(
+                                    if (active) EmeraldPrimary.copy(alpha = 0.24f) else CinemaSurfaceElevated
+                                )
+                                .padding(horizontal = 13.dp, vertical = 8.dp)
+                        ) {
+                            Text(
+                                text = "${lang.shortBadge} • ${lang.nativeName}",
+                                color = if (active) EmeraldNeon else TextPrimary,
+                                fontSize = 12.sp,
+                                fontWeight = if (active) FontWeight.ExtraBold else FontWeight.SemiBold
+                            )
+                        }
                     }
                 }
             }

@@ -32,6 +32,7 @@ import com.phyll.filmhub.model.WatchProgress
 import com.phyll.filmhub.subtitle.GeminiAudioSubtitleGenerator
 import com.phyll.filmhub.tvmanager.AdbTcpClient
 import com.phyll.filmhub.tvmanager.RemoteTvControllerClient
+import com.phyll.filmhub.ui.i18n.AppLanguage
 import com.phyll.filmhub.updater.AppUpdateUiState
 import com.phyll.filmhub.updater.AppUpdater
 import kotlinx.coroutines.Dispatchers
@@ -47,6 +48,12 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.util.UUID
+
+data class ActivePlaybackSession(
+    val movie: MovieItem,
+    val episode: Episode,
+    val startPositionMs: Long = 0L
+)
 
 sealed class AppScreen {
     data object Home : AppScreen()
@@ -80,6 +87,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _currentScreen = MutableStateFlow<AppScreen>(AppScreen.Home)
     val currentScreen: StateFlow<AppScreen> = _currentScreen.asStateFlow()
+
+    private val _activePlaybackSession = MutableStateFlow<ActivePlaybackSession?>(null)
+    val activePlaybackSession: StateFlow<ActivePlaybackSession?> = _activePlaybackSession.asStateFlow()
+
+    private val _isPlayerMinimized = MutableStateFlow(false)
+    val isPlayerMinimized: StateFlow<Boolean> = _isPlayerMinimized.asStateFlow()
 
     private val screenBackStack = ArrayDeque<AppScreen>()
 
@@ -408,7 +421,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } else {
             prefs.getEpisodeResumePositionMs(movie.id, episode.id, episode.streamUrl)
         }
-        navigateTo(AppScreen.Player(movie = movie, episode = episode, startPositionMs = effectiveStartMs))
+        _activePlaybackSession.value = ActivePlaybackSession(
+            movie = movie,
+            episode = episode,
+            startPositionMs = effectiveStartMs
+        )
+        _isPlayerMinimized.value = false
+    }
+
+    fun minimizePlayer() {
+        if (_activePlaybackSession.value != null) {
+            _isPlayerMinimized.value = true
+        }
+    }
+
+    fun restoreMinimizedPlayer() {
+        if (_activePlaybackSession.value != null) {
+            _isPlayerMinimized.value = false
+        }
+    }
+
+    fun closePlayerSession() {
+        _activePlaybackSession.value = null
+        _isPlayerMinimized.value = false
+        _playerTelemetry.value = CompanionPlayerTelemetry(isActive = false)
+    }
+
+    fun setAppLanguage(language: AppLanguage) {
+        prefs.setAppLanguage(language)
     }
 
     fun startTargetAwarePlayback(movie: MovieItem, episode: Episode, startPositionMs: Long = 0L) {
@@ -526,6 +566,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _showQrCompanionDialog.value = false
             return true
         }
+        if (_activePlaybackSession.value != null && !_isPlayerMinimized.value) {
+            _isPlayerMinimized.value = true
+            return true
+        }
         if (screenBackStack.isEmpty()) return false
         _currentScreen.value = screenBackStack.removeLast()
         return true
@@ -634,12 +678,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun buildCompanionStateJson(): JSONObject {
-        val screenName = when (_currentScreen.value) {
-            is AppScreen.Home -> "HOME"
-            is AppScreen.Detail -> "DETAIL"
-            is AppScreen.Player -> "PLAYER"
-            is AppScreen.SettingsSources -> "SETTINGS"
-            is AppScreen.TvManager -> "TV_MANAGER"
+        val isPlayerExpanded = _activePlaybackSession.value != null && !_isPlayerMinimized.value
+        val screenName = if (isPlayerExpanded) {
+            "PLAYER"
+        } else {
+            when (_currentScreen.value) {
+                is AppScreen.Home -> "HOME"
+                is AppScreen.Detail -> "DETAIL"
+                is AppScreen.Player -> "PLAYER"
+                is AppScreen.SettingsSources -> "SETTINGS"
+                is AppScreen.TvManager -> "TV_MANAGER"
+            }
         }
         val subCfg = prefs.subtitleConfig.value
         val subStyleJson = JSONObject()
@@ -723,6 +772,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun findMovieInMemory(movieId: String): MovieItem? {
+        _activePlaybackSession.value?.movie?.takeIf { it.id == movieId }?.let { return it }
         val cur = _currentScreen.value
         if (cur is AppScreen.Detail && cur.movie.id == movieId) return cur.movie
         if (cur is AppScreen.Player && cur.movie.id == movieId) return cur.movie
@@ -779,12 +829,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val target = CountryCategory.entries.firstOrNull {
                     it.code.equals(event.countryCode, ignoreCase = true)
                 } ?: CountryCategory.ALL
-                if (_currentScreen.value !is AppScreen.Home && _currentScreen.value !is AppScreen.Player) {
+                val isPlayerActive = _activePlaybackSession.value != null && !_isPlayerMinimized.value
+                if (_currentScreen.value !is AppScreen.Home && !isPlayerActive) {
                     navigateHome()
                 }
                 selectCountry(target)
-                if (_currentScreen.value !is AppScreen.Player) {
-                    showBanner("📱 Đã chuyển danh mục từ ĐT: ${target.flagEmoji} ${target.displayName}")
+                if (!isPlayerActive) {
+                    showBanner("📱 ${target.flagEmoji} ${target.displayName}")
                 }
             }
             is CompanionEvent.OpenMovieOnTv -> {

@@ -50,11 +50,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.NightlightRound
+import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
@@ -88,6 +90,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
@@ -150,6 +153,7 @@ import com.phyll.filmhub.ui.components.ChillGestureFeedback
 import com.phyll.filmhub.ui.components.ChillPlayerMenu
 import com.phyll.filmhub.ui.components.ChillPlayerMenuOverlay
 import com.phyll.filmhub.ui.components.ThaiCinemaSubtitleOverlay
+import com.phyll.filmhub.ui.i18n.LocalAppStrings
 import com.phyll.filmhub.ui.theme.AmberBoost
 import com.phyll.filmhub.ui.theme.BrandEmeraldVioletBrush
 import com.phyll.filmhub.ui.theme.BrandNeonGlassBorderBrush
@@ -187,6 +191,8 @@ fun PlayerScreen(
     seriesProfile: SeriesSubtitleProfile? = null,
     remoteCommand: PlayerRemoteCommand? = null,
     isTvHardware: Boolean = false,
+    isMinimized: Boolean = false,
+    modifier: Modifier = Modifier,
     onSaveGeminiKeyInline: (String, String) -> Unit = { _, _ -> },
     onConsumeRemoteCommand: (Long) -> Unit = {},
     onReportTelemetry: (CompanionPlayerTelemetry) -> Unit = {},
@@ -201,6 +207,8 @@ fun PlayerScreen(
     onOpenQrCompanion: () -> Unit,
     onBeforeLaunchSystemOverlay: () -> Unit = {},
     onAfterSystemOverlayResult: () -> Unit = {},
+    onMinimizePlayer: () -> Unit = {},
+    onRestorePlayer: () -> Unit = {},
     onExitPlayer: () -> Unit
 ) {
     val context = LocalContext.current
@@ -209,6 +217,7 @@ fun PlayerScreen(
     val configuration = LocalConfiguration.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val isTv = LocalIsTvMode.current
+    val strings = LocalAppStrings.current
     val playerScope = rememberCoroutineScope()
 
     var showControls by remember { mutableStateOf(true) }
@@ -455,9 +464,10 @@ fun PlayerScreen(
         }
     }
 
-    // Re-enforce true edge-to-edge immersive fullscreen on every orientation/HUD state change
-    // so Android notification bar, clock, battery, and nav bar NEVER linger in landscape or portrait!
+    // Re-enforce true edge-to-edge immersive fullscreen ONLY when expanded;
+    // when minimized into the bottom-right pop-out, immediately restore normal system bars & portrait freedom!
     LaunchedEffect(
+        isMinimized,
         configuration.orientation,
         isLandscapeRotated,
         showControls,
@@ -465,13 +475,27 @@ fun PlayerScreen(
         showSubtitleDrawer,
         activeChillMenu
     ) {
-        applyImmersiveFullscreen(true)
+        if (isMinimized) {
+            applyImmersiveFullscreen(false)
+            showSubtitleDrawer = false
+            showFastSnapModal = false
+            activeChillMenu = ChillPlayerMenu.NONE
+            isLocked = false
+            if (isLandscapeRotated) {
+                isLandscapeRotated = false
+            }
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        } else {
+            applyImmersiveFullscreen(true)
+        }
     }
 
     DisposableEffect(Unit) {
         val window = activity?.window
         window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        applyImmersiveFullscreen(true)
+        if (!isMinimized) {
+            applyImmersiveFullscreen(true)
+        }
         onDispose {
             applyImmersiveFullscreen(false)
             window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -495,7 +519,7 @@ fun PlayerScreen(
                 if (posNow > 2_000L) {
                     onSaveProgress(posNow, durNow)
                 }
-            } else if (event == Lifecycle.Event.ON_RESUME) {
+            } else if (event == Lifecycle.Event.ON_RESUME && !isMinimized) {
                 applyImmersiveFullscreen(true)
             }
         }
@@ -568,7 +592,7 @@ fun PlayerScreen(
                             exoPlayer.seekTo(safeTarget)
                         }
                         positionMs = safeTarget
-                        resumeNoticeText = "▶ Tiếp tục xem từ ${formatDurationMs(safeTarget)}"
+                        resumeNoticeText = strings.resumeFromFmt.format(formatDurationMs(safeTarget))
                     }
                     if (exoPlayer.audioSessionId > 0) {
                         chillAudioEffects.attachToSession(exoPlayer.audioSessionId, volumeScale, equalizerPreset)
@@ -930,8 +954,8 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(showControls, showSubtitleDrawer, showFastSnapModal, isPreFlightBlocking) {
-        if (!showSubtitleDrawer && !showFastSnapModal && !isPreFlightBlocking) {
+    LaunchedEffect(isMinimized, showControls, showSubtitleDrawer, showFastSnapModal, isPreFlightBlocking) {
+        if (!isMinimized && !showSubtitleDrawer && !showFastSnapModal && !isPreFlightBlocking) {
             runCatching { view.requestFocusFromTouch() }
             if (showControls && !isLocked) {
                 runCatching { playPauseFocusRequester.requestFocus() }
@@ -941,7 +965,7 @@ fun PlayerScreen(
         }
     }
 
-    BackHandler {
+    BackHandler(enabled = !isMinimized) {
         when {
             isLocked -> {
                 lockHintVisible = true
@@ -953,18 +977,30 @@ fun PlayerScreen(
             showFastSnapModal -> closeFastSnapModal(resumeIfWasPlaying = true)
             showSubtitleDrawer -> showSubtitleDrawer = false
             isPreFlightBlocking -> onExitPlayer()
-            showControls -> showControls = false
             else -> {
                 val finalPos = maxOf(exoPlayer.currentPosition.coerceAtLeast(0L), positionMs)
                 val finalDur = maxOf(exoPlayer.duration.coerceAtLeast(0L), durationMs)
                 if (finalPos > 2_000L) onSaveProgress(finalPos, finalDur)
-                onExitPlayer()
+                onMinimizePlayer()
             }
         }
     }
 
-    Box(
-        modifier = Modifier
+    val containerModifier = if (isMinimized) {
+        modifier
+            .navigationBarsPadding()
+            .padding(end = 12.dp, bottom = 84.dp)
+            .width(if (isTv) 264.dp else 192.dp)
+            .aspectRatio(16f / 9f)
+            .shadow(18.dp, RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(14.dp))
+            .border(1.5.dp, BrandNeonGlassBorderBrush, RoundedCornerShape(14.dp))
+            .background(Color.Black)
+            .pointerInput(Unit) {
+                detectTapGestures(onTap = { onRestorePlayer() })
+            }
+    } else {
+        modifier
             .fillMaxSize()
             .background(Color.Black)
             .onSizeChanged { viewportSize = it }
@@ -1162,9 +1198,11 @@ fun PlayerScreen(
                     }
                 )
             }
-    ) {
-        // 1. Hardware Video Surface (supports Chill-Player Aspect Ratios)
-        val enforced = aspectRatioMode.enforcedRatio
+    }
+
+    Box(modifier = containerModifier) {
+        // 1. Hardware Video Surface (SAME AndroidView in both Fullscreen & Bottom-Right Pop-out -> ZERO reload!)
+        val enforced = if (isMinimized) null else aspectRatioMode.enforcedRatio
         val videoSurfaceModifier = if (enforced != null) {
             Modifier.align(Alignment.Center).fillMaxWidth().aspectRatio(enforced)
         } else {
@@ -1191,13 +1229,120 @@ fun PlayerScreen(
             modifier = videoSurfaceModifier
         )
 
-        // 2. Anti-Overlap Framed Thai Subtitle Overlay
-        if (!isPreFlightBlocking) {
+        // 2. Anti-Overlap Framed Subtitle Overlay (Expanded mode)
+        if (!isMinimized && !isPreFlightBlocking) {
             ThaiCinemaSubtitleOverlay(
                 renderState = renderState,
                 config = subtitleConfig,
                 previewSampleWhenEmpty = showSubtitleDrawer
             )
+        }
+
+        // 2b. Floating Bottom-Right Pop-out Mini-Player Controls (Tap to expand, X to close!)
+        if (isMinimized) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                Color(0x6606070D),
+                                Color.Transparent,
+                                Color(0xCC06070D)
+                            )
+                        )
+                    )
+            ) {
+                // Top-right explicit X Close button (ONLY way to completely shut down the Pop-out!)
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(6.dp)
+                        .size(26.dp)
+                        .tvFocusableClickable(
+                            shape = CircleShape,
+                            focusedBorderColor = LiveRed,
+                            unfocusedBorderColor = Color.White.copy(alpha = 0.35f),
+                            onClick = {
+                                val finalPos = maxOf(exoPlayer.currentPosition.coerceAtLeast(0L), positionMs)
+                                val finalDur = maxOf(exoPlayer.duration.coerceAtLeast(0L), durationMs)
+                                if (finalPos > 2_000L) onSaveProgress(finalPos, finalDur)
+                                onExitPlayer()
+                            }
+                        )
+                        .background(Color(0xCC0D1120)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = strings.miniCloseDesc,
+                        tint = Color.White,
+                        modifier = Modifier.size(15.dp)
+                    )
+                }
+
+                // Bottom mini bar: Movie title + Play/Pause + Expand
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .padding(horizontal = 7.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    Text(
+                        text = movie.title,
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+
+                    Box(
+                        modifier = Modifier
+                            .size(24.dp)
+                            .tvFocusableClickable(
+                                shape = CircleShape,
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = Color.White.copy(alpha = 0.25f),
+                                onClick = {
+                                    if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+                                }
+                            )
+                            .background(Color(0xB80F1220)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            contentDescription = null,
+                            tint = EmeraldNeon,
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .size(24.dp)
+                            .tvFocusableClickable(
+                                shape = CircleShape,
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = Color.White.copy(alpha = 0.25f),
+                                onClick = onRestorePlayer
+                            )
+                            .background(Color(0xB80F1220)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.OpenInFull,
+                            contentDescription = strings.miniExpandDesc,
+                            tint = Color.White,
+                            modifier = Modifier.size(13.dp)
+                        )
+                    }
+                }
+            }
         }
 
         // 3. Buffering Spinner (only shown after Pre-Flight finishes)
@@ -1206,12 +1351,12 @@ fun PlayerScreen(
                 color = ThaiGold,
                 modifier = Modifier
                     .align(Alignment.Center)
-                    .size(48.dp)
+                    .size(if (isMinimized) 26.dp else 48.dp)
             )
         }
 
         // 4. PRE-FLIGHT SUBTITLE LOADER & GUARANTEE GATE (Before Video Starts!)
-        if (isPreFlightBlocking) {
+        if (!isMinimized && isPreFlightBlocking) {
             PreFlightSubtitleGateOverlay(
                 movie = movie,
                 episode = episode,
@@ -1260,31 +1405,33 @@ fun PlayerScreen(
             )
         }
 
-        playerError?.let { errMsg ->
-            Column(
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(CinemaObsidian.copy(alpha = 0.94f))
-                    .padding(22.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(text = errMsg, color = LiveRed, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                Spacer(modifier = Modifier.height(12.dp))
-                Box(
+        if (!isMinimized) {
+            playerError?.let { errMsg ->
+                Column(
                     modifier = Modifier
-                        .tvFocusableClickable(shape = RoundedCornerShape(8.dp), onClick = onExitPlayer)
-                        .background(ThaiGold)
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .align(Alignment.Center)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(CinemaObsidian.copy(alpha = 0.94f))
+                        .padding(22.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Text(text = "Quay lại chọn nguồn khác", color = CinemaObsidian, fontWeight = FontWeight.Bold)
+                    Text(text = errMsg, color = LiveRed, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Box(
+                        modifier = Modifier
+                            .tvFocusableClickable(shape = RoundedCornerShape(8.dp), onClick = onExitPlayer)
+                            .background(ThaiGold)
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                    ) {
+                        Text(text = strings.backToChooseSource, color = CinemaObsidian, fontWeight = FontWeight.Bold)
+                    }
                 }
             }
         }
 
         // 5. Minimalist, 100% Overflow-Proof 2026 Cinema HUD (Portrait Phone, Landscape Phone, Tablet & TV)
         AnimatedVisibility(
-            visible = showControls && !isLocked && !showSubtitleDrawer && !showFastSnapModal && !isPreFlightBlocking && activeChillMenu == ChillPlayerMenu.NONE,
+            visible = !isMinimized && showControls && !isLocked && !showSubtitleDrawer && !showFastSnapModal && !isPreFlightBlocking && activeChillMenu == ChillPlayerMenu.NONE,
             enter = fadeIn(),
             exit = fadeOut()
         ) {
@@ -1303,7 +1450,7 @@ fun PlayerScreen(
                         )
                     )
             ) {
-                // 5a. Clean Floating Top Bar (Back + Title + Max 3 Compact Actions — True Edge-to-Edge Fullscreen)
+                // 5a. Clean Floating Top Bar (Back -> Pop-out Mini-Player + Title + Max 3 Compact Actions)
                 Row(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
@@ -1328,7 +1475,7 @@ fun PlayerScreen(
                                         val finalPos = maxOf(exoPlayer.currentPosition.coerceAtLeast(0L), positionMs)
                                         val finalDur = maxOf(exoPlayer.duration.coerceAtLeast(0L), durationMs)
                                         if (finalPos > 2_000L) onSaveProgress(finalPos, finalDur)
-                                        onExitPlayer()
+                                        onMinimizePlayer()
                                     }
                                 )
                                 .background(CinemaGlass),
@@ -1336,7 +1483,7 @@ fun PlayerScreen(
                         ) {
                             Icon(
                                 Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "Thoát",
+                                contentDescription = strings.backBtn,
                                 tint = TextPrimary,
                                 modifier = Modifier.size(19.dp)
                             )
@@ -1557,7 +1704,7 @@ fun PlayerScreen(
                     ) {
                         BottomHudActionChip(
                             icon = Icons.Default.Lock,
-                            label = "Khóa",
+                            label = strings.lockBtn,
                             tint = TextPrimary,
                             modifier = Modifier.weight(1f),
                             onClick = {
@@ -1583,7 +1730,7 @@ fun PlayerScreen(
                             icon = Icons.Default.Sync,
                             label = if (subtitleConfig.syncOffsetMs != 0L) {
                                 "%+.1fs".format(subtitleConfig.syncOffsetMs / 1000.0)
-                            } else "Khớp Sub",
+                            } else strings.syncSubBtn,
                             tint = EmeraldNeon,
                             modifier = Modifier.weight(1f),
                             onClick = {
@@ -1595,7 +1742,7 @@ fun PlayerScreen(
                         if (nextEpisode != null) {
                             BottomHudActionChip(
                                 icon = Icons.Default.SkipNext,
-                                label = "Tập sau",
+                                label = strings.nextEpBtn,
                                 tint = EmeraldNeon,
                                 modifier = Modifier.weight(1f),
                                 onClick = {
@@ -1608,7 +1755,7 @@ fun PlayerScreen(
                         } else {
                             BottomHudActionChip(
                                 icon = Icons.Default.AspectRatio,
-                                label = aspectRatioMode.displayName.substringBefore(" "),
+                                label = strings.aspectBtn,
                                 tint = TextPrimary,
                                 modifier = Modifier.weight(1f),
                                 onClick = {
@@ -1622,8 +1769,8 @@ fun PlayerScreen(
             }
         }
 
-        // 5a. Chill-Player Edge Lock, Gesture Bars & Double-Tap Ripples (ALWAYS active above HUD)
-        if (!isPreFlightBlocking && !showFastSnapModal && !showSubtitleDrawer) {
+        // 5a. Chill-Player Edge Lock, Gesture Bars & Double-Tap Ripples (ALWAYS active above HUD when expanded)
+        if (!isMinimized && !isPreFlightBlocking && !showFastSnapModal && !showSubtitleDrawer) {
             ChillGestureAndLockOverlay(
                 isLocked = isLocked,
                 showControls = showControls,
@@ -1719,9 +1866,9 @@ fun PlayerScreen(
             )
         }
 
-        // Auto-Resume Toast Pill ("▶ Tiếp tục xem từ MM:SS")
+        // Auto-Resume Toast Pill
         AnimatedVisibility(
-            visible = resumeNoticeText != null && autoSyncFeedback == null && !isPreFlightBlocking,
+            visible = !isMinimized && resumeNoticeText != null && autoSyncFeedback == null && !isPreFlightBlocking,
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier
@@ -1746,7 +1893,7 @@ fun PlayerScreen(
 
         // Auto-Sync Toast Feedback Pill (visible even when OSD controls auto-hide!)
         AnimatedVisibility(
-            visible = autoSyncFeedback != null && !isPreFlightBlocking,
+            visible = !isMinimized && autoSyncFeedback != null && !isPreFlightBlocking,
             enter = fadeIn(),
             exit = fadeOut(),
             modifier = Modifier
@@ -1770,7 +1917,7 @@ fun PlayerScreen(
         }
 
         // 5b. Pause-Locked 3-Second Bilingual Cue Snap Modal (TV Remote 1-Click Sync + Series Memory)
-        if (showFastSnapModal && !isPreFlightBlocking) {
+        if (!isMinimized && showFastSnapModal && !isPreFlightBlocking) {
             val bilingualSnapCues = remember(
                 snapAnchorMovieMs,
                 selectedTrackId,
@@ -1851,8 +1998,8 @@ fun PlayerScreen(
             )
         }
 
-        // 6. Live Thai Subtitle Customization Drawer
-        if (showSubtitleDrawer) {
+        // 6. Live Subtitle Customization Drawer
+        if (!isMinimized && showSubtitleDrawer) {
             val nearbySnapCues = remember(
                 positionMs,
                 selectedTrackId,

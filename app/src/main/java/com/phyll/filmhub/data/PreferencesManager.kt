@@ -16,6 +16,7 @@ import com.phyll.filmhub.model.SubtitleStyleConfig
 import com.phyll.filmhub.model.TranslationEngineMode
 import com.phyll.filmhub.model.VodProviderConfig
 import com.phyll.filmhub.model.WatchProgress
+import com.phyll.filmhub.ui.i18n.AppLanguage
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -75,6 +76,14 @@ class PreferencesManager(context: Context) {
 
     private val _deviceUiMode = MutableStateFlow(loadDeviceUiMode())
     val deviceUiMode: StateFlow<DeviceUiMode> = _deviceUiMode.asStateFlow()
+
+    private val _appLanguage = MutableStateFlow(loadAppLanguage())
+    val appLanguage: StateFlow<AppLanguage> = _appLanguage.asStateFlow()
+
+    fun setAppLanguage(language: AppLanguage) {
+        _appLanguage.value = language
+        prefs.edit().putString(KEY_APP_UI_LANGUAGE, language.code).commit()
+    }
 
     private val _watchHistory = MutableStateFlow(loadWatchHistory())
     val watchHistory: StateFlow<List<WatchProgress>> = _watchHistory.asStateFlow()
@@ -543,6 +552,10 @@ class PreferencesManager(context: Context) {
         return prefs.getString(KEY_SELECTED_TV_IP, null)?.trim()?.takeIf { it.isNotEmpty() }
     }
 
+    private fun loadAppLanguage(): AppLanguage {
+        return AppLanguage.fromCode(prefs.getString(KEY_APP_UI_LANGUAGE, AppLanguage.EN.code))
+    }
+
     private fun loadControlTargetMode(): ControlTargetMode {
         // Standalone cinema-first default: play directly on the user's phone/tablet unless they explicitly cast to TV!
         return ControlTargetMode.LOCAL_DEVICE
@@ -578,6 +591,7 @@ class PreferencesManager(context: Context) {
         private const val KEY_CONTROL_TARGET_MODE = "control_target_mode_v1"
         private const val KEY_PROMPT_QR_ON_STARTUP = "prompt_qr_on_startup_v1"
         private const val KEY_UI_MODE_V25 = "device_ui_mode_v25"
+        private const val KEY_APP_UI_LANGUAGE = "app_ui_language_v1"
         private const val KEY_WATCH_HISTORY = "watch_history_v1"
         private const val KEY_EPISODE_RESUME_MAP = "episode_resume_map_v1"
         private const val KEY_FAVORITES = "favorite_movie_ids"

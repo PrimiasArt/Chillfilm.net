@@ -20,7 +20,7 @@
       ]
     },
     {
-      "source": "/(app\\.js|subtitles\\.js|styles\\.css)",
+      "source": "/(app\\.js|subtitles\\.js|i18n\\.js|styles\\.css)",
       "headers": [
         { "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }
       ]

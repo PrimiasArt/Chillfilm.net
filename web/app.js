@@ -9,26 +9,28 @@ import {
   loadCachedEpisodeSub,
   saveCachedEpisodeSub,
 } from './subtitles.js';
+import { UI_LANGUAGES, resolveUiLang, t } from './i18n.js';
 
 const PHIM_API = 'https://phimapi.com';
 const PHIM_CDN = 'https://phimimg.com';
 const APK_RELEASE_URL = 'https://github.com/PrimiasArt/Chillfilm.net/releases/download/android-apk-latest/ChillFilm-latest.apk';
 
 const CATEGORIES = [
-  { id: 'hot', label: 'Mới & Hot', url: `${PHIM_API}/danh-sach/phim-moi-cap-nhat?page=1` },
-  { id: 'phim-le', label: 'Phim Lẻ', url: `${PHIM_API}/v1/api/danh-sach/phim-le?page=1&limit=24` },
-  { id: 'phim-bo', label: 'Phim Bộ', url: `${PHIM_API}/v1/api/danh-sach/phim-bo?page=1&limit=24` },
-  { id: 'hoat-hinh', label: 'Hoạt Hình', url: `${PHIM_API}/v1/api/danh-sach/hoat-hinh?page=1&limit=24` },
-  { id: 'han-quoc', label: 'Hàn Quốc', url: `${PHIM_API}/v1/api/quoc-gia/han-quoc?page=1&limit=24` },
-  { id: 'au-my', label: 'Âu Mỹ', url: `${PHIM_API}/v1/api/quoc-gia/au-my?page=1&limit=24` },
-  { id: 'trung-quoc', label: 'Trung Quốc', url: `${PHIM_API}/v1/api/quoc-gia/trung-quoc?page=1&limit=24` },
-  { id: 'thai-lan', label: 'Thái Lan', url: `${PHIM_API}/v1/api/quoc-gia/thai-lan?page=1&limit=24` },
-  { id: 'nhat-ban', label: 'Nhật Bản', url: `${PHIM_API}/v1/api/quoc-gia/nhat-ban?page=1&limit=24` },
+  { id: 'hot', label: 'Trending', url: `${PHIM_API}/danh-sach/phim-moi-cap-nhat?page=1` },
+  { id: 'phim-le', label: 'Movies', url: `${PHIM_API}/v1/api/danh-sach/phim-le?page=1&limit=24` },
+  { id: 'phim-bo', label: 'TV Series', url: `${PHIM_API}/v1/api/danh-sach/phim-bo?page=1&limit=24` },
+  { id: 'hoat-hinh', label: 'Animation', url: `${PHIM_API}/v1/api/danh-sach/hoat-hinh?page=1&limit=24` },
+  { id: 'han-quoc', label: 'Korean', url: `${PHIM_API}/v1/api/quoc-gia/han-quoc?page=1&limit=24` },
+  { id: 'au-my', label: 'US / UK', url: `${PHIM_API}/v1/api/quoc-gia/au-my?page=1&limit=24` },
+  { id: 'trung-quoc', label: 'Chinese', url: `${PHIM_API}/v1/api/quoc-gia/trung-quoc?page=1&limit=24` },
+  { id: 'thai-lan', label: 'Thai', url: `${PHIM_API}/v1/api/quoc-gia/thai-lan?page=1&limit=24` },
+  { id: 'nhat-ban', label: 'Japanese', url: `${PHIM_API}/v1/api/quoc-gia/nhat-ban?page=1&limit=24` },
 ];
 
 const DEFAULT_PREFS = {
-  primaryLang: 'vi',
-  secondaryLang: 'en',
+  uiLang: 'en',
+  primaryLang: 'en',
+  secondaryLang: 'vi',
   dualSub: false,
   subEnabled: true,
   primarySize: 22,
@@ -61,6 +63,7 @@ const state = {
   sleepTimerId: null,
   sleepMinutes: null,
   isLocked: false,
+  isMinimized: false,
   controlsVisible: true,
   controlsTimer: null,
   // Subtitles & Resume
@@ -72,12 +75,130 @@ const state = {
   lastSubSourceLang: 'auto',
   lastSubTrackLabel: '',
   subTranslationRunId: 0,
-  subStatusText: 'AI Sub sẵn sàng',
+  subStatusText: 'AI Sub ready',
   pendingSeekSec: 0,
   lastSavedPosTs: 0,
 };
 
 const $ = (id) => document.getElementById(id);
+const tr = (key, vars) => t(state.prefs.uiLang, key, vars);
+
+function getCategoryLabel(catId) {
+  return tr(`cat_${catId}`);
+}
+
+function renderLangMenu() {
+  const cur = resolveUiLang(state.prefs.uiLang);
+  const curObj = UI_LANGUAGES.find((l) => l.code === cur) || UI_LANGUAGES[0];
+  if ($('langBadgeText')) $('langBadgeText').textContent = curObj.badge;
+  const menu = $('langMenu');
+  if (!menu) return;
+  menu.innerHTML = '';
+  UI_LANGUAGES.forEach((l) => {
+    const btn = document.createElement('button');
+    btn.className = `lang-opt ${l.code === cur ? 'active' : ''}`;
+    btn.innerHTML = `<span>${l.name}</span><span style="opacity:.85;font-size:11px;">${l.badge}</span>`;
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      setUiLanguage(l.code);
+      menu.classList.remove('open');
+      $('langSwitchBtn')?.classList.remove('open');
+    };
+    menu.appendChild(btn);
+  });
+}
+
+function setUiLanguage(code) {
+  state.prefs.uiLang = resolveUiLang(code);
+  savePrefs();
+  applyUiTranslations();
+  renderCategories();
+  if (state.movies.length) renderHero(state.movies[0]);
+  if ($('detailView').classList.contains('active') && state.currentMovie) {
+    renderDetailView(state.currentMovie);
+  }
+  const cat = CATEGORIES.find((c) => c.id === state.activeCategory);
+  if (cat && !$('searchInputDesktop').value.trim()) {
+    $('catalogTitle').textContent = getCategoryLabel(cat.id);
+  }
+}
+
+function applyUiTranslations() {
+  document.documentElement.lang = resolveUiLang(state.prefs.uiLang);
+  renderLangMenu();
+  const setText = (id, key, vars) => { const el = $(id); if (el) el.textContent = tr(key, vars); };
+  const setHtml = (id, key, vars) => { const el = $(id); if (el) el.innerHTML = tr(key, vars); };
+
+  if ($('searchInputDesktop')) $('searchInputDesktop').placeholder = tr('searchPlaceholder');
+  if ($('searchInputMobile')) $('searchInputMobile').placeholder = tr('searchPlaceholderMobile');
+  setText('searchBtnDesktop', 'searchBtn');
+  setText('searchBtnMobile', 'searchBtn');
+  setText('continueSectionTitle', 'continueWatching');
+  setHtml('footerTagline', 'footerTagline');
+  setText('footerApkLink', 'downloadApk');
+  setText('hudLockBtn', 'lockBtn');
+  const isFs = Boolean(document.fullscreenElement || document.webkitFullscreenElement);
+  setText('hudFsBtn', isFs ? 'exitFsBtn' : 'fullscreenBtn');
+  if ($('miniExpandBtn')) $('miniExpandBtn').title = tr('miniExpandTitle');
+  if ($('miniCloseBtn')) $('miniCloseBtn').title = tr('miniCloseTitle');
+
+  // Subtitle modal
+  setText('subModalTitle', 'subModalTitle');
+  setText('subEnableLabel', 'enableSub');
+  setText('dualSubLabel', 'dualSub');
+  setText('primaryLangLabel', 'primaryLangLabel');
+  if ($('customLangInput')) $('customLangInput').placeholder = tr('customLangPlaceholder');
+  setText('applyCustomLangBtn', 'applyBtn');
+  setText('secondaryLangLabel', 'secondaryLangLabel');
+  setText('onlineTrackLabel', 'onlineTrackLabel');
+  setText('uploadSubLabel', 'uploadSubBtn');
+  setText('syncLabel', 'syncLabel');
+  setText('syncResetBtn', 'syncReset');
+  setText('primarySizeLabelText', 'primarySizeLabel');
+  setText('secondarySizeLabelText', 'secondarySizeLabel');
+
+  // More modal
+  setText('moreModalTitle', 'moreModalTitle');
+  setText('boostLabelText', 'boostLabel');
+  setText('eqLabelText', 'eqLabel');
+  setText('eqFlatBtn', 'eqFlat');
+  setText('eqBassBtn', 'eqBass');
+  setText('eqVocalBtn', 'eqVocal');
+  setText('eqMovieBtn', 'eqMovie');
+  setText('speedLabelText', 'speedLabel');
+  setText('aspectLabelText', 'aspectLabel');
+  setText('aspectFitBtn', 'aspectFit');
+  setText('aspectFillBtn', 'aspectFill');
+  setText('aspectStretchBtn', 'aspectStretch');
+  setText('sleepLabelText', 'sleepLabel');
+  setText('sleepOffBtn', 'sleepOff');
+  document.querySelectorAll('[data-sleep]').forEach((b) => {
+    const mins = Number(b.dataset.sleep);
+    if (mins > 0) b.textContent = tr('sleepMin', { m: mins });
+  });
+  setText('pipBtn', 'pipBtn');
+
+  // Settings & TV Cast modals
+  setText('settingsTitle', 'settingsTitle');
+  setHtml('settingsPrivacyBox', 'settingsPrivacy');
+  setText('uiLangLabelText', 'uiLangLabel');
+  setText('defaultSubLangLabelText', 'defaultSubLangLabel');
+  setText('geminiKeyLabelText', 'geminiKeyLabel');
+  setText('geminiModelLabelText', 'geminiModelLabel');
+  setText('saveSettingsBtn', 'saveSettingsBtn');
+  setText('directStreamLabelText', 'directStreamLabel');
+  if ($('directUrlInput')) $('directUrlInput').placeholder = tr('directUrlPlaceholder');
+  if ($('directTitleInput')) $('directTitleInput').placeholder = tr('directTitlePlaceholder');
+  setText('playDirectBtn', 'playLinkBtn');
+  setText('openVideoLabelText', 'openVideoBtn');
+  setText('tvModalTitle', 'tvModalTitle');
+  setHtml('tvModalInfoBox', 'tvModalInfo');
+  setText('tvIpLabelText', 'tvIpLabel');
+  setText('saveTvIpBtn', 'saveIpBtn');
+  setText('tvRemoteLabelText', 'tvRemoteLabel');
+  setText('syncKeyToTvBtn', 'syncKeyToTvBtn');
+  setText('apkDownloadBtn', 'downloadApkModalBtn');
+}
 const EP_POS_STORAGE_KEY = 'chillfilm_nki_ep_pos_v1';
 
 function loadPrefs() {
@@ -222,7 +343,7 @@ async function loadCategory(catId) {
   state.activeCategory = catId;
   renderCategories();
   closeDetailView();
-  $('catalogGrid').innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:42px;color:#9ca3af;">Đang tải kho phim ChillFilm...</div>';
+  $('catalogGrid').innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:42px;color:#9ca3af;">${escapeHtml(tr('loadingCatalog'))}</div>`;
 
   const cat = CATEGORIES.find((c) => c.id === catId) || CATEGORIES[0];
   try {
@@ -241,9 +362,9 @@ async function loadCategory(catId) {
     }));
     renderHero(state.movies[0]);
     renderHistorySection();
-    renderMovieGrid(state.movies, cat.label);
+    renderMovieGrid(state.movies, getCategoryLabel(cat.id));
   } catch (e) {
-    $('catalogGrid').innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:36px;color:#fca5a5;">Không tải được danh sách phim. Hãy thử làm mới lại trang!</div>`;
+    $('catalogGrid').innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:36px;color:#fca5a5;">${escapeHtml(tr('loadError'))}</div>`;
   }
 }
 
@@ -256,8 +377,8 @@ async function executeSearch(keyword) {
   closeDetailView();
   $('heroBox').style.display = 'none';
   $('historySection').style.display = 'none';
-  $('catalogTitle').textContent = `Kết quả tìm kiếm: "${q}"`;
-  $('catalogGrid').innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:42px;color:#9ca3af;">Đang tìm phim...</div>';
+  $('catalogTitle').textContent = tr('searchResultsTitle', { q, n: '...' });
+  $('catalogGrid').innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:42px;color:#9ca3af;">${escapeHtml(tr('loadingCatalog'))}</div>`;
 
   try {
     const res = await fetch(`${PHIM_API}/v1/api/tim-kiem?keyword=${encodeURIComponent(q)}&limit=24`);
@@ -273,9 +394,9 @@ async function executeSearch(keyword) {
       poster: normalizeImage(m.poster_url || m.thumb_url),
       backdrop: normalizeImage(m.thumb_url || m.poster_url),
     }));
-    renderMovieGrid(list, `Kết quả cho "${q}" (${list.length})`);
+    renderMovieGrid(list, tr('searchResultsTitle', { q, n: list.length }));
   } catch {
-    showToast('Lỗi tìm kiếm phim!');
+    showToast(tr('loadError'));
   }
 }
 
@@ -285,7 +406,7 @@ function renderCategories() {
   CATEGORIES.forEach((c) => {
     const btn = document.createElement('button');
     btn.className = `cat-chip ${state.activeCategory === c.id ? 'active' : ''}`;
-    btn.textContent = c.label;
+    btn.textContent = getCategoryLabel(c.id);
     btn.onclick = () => {
       $('searchInputDesktop').value = '';
       $('searchInputMobile').value = '';
@@ -308,14 +429,14 @@ function renderHero(movie) {
     <div class="hero-overlay"></div>
     <div class="hero-content">
       <div class="hero-meta">
-        <span class="badge-ai">AI SUB • ${lang.badge} & ĐA NGÔN NGỮ</span>
+        <span class="badge-ai">${escapeHtml(tr('heroBadge', { lang: lang.badge }))}</span>
         <span style="font-size:12px;color:#c084fc;font-weight:700;">${escapeHtml(movie.year || '2026')} • ${escapeHtml(movie.quality)}</span>
       </div>
       <h1 class="hero-title">${escapeHtml(movie.name)}</h1>
-      <p class="hero-sub">${escapeHtml(movie.origin_name || 'Xem trực tiếp trên trình duyệt PC, điện thoại hoặc truyền lên TV — hỗ trợ dịch phụ đề mọi ngôn ngữ AI.')}</p>
+      <p class="hero-sub">${escapeHtml(movie.origin_name || tr('heroDefaultDesc'))}</p>
       <div class="hero-actions">
-        <button class="btn-grad" id="heroPlayBtn">▶ Xem Ngay</button>
-        <button class="btn-glass" id="heroDetailBtn">Chi Tiết & Tập</button>
+        <button class="btn-grad" id="heroPlayBtn">${escapeHtml(tr('watchNow'))}</button>
+        <button class="btn-glass" id="heroDetailBtn">${escapeHtml(tr('detailsBtn'))}</button>
       </div>
     </div>
   `;
@@ -440,14 +561,14 @@ function renderDetailView(detail) {
     : firstEp;
   const resumeSec = resumeEp ? getSavedEpisodePosition(detail.slug, resumeEp) : 0;
   const primaryBtnLabel = resumeEp && resumeSec > 5
-    ? `▶ Tiếp Tục (${escapeHtml(resumeEp.name)} • ${formatTime(resumeSec)})`
-    : (firstEp ? `▶ Xem Ngay (${escapeHtml(firstEp.name)})` : '');
+    ? tr('continueEp', { ep: resumeEp.name, time: formatTime(resumeSec) })
+    : (firstEp ? tr('watchNowEp', { ep: firstEp.name }) : '');
   const lang = resolveLanguage(state.prefs.primaryLang);
 
   dv.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
-      <button class="btn-glass" id="detailBackBtn">← Quay lại kho phim</button>
-      ${resumeEp ? `<button class="btn-glass" id="detailCastBtn">📡 Phát lên TV</button>` : ''}
+      <button class="btn-glass" id="detailBackBtn">${escapeHtml(tr('backToCatalog'))}</button>
+      ${resumeEp ? `<button class="btn-glass" id="detailCastBtn">${escapeHtml(tr('castToTv'))}</button>` : ''}
     </div>
     <div class="detail-hero">
       <img class="detail-poster" src="${detail.poster}" alt="${escapeHtml(detail.name)}" />
@@ -458,9 +579,9 @@ function renderDetailView(detail) {
         </div>
         <h2 style="font-size:clamp(18px,3vw,28px);font-weight:900;">${escapeHtml(detail.name)}</h2>
         ${detail.origin_name ? `<div style="font-size:13px;color:#9ca3af;">${escapeHtml(detail.origin_name)}</div>` : ''}
-        <p style="font-size:13px;color:#cbd5e1;line-height:1.6;">${escapeHtml(detail.content || 'Hỗ trợ phát trực tiếp FHD kèm phụ đề AI đa ngôn ngữ.')}</p>
+        <p style="font-size:13px;color:#cbd5e1;line-height:1.6;">${escapeHtml(detail.content || tr('heroDefaultDesc'))}</p>
         <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:6px;">
-          ${resumeEp ? `<button class="btn-grad" id="detailPlayPrimary">${primaryBtnLabel}</button>` : '<span style="color:#fca5a5;font-size:13px;">Chưa có luồng phát trực tiếp.</span>'}
+          ${resumeEp ? `<button class="btn-grad" id="detailPlayPrimary">${escapeHtml(primaryBtnLabel)}</button>` : `<span style="color:#fca5a5;font-size:13px;">${escapeHtml(tr('noStream'))}</span>`}
         </div>
       </div>
     </div>
@@ -477,7 +598,7 @@ function renderDetailView(detail) {
   detail.servers.forEach((srv) => {
     const block = document.createElement('div');
     block.style.marginBottom = '18px';
-    block.innerHTML = `<div class="section-title" style="margin-bottom:8px;">${escapeHtml(srv.server_name)} (${srv.episodes.length} tập)</div>`;
+    block.innerHTML = `<div class="section-title" style="margin-bottom:8px;">${escapeHtml(tr('episodesCount', { srv: srv.server_name, n: srv.episodes.length }))}</div>`;
     const grid = document.createElement('div');
     grid.className = 'ep-grid';
     srv.episodes.forEach((ep) => {
@@ -630,11 +751,14 @@ function openPlayer(movie, episode, startSec = 0) {
 
   const modal = $('playerModal');
   const video = $('videoEl');
+  state.isMinimized = false;
+  modal.classList.remove('minimized');
   modal.classList.add('open');
   document.body.style.overflow = 'hidden';
 
   $('hudMovieTitle').textContent = `${movie.name} • ${episode.name}`;
-  updateSubStatusBadge('Đang kiểm tra phụ đề đã lưu...');
+  if ($('miniTitle')) $('miniTitle').textContent = `${movie.name} • ${episode.name}`;
+  updateSubStatusBadge(tr('checkingSavedSub'));
   setControlsVisible(true);
 
   // Destroy previous HLS instance
@@ -655,7 +779,7 @@ function openPlayer(movie, episode, startSec = 0) {
       if (Math.abs((video.currentTime || 0) - target) > 1.5) {
         try { video.currentTime = target; } catch { /* retry on canplay */ }
       }
-      showGestureToast(`▶ Tiếp tục từ ${formatTime(target)}`);
+      showGestureToast(tr('resumingFrom', { time: formatTime(target) }));
     }
   };
 
@@ -705,7 +829,7 @@ function openPlayer(movie, episode, startSec = 0) {
   // Next episode button visibility
   const curIdx = state.episodesFlat.findIndex((e) => e.link_m3u8 === episode.link_m3u8);
   const nextEp = curIdx >= 0 && curIdx + 1 < state.episodesFlat.length ? state.episodesFlat[curIdx + 1] : null;
-  $('hudNextOrAspectBtn').textContent = nextEp ? '⏭ Tập sau' : '⬜ Tỉ lệ';
+  $('hudNextOrAspectBtn').textContent = nextEp ? tr('nextEpBtn') : tr('aspectBtn');
   $('hudNextOrAspectBtn').onclick = () => {
     if (nextEp) {
       persistCurrentPlaybackProgress();
@@ -717,6 +841,35 @@ function openPlayer(movie, episode, startSec = 0) {
 
   // Auto-discover (or instantly restore from IndexedDB!) subtitles into user's chosen AI language!
   autoLoadSubtitlesForMovie(movie, episode);
+}
+
+function minimizePlayer() {
+  const modal = $('playerModal');
+  if (!modal.classList.contains('open')) return;
+  persistCurrentPlaybackProgress();
+  renderHistorySection();
+  if ($('detailView').classList.contains('active') && state.currentMovie) {
+    renderDetailView(state.currentMovie);
+  }
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  else if (document.webkitFullscreenElement) document.webkitExitFullscreen?.();
+  try { screen.orientation?.unlock?.(); } catch { /* ignore */ }
+  state.isLocked = false;
+  state.isMinimized = true;
+  $('lockFab').classList.remove('visible');
+  modal.classList.add('minimized');
+  document.body.style.overflow = '';
+  const video = $('videoEl');
+  if ($('miniPlayBtn')) $('miniPlayBtn').textContent = video.paused ? '▶' : '⏸';
+}
+
+function restorePlayer() {
+  const modal = $('playerModal');
+  if (!modal.classList.contains('open')) return;
+  state.isMinimized = false;
+  modal.classList.remove('minimized');
+  document.body.style.overflow = 'hidden';
+  setControlsVisible(true);
 }
 
 function closePlayer() {
@@ -735,9 +888,10 @@ function closePlayer() {
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   else if (document.webkitFullscreenElement) document.webkitExitFullscreen?.();
   try { screen.orientation?.unlock?.(); } catch { /* ignore */ }
-  $('playerModal').classList.remove('open');
+  $('playerModal').classList.remove('open', 'minimized');
   document.body.style.overflow = '';
   state.isLocked = false;
+  state.isMinimized = false;
   $('lockFab').classList.remove('visible');
 }
 
@@ -1139,6 +1293,12 @@ function openMoreModal() {
 function openSettingsModal() {
   $('geminiKeyInput').value = state.prefs.geminiApiKey || '';
   $('geminiModelSelect').value = state.prefs.geminiModel || 'gemini-3-flash-preview';
+  if ($('uiLangSelect')) {
+    const curUi = resolveUiLang(state.prefs.uiLang);
+    $('uiLangSelect').innerHTML = UI_LANGUAGES.map(
+      (l) => `<option value="${l.code}" ${l.code === curUi ? 'selected' : ''}>${l.badge} — ${l.name}</option>`
+    ).join('');
+  }
   $('defaultLangSelect').innerHTML = SUBTITLE_LANGUAGES.map(
     (l) => `<option value="${l.code}" ${l.code === state.prefs.primaryLang ? 'selected' : ''}>${l.badge} — ${l.name} (${l.native})</option>`
   ).join('');
@@ -1169,8 +1329,20 @@ function showGestureToast(text) {
 
 /* ==================== BOOTSTRAP & EVENT WIRING ==================== */
 function init() {
+  applyUiTranslations();
   renderCategories();
   loadCategory('hot');
+
+  // Topbar Language Switcher Dropdown (EN / VI / TH / ZH / KO)
+  $('langSwitchBtn').onclick = (e) => {
+    e.stopPropagation();
+    const isOpen = $('langMenu').classList.toggle('open');
+    $('langSwitchBtn').classList.toggle('open', isOpen);
+  };
+  document.addEventListener('click', () => {
+    $('langMenu')?.classList.remove('open');
+    $('langSwitchBtn')?.classList.remove('open');
+  });
 
   // Topbar & Search
   $('brandHome').onclick = () => loadCategory('hot');
@@ -1207,9 +1379,23 @@ function init() {
     btn.onclick = () => $(btn.dataset.close).classList.remove('open');
   });
 
-  // Video & Player Controls
+  // Video & Player Controls (Back arrow -> Minimizes to Bottom-Right Pop-out; Explicit ✕ -> Closes!)
   const video = $('videoEl');
-  $('hudBackBtn').onclick = closePlayer;
+  $('hudBackBtn').onclick = minimizePlayer;
+  $('miniCloseBtn').onclick = (e) => {
+    e.stopPropagation();
+    closePlayer();
+  };
+  $('miniExpandBtn').onclick = (e) => {
+    e.stopPropagation();
+    restorePlayer();
+  };
+  $('miniPlayBtn').onclick = (e) => {
+    e.stopPropagation();
+    ensureWebAudioDsp(video);
+    if (video.paused) video.play().catch(() => {});
+    else video.pause();
+  };
   $('hudSubLangPill').onclick = openSubModal;
   $('hudMoreBtn').onclick = openMoreModal;
   $('hudCastBtn').onclick = () => {
@@ -1241,13 +1427,13 @@ function init() {
     state.isLocked = true;
     $('lockFab').classList.add('visible');
     setControlsVisible(false);
-    showGestureToast('🔒 Đã khóa màn hình');
+    showGestureToast(tr('lockedToast'));
   };
   $('lockFab').onclick = () => {
     state.isLocked = false;
     $('lockFab').classList.remove('visible');
     setControlsVisible(true);
-    showGestureToast('🔓 Đã mở khóa');
+    showGestureToast(tr('unlockedToast'));
   };
   $('hudSpeedBoostBtn').onclick = openMoreModal;
   $('hudFsBtn').onclick = () => togglePlayerFullscreen(false);
@@ -1256,7 +1442,7 @@ function init() {
   }
   const onFsChange = () => {
     const active = Boolean(document.fullscreenElement || document.webkitFullscreenElement);
-    $('hudFsBtn').textContent = active ? '⛶ Thoát' : '⛶ Toàn màn';
+    $('hudFsBtn').textContent = active ? tr('exitFsBtn') : tr('fullscreenBtn');
     $('playerModal').classList.toggle('is-fullscreen', active);
   };
   document.addEventListener('fullscreenchange', onFsChange);
@@ -1265,10 +1451,12 @@ function init() {
   // Seekbar, timeupdate (auto-save every 3s) & lifecycle save
   video.addEventListener('play', () => {
     $('playPauseBtn').textContent = '⏸';
+    if ($('miniPlayBtn')) $('miniPlayBtn').textContent = '⏸';
     setControlsVisible(true);
   });
   video.addEventListener('pause', () => {
     $('playPauseBtn').textContent = '▶';
+    if ($('miniPlayBtn')) $('miniPlayBtn').textContent = '▶';
     persistCurrentPlaybackProgress();
     setControlsVisible(true);
   });
@@ -1294,14 +1482,18 @@ function init() {
     setControlsVisible(true);
   });
 
-  // Tap & Swipe Gestures on Player Stage
+  // Tap & Swipe Gestures on Player Stage (Tap minimized pop-out -> Restore!)
   const stage = $('playerStage');
   let lastTap = 0;
   let touchStart = null;
   stage.addEventListener('click', (e) => {
+    if (state.isMinimized) {
+      restorePlayer();
+      return;
+    }
     if (e.target !== stage && e.target !== video) return;
     if (state.isLocked) {
-      showGestureToast('🔒 Chạm ổ khóa bên trái để mở');
+      showGestureToast(tr('tapLockHint'));
       return;
     }
     const now = Date.now();
@@ -1325,13 +1517,13 @@ function init() {
   });
 
   stage.addEventListener('touchstart', (e) => {
-    if (state.isLocked || e.touches.length !== 1) return;
+    if (state.isMinimized || state.isLocked || e.touches.length !== 1) return;
     const t = e.touches[0];
     touchStart = { x: t.clientX, y: t.clientY, vol: state.volumeScale, bright: state.brightness, time: video.currentTime, mode: null };
   }, { passive: true });
 
   stage.addEventListener('touchmove', (e) => {
-    if (!touchStart || state.isLocked || e.touches.length !== 1) return;
+    if (state.isMinimized || !touchStart || state.isLocked || e.touches.length !== 1) return;
     const t = e.touches[0];
     const dx = t.clientX - touchStart.x;
     const dy = t.clientY - touchStart.y;
@@ -1363,9 +1555,9 @@ function init() {
     touchStart = null;
   });
 
-  // PC Keyboard Shortcuts
+  // PC Keyboard Shortcuts (Escape minimizes to pop-out instead of killing video!)
   document.addEventListener('keydown', (e) => {
-    if (!$('playerModal').classList.contains('open')) return;
+    if (!$('playerModal').classList.contains('open') || state.isMinimized) return;
     if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
     if (e.code === 'Space') { e.preventDefault(); video.paused ? video.play() : video.pause(); }
     else if (e.key === 'ArrowLeft') { video.currentTime = Math.max(0, video.currentTime - 10); showGestureToast('⏪ -10s'); }
@@ -1374,7 +1566,7 @@ function init() {
     else if (e.key === 'ArrowDown') { e.preventDefault(); ensureWebAudioDsp(video); applyVolumeBoost(state.volumeScale - 0.1); showGestureToast(`🔊 ${Math.round(state.volumeScale * 100)}%`); }
     else if (e.key.toLowerCase() === 'f') { $('hudFsBtn').click(); }
     else if (e.key.toLowerCase() === 'c') { openSubModal(); }
-    else if (e.key === 'Escape') { closePlayer(); }
+    else if (e.key === 'Escape') { minimizePlayer(); }
   });
 
   // Subtitle Modal Controls
@@ -1462,15 +1654,21 @@ function init() {
     else video.requestPictureInPicture?.().catch(() => showToast('Trình duyệt không hỗ trợ PiP'));
   };
 
-  // Settings Modal (Gemini Key, Default AI Sub Language, Direct URL / Local Video)
+  // Settings Modal (UI Language, Gemini Key, Default AI Sub Language, Direct URL / Local Video)
   $('saveSettingsBtn').onclick = () => {
+    if ($('uiLangSelect')) {
+      state.prefs.uiLang = resolveUiLang($('uiLangSelect').value);
+    }
     state.prefs.geminiApiKey = $('geminiKeyInput').value.trim();
     state.prefs.geminiModel = $('geminiModelSelect').value;
     state.prefs.primaryLang = $('defaultLangSelect').value;
     savePrefs();
+    applyUiTranslations();
+    renderCategories();
+    if (state.movies.length) renderHero(state.movies[0]);
     $('aiDot').style.display = state.prefs.geminiApiKey ? 'block' : 'none';
     $('settingsModal').classList.remove('open');
-    showToast('✅ Đã lưu cấu hình AI & ngôn ngữ phụ đề!');
+    showToast(tr('settingsSavedToast'));
   };
   $('playDirectBtn').onclick = () => {
     const url = $('directUrlInput').value.trim();

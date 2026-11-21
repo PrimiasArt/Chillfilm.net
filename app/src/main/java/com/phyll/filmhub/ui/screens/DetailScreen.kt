@@ -58,6 +58,7 @@ import com.phyll.filmhub.model.ControlTargetMode
 import com.phyll.filmhub.model.Episode
 import com.phyll.filmhub.model.MovieItem
 import com.phyll.filmhub.model.WatchProgress
+import com.phyll.filmhub.ui.i18n.LocalAppStrings
 import com.phyll.filmhub.ui.theme.BrandEmeraldVioletBrush
 import com.phyll.filmhub.ui.theme.CinemaGlass
 import com.phyll.filmhub.ui.theme.CinemaGlassBorder
@@ -92,6 +93,7 @@ fun DetailScreen(
     onBack: () -> Unit
 ) {
     val isTv = LocalIsTvMode.current
+    val s = LocalAppStrings.current
     val playFocusRequester = remember { FocusRequester() }
     var selectedServerIndex by remember(movie.id) { mutableIntStateOf(0) }
     var expandDescription by remember(movie.id) { mutableStateOf(false) }
@@ -121,11 +123,11 @@ fun DetailScreen(
         val primaryCtaLabel = if (resumeEp != null && savedWatchProgress != null && savedWatchProgress.positionMs >= 3_000L) {
             val mins = savedWatchProgress.positionMs / 60_000L
             val secs = (savedWatchProgress.positionMs / 1000L) % 60L
-            "Tiếp Tục (${resumeEp.name} • %02d:%02d)".format(mins, secs)
+            s.continueEpFmt.format(resumeEp.name, mins, secs)
         } else if (firstEp != null) {
-            "Xem Ngay (${firstEp.name})"
+            s.watchNowEpFmt.format(firstEp.name)
         } else {
-            "Xem Ngay"
+            s.watchNow
         }
 
         // Full-bleed atmospheric backdrop header
@@ -183,12 +185,12 @@ fun DetailScreen(
                 ) {
                     Icon(
                         Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Quay lại",
+                        contentDescription = s.backBtn,
                         tint = TextPrimary,
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text(text = "Quay lại", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    Text(text = s.backBtn, color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -302,7 +304,7 @@ fun DetailScreen(
                                 .padding(horizontal = 7.dp, vertical = 2.dp)
                         ) {
                             Text(
-                                text = "AI SUB ĐA NGÔN NGỮ",
+                                text = s.aiSubMultiBadge,
                                 color = CinemaObsidian,
                                 fontSize = 9.5.sp,
                                 fontWeight = FontWeight.Black

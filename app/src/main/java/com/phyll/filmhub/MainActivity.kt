@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -29,6 +30,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import com.phyll.filmhub.ui.AppScreen
 import com.phyll.filmhub.ui.MainViewModel
+import com.phyll.filmhub.ui.i18n.AppStrings
+import com.phyll.filmhub.ui.i18n.LocalAppStrings
 import com.phyll.filmhub.ui.screens.CompanionQrDialog
 import com.phyll.filmhub.ui.screens.DetailScreen
 import com.phyll.filmhub.ui.screens.HomeScreen
@@ -60,6 +63,8 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val currentScreen by viewModel.currentScreen.collectAsState()
+            val activePlaybackSession by viewModel.activePlaybackSession.collectAsState()
+            val isPlayerMinimized by viewModel.isPlayerMinimized.collectAsState()
             val selectedCountry by viewModel.selectedCountry.collectAsState()
             val sections by viewModel.sections.collectAsState()
             val isLoadingCatalog by viewModel.isLoadingCatalog.collectAsState()
@@ -72,6 +77,7 @@ class MainActivity : ComponentActivity() {
             val discoveredGeminiModels by viewModel.prefs.discoveredGeminiModels.collectAsState()
             val promptQrOnStartup by viewModel.prefs.promptQrOnStartup.collectAsState()
             val deviceUiMode by viewModel.prefs.deviceUiMode.collectAsState()
+            val appLanguage by viewModel.prefs.appLanguage.collectAsState()
             val watchHistory by viewModel.prefs.watchHistory.collectAsState()
             val favoriteIds by viewModel.prefs.favoriteIds.collectAsState()
             val customProviders by viewModel.prefs.customProviders.collectAsState()
@@ -93,6 +99,7 @@ class MainActivity : ComponentActivity() {
             val appUpdateState by viewModel.appUpdateState.collectAsState()
             val isTvHardware = viewModel.isTvHardware
             val selectedTvDevice = managedTvDevices.firstOrNull { it.ip == selectedTvIp }
+            val isPlayerFullscreenActive = activePlaybackSession != null && !isPlayerMinimized
 
             LaunchedEffect(bannerMessage) {
                 if (bannerMessage != null) {
@@ -105,11 +112,11 @@ class MainActivity : ComponentActivity() {
                 viewModel.setQrDialogVisible(false)
             }
 
-            BackHandler(enabled = currentScreen !is AppScreen.Home && !showQrDialog) {
+            BackHandler(enabled = currentScreen !is AppScreen.Home && !showQrDialog && !isPlayerFullscreenActive) {
                 viewModel.navigateBack()
             }
 
-            BackHandler(enabled = currentScreen is AppScreen.Home && !showQrDialog) {
+            BackHandler(enabled = currentScreen is AppScreen.Home && !showQrDialog && !isPlayerFullscreenActive) {
                 if (searchQuery.isNotBlank()) {
                     viewModel.updateSearchQuery("")
                 } else {
@@ -117,6 +124,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            CompositionLocalProvider(LocalAppStrings provides AppStrings.forLanguage(appLanguage)) {
             PhyllFilmHubTheme(deviceUiMode = deviceUiMode) {
                 Box(
                     modifier = Modifier
@@ -140,6 +148,8 @@ class MainActivity : ComponentActivity() {
                                 controlTargetMode = controlTargetMode,
                                 selectedTvDevice = selectedTvDevice,
                                 isRemoteTvOnline = remoteTvState.online,
+                                currentAppLanguage = appLanguage,
+                                onSelectAppLanguage = viewModel::setAppLanguage,
                                 onSelectCountry = viewModel::selectCountry,
                                 onSearchQueryChange = viewModel::updateSearchQuery,
                                 onExecuteSearch = viewModel::executeSearch,
@@ -155,7 +165,7 @@ class MainActivity : ComponentActivity() {
                                 onBeforeLaunchSystemOverlay = viewModel::markExternalOverlayLaunching,
                                 onAfterSystemOverlayResult = viewModel::clearExternalOverlayLaunching,
                                 onVoiceError = {
-                                    viewModel.showBanner("Thiết bị chưa cài dịch vụ nhận diện giọng nói. Bạn có thể dùng QR Điện Thoại để tìm nhanh!")
+                                    viewModel.showBanner("Voice search unavailable on this device.")
                                 }
                             )
                         }
@@ -180,46 +190,7 @@ class MainActivity : ComponentActivity() {
                         }
 
                         is AppScreen.Player -> {
-                            PlayerScreen(
-                                movie = screen.movie,
-                                episode = screen.episode,
-                                startPositionMs = screen.startPositionMs,
-                                subtitleConfig = subtitleConfig,
-                                geminiApiKey = geminiApiKey,
-                                discoveredGeminiModels = discoveredGeminiModels,
-                                incomingCompanionSub = incomingCompanionSub,
-                                seriesProfile = seriesProfiles[screen.movie.id],
-                                remoteCommand = remotePlayerCommand,
-                                isTvHardware = isTvHardware,
-                                onSaveGeminiKeyInline = { key, modelId ->
-                                    viewModel.setSessionGeminiCredentials(key, modelId)
-                                },
-                                onConsumeRemoteCommand = viewModel::consumeRemotePlayerCommand,
-                                onReportTelemetry = viewModel::updatePlayerTelemetry,
-                                onSaveSeriesProfile = { transform ->
-                                    viewModel.prefs.saveSeriesSubtitleProfile(screen.movie.id, transform)
-                                },
-                                onConsumeCompanionSub = viewModel::consumeIncomingCompanionSubtitle,
-                                onSelectGeminiModel = { modelId ->
-                                    viewModel.prefs.setSelectedGeminiModel(modelId)
-                                    viewModel.showBanner("✨ Đã chọn Model Gemini: $modelId")
-                                },
-                                onRefreshGeminiModels = {
-                                    viewModel.refreshGeminiModelsFromApi(silent = false)
-                                },
-                                onUpdateSubtitleConfig = viewModel::updateSubtitleStyle,
-                                onResetSubtitleConfig = viewModel.prefs::resetSubtitleConfigToThaiDefault,
-                                onSaveProgress = { pos, dur ->
-                                    viewModel.saveWatchProgress(screen.movie, screen.episode, pos, dur, immediateCommit = true)
-                                },
-                                onSwitchEpisode = { nextEp ->
-                                    viewModel.startPlayback(screen.movie, nextEp, 0L)
-                                },
-                                onOpenQrCompanion = { viewModel.setQrDialogVisible(true) },
-                                onBeforeLaunchSystemOverlay = viewModel::markExternalOverlayLaunching,
-                                onAfterSystemOverlayResult = viewModel::clearExternalOverlayLaunching,
-                                onExitPlayer = { viewModel.navigateBack() }
-                            )
+                            // Handled persistently by activePlaybackSession overlay below
                         }
 
                         is AppScreen.SettingsSources -> {
@@ -230,6 +201,8 @@ class MainActivity : ComponentActivity() {
                                 discoveredGeminiModels = discoveredGeminiModels,
                                 promptQrOnStartup = promptQrOnStartup,
                                 deviceUiMode = deviceUiMode,
+                                currentAppLanguage = appLanguage,
+                                onSelectAppLanguage = viewModel::setAppLanguage,
                                 appUpdateState = appUpdateState,
                                 hasSelectedTv = !isTvHardware && selectedTvIp != null,
                                 isTvHardware = isTvHardware,
@@ -252,7 +225,7 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onSelectGeminiModel = { modelId ->
                                     viewModel.prefs.setSelectedGeminiModel(modelId)
-                                    viewModel.showBanner("✨ Đã chọn Model Gemini: $modelId")
+                                    viewModel.showBanner("✨ Gemini Model: $modelId")
                                 },
                                 onRefreshGeminiModels = {
                                     viewModel.refreshGeminiModelsFromApi(silent = false)
@@ -263,7 +236,7 @@ class MainActivity : ComponentActivity() {
                                 onClearCache = viewModel::clearCacheForTvBox,
                                 onClearWatchHistory = {
                                     viewModel.prefs.clearWatchHistory()
-                                    viewModel.showBanner("Đã xóa lịch sử xem phim!")
+                                    viewModel.showBanner("Watch history cleared")
                                 },
                                 onOpenQrCompanion = { viewModel.setQrDialogVisible(true) },
                                 onBeforeLaunchSystemOverlay = viewModel::markExternalOverlayLaunching,
@@ -322,6 +295,58 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
+                    // Persistent Player Overlay: stays mounted seamlessly across Fullscreen <-> Bottom-Right Mini Pop-out!
+                    activePlaybackSession?.let { session ->
+                        PlayerScreen(
+                            movie = session.movie,
+                            episode = session.episode,
+                            startPositionMs = session.startPositionMs,
+                            subtitleConfig = subtitleConfig,
+                            geminiApiKey = geminiApiKey,
+                            discoveredGeminiModels = discoveredGeminiModels,
+                            incomingCompanionSub = incomingCompanionSub,
+                            seriesProfile = seriesProfiles[session.movie.id],
+                            remoteCommand = remotePlayerCommand,
+                            isTvHardware = isTvHardware,
+                            isMinimized = isPlayerMinimized,
+                            modifier = if (isPlayerMinimized) {
+                                Modifier.align(Alignment.BottomEnd)
+                            } else {
+                                Modifier.fillMaxSize()
+                            },
+                            onSaveGeminiKeyInline = { key, modelId ->
+                                viewModel.setSessionGeminiCredentials(key, modelId)
+                            },
+                            onConsumeRemoteCommand = viewModel::consumeRemotePlayerCommand,
+                            onReportTelemetry = viewModel::updatePlayerTelemetry,
+                            onSaveSeriesProfile = { transform ->
+                                viewModel.prefs.saveSeriesSubtitleProfile(session.movie.id, transform)
+                            },
+                            onConsumeCompanionSub = viewModel::consumeIncomingCompanionSubtitle,
+                            onSelectGeminiModel = { modelId ->
+                                viewModel.prefs.setSelectedGeminiModel(modelId)
+                                viewModel.showBanner("✨ Gemini Model: $modelId")
+                            },
+                            onRefreshGeminiModels = {
+                                viewModel.refreshGeminiModelsFromApi(silent = false)
+                            },
+                            onUpdateSubtitleConfig = viewModel::updateSubtitleStyle,
+                            onResetSubtitleConfig = viewModel.prefs::resetSubtitleConfigToThaiDefault,
+                            onSaveProgress = { pos, dur ->
+                                viewModel.saveWatchProgress(session.movie, session.episode, pos, dur, immediateCommit = true)
+                            },
+                            onSwitchEpisode = { nextEp ->
+                                viewModel.startPlayback(session.movie, nextEp, 0L)
+                            },
+                            onOpenQrCompanion = { viewModel.setQrDialogVisible(true) },
+                            onBeforeLaunchSystemOverlay = viewModel::markExternalOverlayLaunching,
+                            onAfterSystemOverlayResult = viewModel::clearExternalOverlayLaunching,
+                            onMinimizePlayer = viewModel::minimizePlayer,
+                            onRestorePlayer = viewModel::restoreMinimizedPlayer,
+                            onExitPlayer = viewModel::closePlayerSession
+                        )
+                    }
+
                     if (isTvHardware && showQrDialog) {
                         CompanionQrDialog(
                             lanUrl = companionLanUrl,
@@ -359,6 +384,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+            }
             }
         }
     }
