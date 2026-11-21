@@ -206,22 +206,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         modelId: String? = null,
         silent: Boolean = false
     ) {
-        prefs.setSessionGeminiCredentials(apiKey, modelId)
+        val cleanInputKey = apiKey.trim()
+        prefs.setSessionGeminiCredentials(cleanInputKey, modelId)
+        val effectiveKey = prefs.geminiApiKey.value
         val activeModel = prefs.subtitleConfig.value.geminiModelId
-        if (apiKey.trim().isNotEmpty()) {
-            refreshGeminiModelsFromApi(apiKey.trim(), silent = true)
+        if (cleanInputKey.isNotEmpty()) {
+            refreshGeminiModelsFromApi(cleanInputKey, silent = true)
             if (!silent) {
                 val msg = if (isTvHardware) {
-                    "🔐 Đã nạp Gemini Key tạm vào RAM (Model: $activeModel) • Thoát App tự xóa!"
+                    "💾 Đã lưu cố định Gemini Key trên TV ($activeModel)!"
                 } else {
-                    "💾 Đã lưu cố định Gemini Key trên ĐT ($activeModel) & tự đồng bộ sang TV!"
+                    "💾 Đã lưu cố định Gemini Key trong máy ($activeModel) & tự đồng bộ sang TV!"
                 }
                 showBanner(msg)
             }
         } else if (!modelId.isNullOrBlank() && !silent) {
-            showBanner("✨ Đã chọn Model Gemini: $activeModel")
+            val suffix = if (effectiveKey.isNotBlank()) " (đã giữ nguyên API Key)" else ""
+            showBanner("✨ Đã chọn Model Gemini: $activeModel$suffix")
         }
-        if (!isTvHardware) {
+        if (!isTvHardware && effectiveKey.isNotBlank()) {
             syncCredentialsToSelectedTvIfOnline(silent = true)
         }
     }
@@ -467,6 +470,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setQrDialogVisible(visible: Boolean) {
+        // QR pairing code is ONLY for TV boxes so phones can scan it; on phones, open Settings instead!
+        if (visible && !isTvHardware) {
+            _showQrCompanionDialog.value = false
+            openSettingsSources()
+            return
+        }
         if (visible && _companionLanUrl.value == null) {
             _companionLanUrl.value = companionServer.start()
         } else if (visible) {
@@ -1173,6 +1182,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             showBanner("📺 Đang gửi \"${movie.title}\" (${episode.name}) sang TV...")
+            // Always push saved API key & subtitle language to TV BEFORE opening movie so TV never asks for key!
+            if (prefs.geminiApiKey.value.isNotBlank()) {
+                runCatching {
+                    remoteTvClient.syncCredentialsAndConfigToTv(
+                        ip, prefs.geminiApiKey.value, prefs.subtitleConfig.value, silent = true
+                    )
+                }
+            }
             var ok = remoteTvClient.pushMovieAndPlayOnTv(ip, movie, episode, startPositionMs)
             if (!ok) {
                 // Auto-wake TV app via ADB if it was closed on the TV box!
@@ -1187,8 +1204,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                     ok = remoteTvClient.pushMovieAndPlayOnTv(ip, movie, episode, startPositionMs)
                 }
-            } else {
-                syncCredentialsToSelectedTvIfOnline(silent = true)
             }
             if (ok) {
                 showBanner("▶ Đã phát trên TV: ${movie.title} (${episode.name})")
@@ -1496,7 +1511,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         tvPollJob?.cancel()
         tvScreenStreamJob?.cancel()
-        prefs.wipeSessionGeminiKeyFromRam(clearPhoneVault = false)
         companionServer.stop()
         super.onCleared()
     }

@@ -55,6 +55,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -93,6 +94,7 @@ fun SubtitleSettingsSheet(
     defaultSearchQuery: String,
     discoveredModels: List<String>,
     hasGeminiKeyInRam: Boolean,
+    isTvHardware: Boolean = false,
     isAutoSyncing: Boolean = false,
     preferGeminiAudioForSeries: Boolean = false,
     totalSeriesEpisodes: Int = 1,
@@ -100,6 +102,7 @@ fun SubtitleSettingsSheet(
     onSelectTrack: (SubtitleTrackOption) -> Unit,
     onSearchOnlineSub: (String) -> Unit,
     onSelectGeminiModel: (String) -> Unit,
+    onSaveGeminiKeyInline: (String, String) -> Unit = { _, _ -> },
     onRefreshGeminiModels: () -> Unit,
     onTriggerGeminiAudioSubNow: () -> Unit,
     onTogglePreferGeminiAudioForSeries: () -> Unit = {},
@@ -120,6 +123,8 @@ fun SubtitleSettingsSheet(
     var activeTab by remember { mutableIntStateOf(0) }
     var showUrlInput by remember { mutableStateOf(false) }
     var showOnlineSearchInput by remember { mutableStateOf(false) }
+    var showInlineKeyInput by remember { mutableStateOf(false) }
+    var inlineKeyText by remember { mutableStateOf("") }
     var customSubUrl by remember { mutableStateOf("") }
     var customPrimaryLangInput by remember { mutableStateOf("") }
     var customSecondaryLangInput by remember { mutableStateOf("") }
@@ -435,15 +440,57 @@ fun SubtitleSettingsSheet(
                             icon = Icons.Default.Mic,
                             title = if (hasGeminiKeyInRam) {
                                 "🎙️ Gemini (${config.geminiModelId}) Nghe Phim Tạo Sub ${primaryLang.shortBadge}"
+                            } else if (isTvHardware) {
+                                "🔐 Quét QR Nạp Gemini Key (AI Nghe Phim Tạo Sub ${primaryLang.shortBadge})"
                             } else {
-                                "🔐 Nạp Gemini Key Để AI Nghe Phim Tạo Sub ${primaryLang.shortBadge}"
+                                "🔐 Nhập Gemini Key (Lưu 1 Lần) Để AI Nghe Phim Tạo Sub ${primaryLang.shortBadge}"
                             },
                             subtitle = "AI nghe trực tiếp lời thoại và dịch tức thì sang ${primaryLang.displayName}",
                             accentColor = EmeraldNeon,
                             onClick = {
-                                if (hasGeminiKeyInRam) onTriggerGeminiAudioSubNow() else onOpenQrUpload()
+                                when {
+                                    hasGeminiKeyInRam -> onTriggerGeminiAudioSubNow()
+                                    isTvHardware -> onOpenQrUpload()
+                                    else -> showInlineKeyInput = !showInlineKeyInput
+                                }
                             }
                         )
+
+                        if (showInlineKeyInput && !isTvHardware) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                OutlinedTextField(
+                                    value = inlineKeyText,
+                                    onValueChange = { inlineKeyText = it },
+                                    singleLine = true,
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    placeholder = { Text("Dán Gemini API Key (AIza...)...", fontSize = 11.5.sp) },
+                                    modifier = Modifier.weight(1f),
+                                    colors = sheetTextFieldColors()
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .tvFocusableClickable(
+                                            shape = RoundedCornerShape(10.dp),
+                                            onClick = {
+                                                val clean = inlineKeyText.trim()
+                                                if (clean.isNotEmpty()) {
+                                                    onSaveGeminiKeyInline(clean, config.geminiModelId)
+                                                    inlineKeyText = ""
+                                                    showInlineKeyInput = false
+                                                }
+                                            }
+                                        )
+                                        .background(EmeraldPrimary)
+                                        .padding(horizontal = 12.dp, vertical = 14.dp)
+                                ) {
+                                    Text("Lưu", color = CinemaObsidian, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                                }
+                            }
+                        }
 
                         if (availableTracks.isNotEmpty()) {
                             val currentIdx = availableTracks.indexOfFirst { it.id == selectedTrackId }.coerceAtLeast(0)
@@ -890,13 +937,15 @@ fun SubtitleSettingsSheet(
                             }
                         )
 
-                        FullWidthActionRow(
-                            icon = Icons.Default.QrCode2,
-                            title = "QR Companion (Nạp Key / Gửi Sub Từ Máy Khác)",
-                            subtitle = "Quét QR trên cùng Wi-Fi",
-                            accentColor = VioletSoft,
-                            onClick = onOpenQrUpload
-                        )
+                        if (isTvHardware) {
+                            FullWidthActionRow(
+                                icon = Icons.Default.QrCode2,
+                                title = "QR Kết Nối Điện Thoại (Gửi Sub & Key lên TV)",
+                                subtitle = "Quét QR trên cùng Wi-Fi",
+                                accentColor = VioletSoft,
+                                onClick = onOpenQrUpload
+                            )
+                        }
                     }
                 }
 

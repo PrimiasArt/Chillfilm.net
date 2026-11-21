@@ -33,12 +33,16 @@ class PreferencesManager(context: Context) {
     val isTvHardware: Boolean = isPhysicalTvHardware(appContext)
 
     init {
-        // SECURITY GUARANTEE: Permanently purge any legacy persisted API key from TV flash storage!
-        if (prefs.contains(KEY_LEGACY_GEMINI_API)) {
+        // Migrate any legacy plain key cleanly into the persistent vault
+        val legacyKey = prefs.getString(KEY_LEGACY_GEMINI_API, null)?.trim().orEmpty()
+        if (legacyKey.isNotEmpty() && !prefs.contains(KEY_PHONE_PERSISTED_GEMINI_KEY)) {
+            val encoded = Base64.encodeToString(legacyKey.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+            prefs.edit()
+                .putString(KEY_PHONE_PERSISTED_GEMINI_KEY, encoded)
+                .remove(KEY_LEGACY_GEMINI_API)
+                .commit()
+        } else if (prefs.contains(KEY_LEGACY_GEMINI_API)) {
             prefs.edit().remove(KEY_LEGACY_GEMINI_API).apply()
-        }
-        if (isTvHardware && prefs.contains(KEY_PHONE_PERSISTED_GEMINI_KEY)) {
-            prefs.edit().remove(KEY_PHONE_PERSISTED_GEMINI_KEY).apply()
         }
     }
 
@@ -46,13 +50,10 @@ class PreferencesManager(context: Context) {
     val subtitleConfig: StateFlow<SubtitleStyleConfig> = _subtitleConfig.asStateFlow()
 
     /**
-     * - On Phone/Tablet (`!isTvHardware`): Persisted locally on the user's personal Android device
-     *   so the user enters their API key ONCE and automatically syncs it to selected TVs.
-     * - On TV Boxes (`isTvHardware`): Strictly ephemeral in process RAM (0 bytes written to TV flash).
+     * Persisted locally inside the Android app's private SharedPreferences vault so the user
+     * enters their Gemini API key ONCE and never has to re-enter it on Phone or TV!
      */
-    private val _geminiApiKey = MutableStateFlow(
-        if (!isTvHardware) loadPhonePersistedGeminiKey() else ""
-    )
+    private val _geminiApiKey = MutableStateFlow(loadPhonePersistedGeminiKey())
     val geminiApiKey: StateFlow<String> = _geminiApiKey.asStateFlow()
 
     private val _managedTvDevices = MutableStateFlow(loadManagedTvDevices())
@@ -65,7 +66,7 @@ class PreferencesManager(context: Context) {
     val controlTargetMode: StateFlow<ControlTargetMode> = _controlTargetMode.asStateFlow()
 
     private val _promptQrOnStartup = MutableStateFlow(
-        prefs.getBoolean(KEY_PROMPT_QR_ON_STARTUP, isTvHardware)
+        prefs.getBoolean(KEY_PROMPT_QR_ON_STARTUP, false)
     )
     val promptQrOnStartup: StateFlow<Boolean> = _promptQrOnStartup.asStateFlow()
 
@@ -143,18 +144,15 @@ class PreferencesManager(context: Context) {
     }
 
     /**
-     * Stores Gemini API credentials:
-     * - On Phone/Tablet (`!isTvHardware`): persists safely on the Android controller app if [trimmedKey] is non-empty
-     *   so the user only enters the API key once and it auto-syncs to TVs.
-     * - On TV Boxes (`isTvHardware`): strictly RAM-only (0 bytes written to TV flash storage).
+     * Stores Gemini API credentials persistently inside the Android app vault.
+     * IMPORTANT: If [key] is blank, preserves the already-saved API key untouched and only updates [modelId]!
      */
     fun setSessionGeminiCredentials(key: String, modelId: String? = null) {
         val trimmedKey = key.trim()
-        _geminiApiKey.value = trimmedKey
-
-        if (!isTvHardware && trimmedKey.isNotEmpty()) {
+        if (trimmedKey.isNotEmpty()) {
+            _geminiApiKey.value = trimmedKey
             val encoded = Base64.encodeToString(trimmedKey.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-            prefs.edit().putString(KEY_PHONE_PERSISTED_GEMINI_KEY, encoded).apply()
+            prefs.edit().putString(KEY_PHONE_PERSISTED_GEMINI_KEY, encoded).commit()
         }
 
         val cleanModel = modelId?.trim()?.removePrefix("models/")?.takeIf { it.isNotEmpty() }
@@ -162,10 +160,11 @@ class PreferencesManager(context: Context) {
             registerDiscoveredModels(listOf(cleanModel))
         }
 
-        if (trimmedKey.isNotEmpty()) {
+        val hasAnyKey = _geminiApiKey.value.isNotBlank()
+        if (trimmedKey.isNotEmpty() || (hasAnyKey && cleanModel != null)) {
             updateSubtitleConfig { cfg ->
                 cfg.copy(
-                    translationEngine = TranslationEngineMode.GEMINI_AI,
+                    translationEngine = if (hasAnyKey) TranslationEngineMode.GEMINI_AI else cfg.translationEngine,
                     geminiModelId = cleanModel ?: cfg.geminiModelId.ifBlank { DEFAULT_GEMINI_MODEL }
                 )
             }
@@ -175,16 +174,18 @@ class PreferencesManager(context: Context) {
     }
 
     /**
-     * Erases the API key from RAM (and optionally clears the persisted phone vault when user requests).
+     * Explicitly erases the API key when the user clicks "Xóa Key".
      */
-    fun wipeSessionGeminiKeyFromRam(clearPhoneVault: Boolean = false) {
+    fun wipeSessionGeminiKeyFromRam(clearPhoneVault: Boolean = true) {
         _geminiApiKey.value = ""
-        if (prefs.contains(KEY_LEGACY_GEMINI_API)) {
-            prefs.edit().remove(KEY_LEGACY_GEMINI_API).apply()
-        }
-        if (clearPhoneVault || isTvHardware) {
-            prefs.edit().remove(KEY_PHONE_PERSISTED_GEMINI_KEY).apply()
-        }
+        prefs.edit()
+            .remove(KEY_LEGACY_GEMINI_API)
+            .apply {
+                if (clearPhoneVault) {
+                    remove(KEY_PHONE_PERSISTED_GEMINI_KEY)
+                }
+            }
+            .commit()
     }
 
     fun upsertManagedTvDevice(device: ManagedTvDevice) {

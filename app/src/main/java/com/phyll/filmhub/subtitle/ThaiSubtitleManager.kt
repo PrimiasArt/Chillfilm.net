@@ -670,11 +670,10 @@ class ThaiSubtitleManager(
             if (firstBlockingResult.getOrNull() == null) {
                 isTranslatingFlag = false
                 val errMsg = firstBlockingResult.exceptionOrNull()?.message ?: "Không kết nối được Gemini API"
-                val looksLikeAuthOrModelErr = errMsg.contains("400") ||
-                    errMsg.contains("401") ||
+                val isAuthErr = errMsg.contains("401") ||
                     errMsg.contains("403") ||
-                    errMsg.contains("404") ||
-                    errMsg.contains("API key", ignoreCase = true)
+                    errMsg.contains("API key not valid", ignoreCase = true) ||
+                    errMsg.contains("API_KEY_INVALID", ignoreCase = true)
                 currentBadge = "⚠️ Gemini lỗi: ${errMsg.take(52)}"
                 refreshOverlayAt(currentPositionMs, config)
 
@@ -682,10 +681,14 @@ class ThaiSubtitleManager(
                     _preFlightState.value = PreFlightSubtitleState(
                         isPreparing = false,
                         noSubtitleFound = true,
-                        needsGeminiKeyQr = looksLikeAuthOrModelErr,
+                        needsGeminiKeyQr = isAuthErr,
                         searchedQuery = searchDisplay,
-                        stepTitle = "⚠️ Gemini ($cleanModel) báo lỗi: ${errMsg.take(85)}",
-                        stepDetail = "Hãy quét QR kiểm tra lại API Key hoặc chọn Model khác (VD: gemini-3-flash-preview / gemini-2.5-flash), hoặc bấm Phát luôn."
+                        stepTitle = "⚠️ Gemini ($cleanModel) báo lỗi: ${errMsg.take(90)}",
+                        stepDetail = if (isAuthErr) {
+                            "API Key hiện tại bị từ chối (401/403). Vui lòng kiểm tra lại Gemini API Key hoặc bấm Phát luôn."
+                        } else {
+                            "Thử đổi Model khác (VD: gemini-2.5-flash) hoặc tìm Sub online theo tên tiếng Anh, hoặc bấm Phát luôn."
+                        }
                     )
                 }
                 return@launch

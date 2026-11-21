@@ -47,9 +47,11 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -141,6 +143,14 @@ fun SettingsSourcesScreen(
         mutableStateOf(subtitleConfig.geminiModelId)
     }
 
+    fun flushPendingKeyIfTyped() {
+        val pending = geminiInput.trim()
+        if (pending.length >= 20) {
+            onSaveSessionGeminiKey(pending, customModelInput)
+            geminiInput = ""
+        }
+    }
+
     val usbVideoPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
@@ -155,6 +165,11 @@ fun SettingsSourcesScreen(
             val fileName = uri.lastPathSegment?.substringAfterLast('/') ?: "Video"
             onPlayDirectUrl(fileName, uri.toString(), "")
         }
+    }
+
+    val latestFlush by rememberUpdatedState(::flushPendingKeyIfTyped)
+    DisposableEffect(Unit) {
+        onDispose { latestFlush() }
     }
 
     BoxWithConstraints(
@@ -192,7 +207,10 @@ fun SettingsSourcesScreen(
                                 shape = CircleShape,
                                 focusedBorderColor = EmeraldNeon,
                                 unfocusedBorderColor = CinemaGlassBorder,
-                                onClick = onBack
+                                onClick = {
+                                    flushPendingKeyIfTyped()
+                                    onBack()
+                                }
                             )
                             .background(CinemaSurfaceElevated),
                         contentAlignment = Alignment.Center
@@ -226,19 +244,22 @@ fun SettingsSourcesScreen(
                     }
                 }
 
-                Box(
-                    modifier = Modifier
-                        .size(38.dp)
-                        .tvFocusableClickable(
-                            shape = CircleShape,
-                            focusedBorderColor = VioletGlow,
-                            unfocusedBorderColor = CinemaGlassBorder,
-                            onClick = onOpenQrCompanion
-                        )
-                        .background(CinemaSurfaceElevated),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(Icons.Default.QrCode2, contentDescription = "QR Companion", tint = VioletSoft, modifier = Modifier.size(19.dp))
+                // QR Companion pairing is ONLY for TV boxes so phones can scan the TV screen!
+                if (isTvHardware) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .tvFocusableClickable(
+                                shape = CircleShape,
+                                focusedBorderColor = VioletGlow,
+                                unfocusedBorderColor = CinemaGlassBorder,
+                                onClick = onOpenQrCompanion
+                            )
+                            .background(CinemaSurfaceElevated),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.QrCode2, contentDescription = "QR Companion", tint = VioletSoft, modifier = Modifier.size(19.dp))
+                    }
                 }
             }
 
@@ -408,6 +429,14 @@ fun SettingsSourcesScreen(
                 subtitle = "Hỗ trợ dịch và nghe phim tạo phụ đề sang mọi ngôn ngữ AI hỗ trợ. Đang chọn: ${primaryLang.displayName}."
             ) {
                 val hasKey = geminiApiKey.isNotBlank()
+                val maskedKey = remember(geminiApiKey) {
+                    val k = geminiApiKey.trim()
+                    when {
+                        k.length >= 10 -> "${k.take(6)}••••${k.takeLast(4)}"
+                        k.isNotEmpty() -> "••••"
+                        else -> ""
+                    }
+                }
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -418,9 +447,9 @@ fun SettingsSourcesScreen(
                 ) {
                     Text(
                         text = if (hasKey) {
-                            "🔐 Gemini AI Sẵn Sàng • Model: ${subtitleConfig.geminiModelId}"
+                            "🔐 Đã lưu cố định ($maskedKey) • Model: ${subtitleConfig.geminiModelId}"
                         } else {
-                            "🔓 Chưa nạp Gemini Key • Dùng Neural AI miễn phí hoặc nhập Key để dịch & nghe âm thanh"
+                            "🔓 Chưa nhập Gemini Key • Đang dùng Neural AI miễn phí (nhập Key 1 lần để lưu vĩnh viễn)"
                         },
                         color = if (hasKey) EmeraldNeon else VioletSoft,
                         fontSize = 12.sp,
@@ -550,7 +579,12 @@ fun SettingsSourcesScreen(
                                     unfocusedBorderColor = if (selected) VioletGlow else CinemaGlassBorder,
                                     onClick = {
                                         customModelInput = modelId
-                                        onSelectGeminiModel(modelId)
+                                        if (geminiInput.isNotBlank()) {
+                                            onSaveSessionGeminiKey(geminiInput, modelId)
+                                            geminiInput = ""
+                                        } else {
+                                            onSelectGeminiModel(modelId)
+                                        }
                                     }
                                 )
                                 .background(if (selected) VioletPrimary else CinemaSurfaceElevated)
@@ -577,6 +611,11 @@ fun SettingsSourcesScreen(
                 Spacer(modifier = Modifier.height(10.dp))
 
                 // Responsive: stacked on mobile phones, side-by-side on wide/TV!
+                val keyPlaceholder = if (hasKey) {
+                    "Đã lưu Key ($maskedKey) — chỉ dán lại nếu muốn đổi Key mới"
+                } else {
+                    "Dán Google Gemini API Key (AIza...)..."
+                }
                 if (isCompact) {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(
@@ -584,7 +623,7 @@ fun SettingsSourcesScreen(
                             onValueChange = { geminiInput = it },
                             singleLine = true,
                             visualTransformation = PasswordVisualTransformation(),
-                            placeholder = { Text("Dán Google Gemini API Key...", fontSize = 12.5.sp) },
+                            placeholder = { Text(keyPlaceholder, fontSize = 12.sp) },
                             modifier = Modifier.fillMaxWidth(),
                             colors = textFieldColors()
                         )
@@ -604,7 +643,7 @@ fun SettingsSourcesScreen(
                             onValueChange = { geminiInput = it },
                             singleLine = true,
                             visualTransformation = PasswordVisualTransformation(),
-                            placeholder = { Text("Dán Google Gemini API Key...", fontSize = 13.sp) },
+                            placeholder = { Text(keyPlaceholder, fontSize = 12.5.sp) },
                             modifier = Modifier.weight(1f),
                             colors = textFieldColors()
                         )

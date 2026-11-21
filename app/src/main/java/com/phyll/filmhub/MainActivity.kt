@@ -109,14 +109,10 @@ class MainActivity : ComponentActivity() {
                 viewModel.navigateBack()
             }
 
-            // SECURITY GUARANTEE: On physical TVs, pressing Back on Home wipes the ephemeral Gemini Key from RAM and exits
             BackHandler(enabled = currentScreen is AppScreen.Home && !showQrDialog) {
                 if (searchQuery.isNotBlank()) {
                     viewModel.updateSearchQuery("")
                 } else {
-                    if (isTvHardware) {
-                        viewModel.wipeGeminiKeyFromRam(silent = true)
-                    }
                     finish()
                 }
             }
@@ -192,6 +188,10 @@ class MainActivity : ComponentActivity() {
                                 incomingCompanionSub = incomingCompanionSub,
                                 seriesProfile = seriesProfiles[screen.movie.id],
                                 remoteCommand = remotePlayerCommand,
+                                isTvHardware = isTvHardware,
+                                onSaveGeminiKeyInline = { key, modelId ->
+                                    viewModel.setSessionGeminiCredentials(key, modelId)
+                                },
                                 onConsumeRemoteCommand = viewModel::consumeRemotePlayerCommand,
                                 onReportTelemetry = viewModel::updatePlayerTelemetry,
                                 onSaveSeriesProfile = { transform ->
@@ -246,7 +246,7 @@ class MainActivity : ComponentActivity() {
                                     viewModel.setSessionGeminiCredentials(key, modelId)
                                 },
                                 onWipeSessionGeminiKey = {
-                                    viewModel.wipeGeminiKeyFromRam(silent = false, clearPhoneVault = !isTvHardware)
+                                    viewModel.wipeGeminiKeyFromRam(silent = false, clearPhoneVault = true)
                                 },
                                 onSelectGeminiModel = { modelId ->
                                     viewModel.prefs.setSelectedGeminiModel(modelId)
@@ -320,14 +320,14 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
-                    if (showQrDialog) {
+                    if (isTvHardware && showQrDialog) {
                         CompanionQrDialog(
                             lanUrl = companionLanUrl,
                             hasSessionGeminiKey = geminiApiKey.isNotBlank(),
                             activeGeminiModel = subtitleConfig.geminiModelId,
                             promptQrOnStartup = promptQrOnStartup,
                             onTogglePromptOnStartup = viewModel.prefs::setPromptQrOnStartup,
-                            onWipeSessionKey = { viewModel.wipeGeminiKeyFromRam(silent = false) },
+                            onWipeSessionKey = { viewModel.wipeGeminiKeyFromRam(silent = false, clearPhoneVault = true) },
                             onDismiss = { viewModel.setQrDialogVisible(false) }
                         )
                     }
@@ -363,30 +363,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
-        // SECURITY GUARANTEE: On physical TV Boxes, pressing Home or turning off TV wipes Gemini Key from RAM
-        // (while tolerating brief <2.5s HDMI HPD/HDCP display handshakes). Phone app keeps its saved key vault.
-        if (viewModel.isTvHardware && !isChangingConfigurations && !viewModel.isWithinExternalOverlayGraceWindow()) {
-            if (isFinishing) {
-                viewModel.wipeGeminiKeyFromRam(silent = true)
-            } else {
-                delayedStopWipeJob?.cancel()
-                delayedStopWipeJob = lifecycleScope.launch {
-                    delay(2_500L)
-                    if (!lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) &&
-                        !viewModel.isWithinExternalOverlayGraceWindow()
-                    ) {
-                        viewModel.wipeGeminiKeyFromRam(silent = true)
-                    }
-                }
-            }
-        }
     }
 
     override fun onDestroy() {
         viewModel.detachWindowForStream(window)
-        if (viewModel.isTvHardware && !isChangingConfigurations) {
-            viewModel.wipeGeminiKeyFromRam(silent = true)
-        }
         super.onDestroy()
     }
 

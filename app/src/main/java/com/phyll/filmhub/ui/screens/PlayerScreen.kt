@@ -99,6 +99,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -177,6 +178,8 @@ fun PlayerScreen(
     incomingCompanionSub: ExternalSubtitleRef?,
     seriesProfile: SeriesSubtitleProfile? = null,
     remoteCommand: PlayerRemoteCommand? = null,
+    isTvHardware: Boolean = false,
+    onSaveGeminiKeyInline: (String, String) -> Unit = { _, _ -> },
     onConsumeRemoteCommand: (Long) -> Unit = {},
     onReportTelemetry: (CompanionPlayerTelemetry) -> Unit = {},
     onSaveSeriesProfile: ((SeriesSubtitleProfile) -> SeriesSubtitleProfile) -> Unit = {},
@@ -652,10 +655,15 @@ fun PlayerScreen(
         onConsumeRemoteCommand(cmd.id)
     }
 
-    // As soon as the user scans the QR code on their phone to load a RAM Gemini Key while waiting on a no-sub movie,
-    // immediately kick off Gemini Multimodal Audio-to-Thai-Subtitle generation & release playback!
+    // If the user enters/syncs a brand-new Gemini API Key while waiting on a no-sub Pre-Flight screen,
+    // immediately start Gemini Audio Subtitle generation (guarded by lastTriedKey so failed models never loop!).
+    var lastAutoTriggeredGeminiKey by remember(episode.id) { mutableStateOf(geminiApiKey) }
     LaunchedEffect(geminiApiKey, preFlightState.needsGeminiKeyQr) {
-        if (preFlightState.needsGeminiKeyQr && geminiApiKey.isNotBlank()) {
+        if (preFlightState.needsGeminiKeyQr &&
+            geminiApiKey.isNotBlank() &&
+            geminiApiKey != lastAutoTriggeredGeminiKey
+        ) {
+            lastAutoTriggeredGeminiKey = geminiApiKey
             subtitleManager.startGeminiRollingAudioSubtitles(
                 movie = movie,
                 episode = episode,
@@ -1086,7 +1094,9 @@ fun PlayerScreen(
                 episode = episode,
                 state = preFlightState,
                 hasGeminiKeyInRam = geminiApiKey.isNotBlank(),
+                isTvHardware = isTvHardware,
                 geminiModelId = subtitleConfig.geminiModelId,
+                onSaveGeminiKeyInline = onSaveGeminiKeyInline,
                 onStartGeminiAudioSub = {
                     exoPlayer.pause()
                     subtitleManager.startGeminiRollingAudioSubtitles(
@@ -1520,6 +1530,7 @@ fun PlayerScreen(
                 sleepTimerMinutes = sleepTimerMinutes,
                 canEnterPip = !isTv && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && activity != null,
                 isAutoSyncing = isAutoSyncing,
+                showTvQrOption = isTvHardware,
                 onEnterPip = {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && activity != null) {
                         runCatching {
@@ -1625,6 +1636,7 @@ fun PlayerScreen(
                 bilingualCues = bilingualSnapCues,
                 isAutoSyncing = isAutoSyncing,
                 hasGeminiKeyInRam = geminiApiKey.isNotBlank(),
+                isTvHardware = isTvHardware,
                 totalSeriesEpisodes = allEpisodes.size.coerceAtLeast(1),
                 onPickCue = { chosenCue ->
                     val adjustedAnchorMs = (snapAnchorMovieMs - 350L).coerceAtLeast(0L)
@@ -1707,6 +1719,7 @@ fun PlayerScreen(
                 defaultSearchQuery = movie.originalTitle.ifBlank { movie.title },
                 discoveredModels = discoveredGeminiModels,
                 hasGeminiKeyInRam = geminiApiKey.isNotBlank(),
+                isTvHardware = isTvHardware,
                 isAutoSyncing = isAutoSyncing,
                 preferGeminiAudioForSeries = isLockedGeminiForSeries,
                 totalSeriesEpisodes = allEpisodes.size.coerceAtLeast(1),
@@ -1740,6 +1753,7 @@ fun PlayerScreen(
                     )
                 },
                 onSelectGeminiModel = onSelectGeminiModel,
+                onSaveGeminiKeyInline = onSaveGeminiKeyInline,
                 onRefreshGeminiModels = onRefreshGeminiModels,
                 onTriggerGeminiAudioSubNow = {
                     showSubtitleDrawer = false
@@ -1848,6 +1862,7 @@ private fun QuickBilingualSnapModal(
     bilingualCues: List<SnapCueCandidate>,
     isAutoSyncing: Boolean,
     hasGeminiKeyInRam: Boolean,
+    isTvHardware: Boolean = false,
     totalSeriesEpisodes: Int,
     onPickCue: (SnapCueCandidate) -> Unit,
     onNudgeOffsetMs: (Long) -> Unit,
@@ -1996,7 +2011,7 @@ private fun QuickBilingualSnapModal(
                             fontWeight = FontWeight.ExtraBold
                         )
                     }
-                } else {
+                } else if (isTvHardware) {
                     Box(
                         modifier = Modifier
                             .tvFocusableClickable(
@@ -2008,7 +2023,7 @@ private fun QuickBilingualSnapModal(
                             .padding(horizontal = 12.dp, vertical = 7.dp)
                     ) {
                         Text(
-                            text = "🔐 Quét QR Nạp Gemini Key (AI Khớp & Tự Tạo Sub)",
+                            text = "🔐 Quét QR Nạp Gemini Key Trên TV",
                             color = ThaiGold,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold
@@ -2123,7 +2138,9 @@ private fun PreFlightSubtitleGateOverlay(
     episode: Episode,
     state: PreFlightSubtitleState,
     hasGeminiKeyInRam: Boolean,
+    isTvHardware: Boolean = false,
     geminiModelId: String,
+    onSaveGeminiKeyInline: (String, String) -> Unit = { _, _ -> },
     onStartGeminiAudioSub: () -> Unit,
     onCustomSearch: (String) -> Unit,
     onOpenQrUpload: () -> Unit,
@@ -2136,6 +2153,7 @@ private fun PreFlightSubtitleGateOverlay(
     var customQuery by remember(state.searchedQuery) {
         mutableStateOf(state.searchedQuery.ifBlank { movie.originalTitle.ifBlank { movie.title } })
     }
+    var inlineGeminiKey by remember { mutableStateOf("") }
 
     LaunchedEffect(state.noSubtitleFound) {
         runCatching { view.requestFocusFromTouch() }
@@ -2264,6 +2282,55 @@ private fun PreFlightSubtitleGateOverlay(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
+                // On Android Phones/Tablets: direct inline Gemini API Key input (NEVER show a TV QR Code!)
+                if (!isTvHardware && (!hasGeminiKeyInRam || state.needsGeminiKeyQr)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = inlineGeminiKey,
+                            onValueChange = { inlineGeminiKey = it },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            placeholder = { Text("Dán Gemini API Key (lưu vĩnh viễn trên máy)...", fontSize = 12.sp) },
+                            modifier = Modifier.weight(1f),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = Color(0xFF374151),
+                                focusedContainerColor = CinemaObsidian,
+                                unfocusedContainerColor = CinemaObsidian,
+                                focusedTextColor = TextPrimary,
+                                unfocusedTextColor = TextPrimary
+                            )
+                        )
+                        Box(
+                            modifier = Modifier
+                                .tvFocusableClickable(
+                                    shape = RoundedCornerShape(10.dp),
+                                    onClick = {
+                                        val clean = inlineGeminiKey.trim()
+                                        if (clean.isNotEmpty()) {
+                                            onSaveGeminiKeyInline(clean, geminiModelId)
+                                            inlineGeminiKey = ""
+                                        }
+                                    }
+                                )
+                                .background(EmeraldPrimary)
+                                .padding(horizontal = 14.dp, vertical = 14.dp)
+                        ) {
+                            Text(
+                                text = "Lưu Key",
+                                color = CinemaObsidian,
+                                fontSize = 12.5.sp,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                }
+
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -2288,7 +2355,7 @@ private fun PreFlightSubtitleGateOverlay(
                                 fontWeight = FontWeight.ExtraBold
                             )
                         }
-                    } else if (state.needsGeminiKeyQr) {
+                    } else if (isTvHardware && state.needsGeminiKeyQr) {
                         Box(
                             modifier = Modifier
                                 .focusRequester(primaryBtnFocus)
@@ -2302,7 +2369,7 @@ private fun PreFlightSubtitleGateOverlay(
                                 .padding(horizontal = 16.dp, vertical = 10.dp)
                         ) {
                             Text(
-                                text = "🔐 Quét QR / Nạp Gemini Key (AI Tự Tạo Sub)",
+                                text = "📱 Quét QR Từ Điện Thoại (Nạp Key Lên TV)",
                                 color = CinemaObsidian,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.ExtraBold
@@ -2310,7 +2377,7 @@ private fun PreFlightSubtitleGateOverlay(
                         }
                     }
 
-                    val searchModifier = if (!hasGeminiKeyInRam && !state.needsGeminiKeyQr) {
+                    val searchModifier = if (!hasGeminiKeyInRam && (!isTvHardware || !state.needsGeminiKeyQr)) {
                         Modifier.focusRequester(primaryBtnFocus)
                     } else {
                         Modifier
@@ -2329,17 +2396,19 @@ private fun PreFlightSubtitleGateOverlay(
                         Text(text = "🔍 Tìm Sub Theo Tên Này", color = ElectricCyan, fontSize = 13.sp, fontWeight = FontWeight.ExtraBold)
                     }
 
-                    Box(
-                        modifier = Modifier
-                            .tvFocusableClickable(
-                                shape = RoundedCornerShape(10.dp),
-                                focusedBorderColor = ElectricCyan,
-                                onClick = onOpenQrUpload
-                            )
-                            .background(CinemaSurfaceElevated)
-                            .padding(horizontal = 14.dp, vertical = 10.dp)
-                    ) {
-                        Text(text = "📱 QR Điện Thoại (Key & File .SRT)", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    if (isTvHardware) {
+                        Box(
+                            modifier = Modifier
+                                .tvFocusableClickable(
+                                    shape = RoundedCornerShape(10.dp),
+                                    focusedBorderColor = ElectricCyan,
+                                    onClick = onOpenQrUpload
+                                )
+                                .background(CinemaSurfaceElevated)
+                                .padding(horizontal = 14.dp, vertical = 10.dp)
+                        ) {
+                            Text(text = "📱 QR Điện Thoại (Gửi Key / File .SRT)", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
 
                     Box(

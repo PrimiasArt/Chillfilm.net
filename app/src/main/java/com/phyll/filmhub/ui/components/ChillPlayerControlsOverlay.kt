@@ -437,6 +437,7 @@ fun BoxScope.ChillPlayerMenuOverlay(
     sleepTimerMinutes: Int?,
     canEnterPip: Boolean = false,
     isAutoSyncing: Boolean = false,
+    showTvQrOption: Boolean = false,
     onEnterPip: () -> Unit = {},
     onTriggerAiAutoSync: () -> Unit = {},
     onOpenQrCompanion: () -> Unit = {},
@@ -587,15 +588,17 @@ fun BoxScope.ChillPlayerMenuOverlay(
                                 }
                             )
                         }
-                        MenuChoiceRow(
-                            icon = { Icon(Icons.Default.QrCode2, null, tint = TextSecondary, modifier = Modifier.size(17.dp)) },
-                            label = "QR Gửi Sub / Remote",
-                            value = "LAN",
-                            onClick = {
-                                onNavigateMenu(ChillPlayerMenu.NONE)
-                                onOpenQrCompanion()
-                            }
-                        )
+                        if (showTvQrOption) {
+                            MenuChoiceRow(
+                                icon = { Icon(Icons.Default.QrCode2, null, tint = TextSecondary, modifier = Modifier.size(17.dp)) },
+                                label = "QR Kết Nối Từ Điện Thoại",
+                                value = "TV",
+                                onClick = {
+                                    onNavigateMenu(ChillPlayerMenu.NONE)
+                                    onOpenQrCompanion()
+                                }
+                            )
+                        }
                     }
 
                     ChillPlayerMenu.ASPECT -> {
