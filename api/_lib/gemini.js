@@ -164,6 +164,60 @@ export async function translateTextsServerSide({ texts, targetLang, apiKey, pref
   return { translated, modelUsed };
 }
 
+/**
+ * Batch-translates up to 20 catalog items (foreign MacCMS titles + short synopses)
+ * into BOTH natural English (`en`, `de`) and Vietnamese (`vi`, `dv`) in a single Gemini call.
+ */
+export async function translateCatalogItemsBilingual({ items, apiKey, preferredModel }) {
+  if (!Array.isArray(items) || !items.length || !apiKey) return [];
+  const payload = items.map((it, idx) => ({
+    i: idx,
+    t: String(it.name || '').trim().slice(0, 110),
+    o: String(it.origin_name || '').trim().slice(0, 90),
+    c: String(it.content || '').trim().slice(0, 180),
+  }));
+
+  const prompt = [
+    'Cinema metadata translator: for each movie/series below, provide clean official-style English title ("en"), natural Vietnamese title ("vi"), concise 1-sentence English synopsis ("de"), and concise 1-sentence Vietnamese synopsis ("dv").',
+    'If a title is already English or Vietnamese, keep/polish it naturally.',
+    'Return ONLY JSON array: [{"i":0,"en":"...","vi":"...","de":"...","dv":"..."}]',
+    'Input:',
+    JSON.stringify(payload),
+  ].join('\n');
+
+  const { rawText } = await callGeminiWithFallback({
+    apiKey,
+    preferredModel: preferredModel || 'gemini-2.5-flash',
+    preferTurboFlash: true,
+    contents: [{ parts: [{ text: prompt }] }],
+  });
+
+  const cleaned = rawText
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/```\s*$/, '')
+    .trim();
+  const s = cleaned.indexOf('[');
+  const e = cleaned.lastIndexOf(']');
+  if (s < 0 || e <= s) return [];
+  const arr = JSON.parse(cleaned.slice(s, e + 1));
+  const map = new Map();
+  arr.forEach((o, idx) => {
+    if (!o) return;
+    const key = typeof o.i === 'number' ? o.i : idx;
+    map.set(key, {
+      nameEn: String(o.en || '').trim().slice(0, 180),
+      nameVi: String(o.vi || '').trim().slice(0, 180),
+      contentEn: String(o.de || '').trim().slice(0, 280),
+      contentVi: String(o.dv || '').trim().slice(0, 280),
+    });
+  });
+  return items.map((it, idx) => ({
+    itemKey: it.item_key,
+    ...(map.get(idx) || { nameEn: '', nameVi: '', contentEn: '', contentVi: '' }),
+  }));
+}
+
 function parseFlexibleSeconds(val) {
   if (typeof val === 'number' && Number.isFinite(val)) return val;
   const s = String(val ?? '').trim();

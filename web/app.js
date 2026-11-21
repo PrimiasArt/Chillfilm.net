@@ -33,7 +33,7 @@ import {
   fetchLiveCatalogFeed,
   fetchCatalogBrowse,
   fetchCatalogDetail,
-} from './sync.js?v=9';
+} from './sync.js?v=10';
 
 const PHIM_API = 'https://phimapi.com';
 const PHIM_CDN = 'https://phimimg.com';
@@ -187,6 +187,113 @@ function saveCachedLiveModels(models) {
 
 const $ = (id) => document.getElementById(id);
 const tr = (key, vars) => t(state.prefs.uiLang, key, vars);
+
+const MY_LIST_STORAGE_KEY = 'chillfilm_nki_mylist_v1';
+
+function getDisplayTitle(movie) {
+  if (!movie) return '';
+  const ui = resolveUiLang(state.prefs.uiLang);
+  if (ui === 'vi' && movie.nameVi) return movie.nameVi;
+  if (ui !== 'zh' && movie.nameEn) return movie.nameEn;
+  return movie.name || movie.nameEn || movie.nameVi || movie.slug || '';
+}
+
+function getDisplayDesc(movie) {
+  if (!movie) return '';
+  const ui = resolveUiLang(state.prefs.uiLang);
+  if (ui === 'vi' && movie.contentVi) return movie.contentVi;
+  if (ui !== 'zh' && movie.contentEn) return movie.contentEn;
+  return movie.content || movie.contentEn || movie.contentVi || '';
+}
+
+function makeMyListKey(movie) {
+  const src = String(movie?.source || 'phimapi').trim().toLowerCase();
+  const sid = String(movie?.sourceId || '').trim();
+  const slug = String(movie?.slug || '').trim();
+  return `${src}::${sid}::${slug}`;
+}
+
+function loadMyList() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(MY_LIST_STORAGE_KEY) || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveMyList(list) {
+  try {
+    localStorage.setItem(MY_LIST_STORAGE_KEY, JSON.stringify((list || []).slice(0, 150)));
+  } catch {
+    // ignore storage quota
+  }
+}
+
+function isInMyList(movie) {
+  if (!movie || !movie.slug) return false;
+  const key = makeMyListKey(movie);
+  return loadMyList().some((it) => (it.itemKey || makeMyListKey(it)) === key);
+}
+
+function toggleMyList(movie) {
+  if (!movie || !movie.slug) return false;
+  const key = makeMyListKey(movie);
+  const list = loadMyList();
+  const existsIdx = list.findIndex((it) => (it.itemKey || makeMyListKey(it)) === key);
+  let added = false;
+
+  if (existsIdx >= 0) {
+    list.splice(existsIdx, 1);
+    saveMyList(list);
+    if (isCloudSignedIn()) {
+      cloudPushState({ myListRemoved: [key] }).catch(() => {});
+    }
+    showToast(`Removed "${getDisplayTitle(movie)}" from My List`);
+  } else {
+    const entry = {
+      itemKey: key,
+      source: movie.source || 'phimapi',
+      sourceId: movie.sourceId || '',
+      slug: movie.slug,
+      name: getDisplayTitle(movie),
+      nameEn: movie.nameEn || '',
+      nameVi: movie.nameVi || '',
+      origin_name: movie.origin_name || movie.name || '',
+      poster: movie.poster || '',
+      year: movie.year || '',
+      quality: movie.quality || 'HD',
+      addedAt: Date.now(),
+    };
+    list.unshift(entry);
+    saveMyList(list);
+    added = true;
+    if (isCloudSignedIn()) {
+      cloudPushState({ myList: [entry] }).catch(() => {});
+    }
+    showToast(`❤️ Saved "${entry.name}" to My List!`);
+  }
+  renderMyListSection();
+  return added;
+}
+
+function renderMyListSection() {
+  const sec = $('myListSection');
+  const grid = $('myListGrid');
+  if (!sec || !grid) return;
+  const list = loadMyList();
+  if (!list.length) {
+    sec.style.display = 'none';
+    return;
+  }
+  sec.style.display = 'block';
+  grid.innerHTML = '';
+  list.slice(0, 24).forEach((item) => {
+    const card = createMovieCardElement(item);
+    card.onclick = () => openMovieDetail(item, false);
+    grid.appendChild(card);
+  });
+}
 
 function getCategoryLabel(catId) {
   const key = `cat_${catId}`;
@@ -574,6 +681,30 @@ async function pullCloudStateAndMerge({ silent = true, force = false } = {}) {
       }
     }
 
+    // Merge 2-way Cloud My List (union local + server, push any local-only items up)
+    if (Array.isArray(data.myList)) {
+      const localList = loadMyList();
+      const mapMy = new Map();
+      for (const it of data.myList) {
+        const k = it.itemKey || makeMyListKey(it);
+        mapMy.set(k, { ...it, itemKey: k });
+      }
+      const localOnly = [];
+      for (const it of localList) {
+        const k = it.itemKey || makeMyListKey(it);
+        if (!mapMy.has(k)) {
+          mapMy.set(k, { ...it, itemKey: k });
+          localOnly.push({ ...it, itemKey: k });
+        }
+      }
+      const mergedMy = Array.from(mapMy.values()).sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+      saveMyList(mergedMy);
+      renderMyListSection();
+      if (localOnly.length) {
+        cloudPushState({ myList: localOnly }).catch(() => {});
+      }
+    }
+
     // Merge synced subtitle preferences if server prefs exist
     if (data.prefs && typeof data.prefs === 'object') {
       const p = data.prefs;
@@ -713,6 +844,7 @@ async function loadCategory(catId, { forceRefresh = false, silent = false } = {}
           : state.movies.slice(0, 6);
         setHeroSlides(heroList);
         renderHistorySection();
+        renderMyListSection();
         renderHomeSwimlanes();
         if (forceRefresh && !silent) showToast('🔥 Updated latest multi-source movies!');
         return;
@@ -734,6 +866,7 @@ async function loadCategory(catId, { forceRefresh = false, silent = false } = {}
     if (state.movies.length) {
       setHeroSlides(state.movies.slice(0, 6));
       renderHistorySection();
+      renderMyListSection();
       renderHomeSwimlanes();
     } else if (!silent) {
       swimWrap.innerHTML = `<div style="text-align:center;padding:36px;color:#fca5a5;">${escapeHtml(tr('loadError'))}</div>`;
@@ -845,6 +978,44 @@ function renderHomeSwimlanes() {
   });
 }
 
+async function executeAdvancedFilter() {
+  const country = ($('countryPickerSelect')?.value || '').trim();
+  const genre = ($('advGenreSelect')?.value || '').trim();
+  const year = ($('advYearSelect')?.value || '').trim();
+  const minRating = Number($('advRatingSelect')?.value || 0);
+
+  if (!country && !genre && !year && !minRating) {
+    loadCategory('hot');
+    return;
+  }
+
+  closeDetailView();
+  $('heroBox').style.display = 'none';
+  $('historySection').style.display = 'none';
+  if ($('myListSection')) $('myListSection').style.display = 'none';
+  $('homeSwimlanes').style.display = 'none';
+  $('catalogGridSection').style.display = 'block';
+  document.querySelector('.content-lift')?.classList.add('no-hero');
+  $('topbar')?.classList.add('solid');
+
+  const labelParts = [];
+  if (country) labelParts.push(getCategoryLabel(country));
+  if (genre) labelParts.push(genre.toUpperCase());
+  if (year) labelParts.push(year);
+  if (minRating > 0) labelParts.push(`★ ${minRating}+`);
+  const titleBase = `🎛 ${labelParts.join(' • ')}`;
+  $('catalogTitle').textContent = titleBase;
+  $('catalogGrid').innerHTML = renderSkeletonGridHtml(12);
+
+  try {
+    const data = await fetchCatalogBrowse({ country, genre, year, minRating: minRating || '' });
+    const list = Array.isArray(data?.items) ? data.items : [];
+    renderMovieGrid(list, `${titleBase} (${list.length})`);
+  } catch {
+    showToast(tr('loadError'));
+  }
+}
+
 async function executeSearch(keyword) {
   const q = (keyword || '').trim();
   if (!q) {
@@ -940,7 +1111,9 @@ function renderHero(movie) {
   const matchText = movie.tmdbScore >= 5 ? `★ ${movie.tmdbScore.toFixed(1)} TMDB` : '🔥 HOT NEW';
   const genreLine = Array.isArray(movie.genres) && movie.genres.length ? movie.genres.join(' • ') : '';
   const epLine = movie.episode_current ? `<span style="color:#86efac;font-weight:700;">${escapeHtml(movie.episode_current)}</span>` : '';
-  const descText = movie.content || movie.origin_name || tr('heroDefaultDesc');
+  const dispTitle = getDisplayTitle(movie);
+  const descText = getDisplayDesc(movie) || movie.origin_name || tr('heroDefaultDesc');
+  const savedInMyList = isInMyList(movie);
   const totalSlides = state.heroMovies.length;
   const controlsHtml = totalSlides > 1
     ? `
@@ -963,7 +1136,7 @@ function renderHero(movie) {
           <div class="nf-series-mark"><span class="nki-tag">NKI</span><span>AI CINEMA</span></div>
           <span class="live-feed-pill">● AUTO-UPDATED</span>
         </div>
-        <h1 class="hero-title">${escapeHtml(movie.name)}</h1>
+        <h1 class="hero-title">${escapeHtml(dispTitle)}</h1>
         <div class="hero-meta">
           <span class="match-score">${escapeHtml(matchText)}</span>
           <span style="color:#e5e5e5;">${escapeHtml(movie.year || '2026')}</span>
@@ -976,6 +1149,7 @@ function renderHero(movie) {
         <div class="hero-actions">
           <button class="btn-nf-play" id="heroPlayBtn">${escapeHtml(tr('watchNow'))}</button>
           <button class="btn-nf-info" id="heroDetailBtn">ⓘ ${escapeHtml(tr('detailsBtn'))}</button>
+          <button class="btn-nf-mylist ${savedInMyList ? 'saved' : ''}" id="heroMyListBtn" type="button">${savedInMyList ? '✓ In My List' : '+ My List'}</button>
         </div>
       </div>
     </div>
@@ -985,6 +1159,13 @@ function renderHero(movie) {
   box.onmouseleave = () => { state.heroPaused = false; };
   $('heroPlayBtn').onclick = () => openMovieDetail(movie, true);
   $('heroDetailBtn').onclick = () => openMovieDetail(movie, false);
+  if ($('heroMyListBtn')) {
+    $('heroMyListBtn').onclick = () => {
+      const nowSaved = toggleMyList(movie);
+      $('heroMyListBtn').classList.toggle('saved', nowSaved);
+      $('heroMyListBtn').textContent = nowSaved ? '✓ In My List' : '+ My List';
+    };
+  }
   if (totalSlides > 1) {
     $('heroPrevBtn').onclick = () => {
       state.heroIndex = (state.heroIndex - 1 + totalSlides) % totalSlides;
@@ -1044,6 +1225,7 @@ function renderMovieGrid(list, title) {
 
 function createMovieCardElement(movie) {
   const el = document.createElement('div');
+  const dispName = getDisplayTitle(movie);
   const metaBits = [
     movie.year || '',
     Array.isArray(movie.countries) && movie.countries.length ? movie.countries[0] : '',
@@ -1055,7 +1237,7 @@ function createMovieCardElement(movie) {
   el.className = 'movie-card';
   el.innerHTML = `
     <div class="poster-wrap">
-      <img loading="lazy" src="${escapeHtml(posterSrc)}" alt="${escapeHtml(movie.name)}" onerror="if(!this.dataset.fb){this.dataset.fb='1';this.classList.add('img-fallback');this.src='./assets/icon-192.png?v=2';}" />
+      <img loading="lazy" src="${escapeHtml(posterSrc)}" alt="${escapeHtml(dispName)}" onerror="if(!this.dataset.fb){this.dataset.fb='1';this.classList.add('img-fallback');this.src='./assets/icon-192.png?v=2';}" />
       <span class="card-nki-mark">NKI</span>
       <span class="card-badge">AI</span>
       <span class="card-quality">${escapeHtml((movie.episode_current || movie.quality || 'HD').slice(0, 12))}</span>
@@ -1063,7 +1245,7 @@ function createMovieCardElement(movie) {
       ${movie.progress ? `<div class="card-progress"><div class="card-progress-fill" style="width:${Math.round(movie.progress * 100)}%"></div></div>` : ''}
     </div>
     <div class="card-info">
-      <div class="card-title">${escapeHtml(movie.name)}</div>
+      <div class="card-title">${escapeHtml(dispName)}</div>
       <div class="card-meta">${escapeHtml(metaLine)}</div>
     </div>
   `;
@@ -1172,6 +1354,10 @@ function renderDetailView(detail) {
     ? tr('continueEp', { ep: resumeEp.name, time: formatTime(resumeSec) })
     : (firstEp ? tr('watchNowEp', { ep: firstEp.name }) : '');
   const lang = resolveLanguage(state.prefs.primaryLang);
+  const dispTitle = getDisplayTitle(detail);
+  const dispDesc = getDisplayDesc(detail) || tr('heroDefaultDesc');
+  const origSubtitle = dispTitle !== detail.name ? detail.name : detail.origin_name;
+  const savedInMyList = isInMyList(detail);
 
   dv.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
@@ -1179,28 +1365,37 @@ function renderDetailView(detail) {
       ${resumeEp ? `<button class="btn-glass" id="detailCastBtn">${escapeHtml(tr('castToTv'))}</button>` : ''}
     </div>
     <div class="detail-hero">
-      <img class="detail-poster" src="${detail.poster}" alt="${escapeHtml(detail.name)}" />
+      <img class="detail-poster" src="${escapeHtml(detail.poster || './assets/icon-192.png?v=2')}" alt="${escapeHtml(dispTitle)}" onerror="if(!this.dataset.fb){this.dataset.fb='1';this.src='./assets/icon-192.png?v=2';}" />
       <div style="display:flex;flex-direction:column;gap:10px;min-width:0;">
         <div class="hero-meta">
           <span class="match-score">98% Match</span>
           <span class="badge-ai">AI SUB (${lang.badge})</span>
           <span style="font-size:12px;color:#b3b3b3;font-weight:700;">${escapeHtml(detail.year)} • ${escapeHtml(detail.time || detail.quality)}</span>
         </div>
-        <h2 style="font-size:clamp(20px,3.2vw,32px);font-weight:900;">${escapeHtml(detail.name)}</h2>
-        ${detail.origin_name ? `<div style="font-size:13px;color:#b3b3b3;">${escapeHtml(detail.origin_name)}</div>` : ''}
-        <p style="font-size:13.5px;color:#e5e5e5;line-height:1.6;">${escapeHtml(detail.content || tr('heroDefaultDesc'))}</p>
+        <h2 style="font-size:clamp(20px,3.2vw,32px);font-weight:900;">${escapeHtml(dispTitle)}</h2>
+        ${origSubtitle ? `<div style="font-size:13px;color:#b3b3b3;">${escapeHtml(origSubtitle)}</div>` : ''}
+        <p style="font-size:13.5px;color:#e5e5e5;line-height:1.6;">${escapeHtml(dispDesc)}</p>
         <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:6px;">
           ${resumeEp ? `<button class="btn-nf-play" id="detailPlayPrimary">${escapeHtml(primaryBtnLabel)}</button>` : `<span style="color:#fca5a5;font-size:13px;">${escapeHtml(tr('noStream'))}</span>`}
+          <button class="btn-nf-mylist ${savedInMyList ? 'saved' : ''}" id="detailMyListBtn" type="button">${savedInMyList ? '✓ In My List' : '+ My List'}</button>
         </div>
       </div>
     </div>
     <div id="detailServersWrap" style="margin-top:22px;"></div>
+    <div id="detailSimilarWrap" class="similar-section"></div>
   `;
 
   $('detailBackBtn').onclick = closeDetailView;
   if (resumeEp) {
     $('detailPlayPrimary').onclick = () => openPlayer(detail, resumeEp, resumeSec);
     $('detailCastBtn').onclick = () => castCurrentToTv(detail, resumeEp, resumeSec);
+  }
+  if ($('detailMyListBtn')) {
+    $('detailMyListBtn').onclick = () => {
+      const nowSaved = toggleMyList(detail);
+      $('detailMyListBtn').classList.toggle('saved', nowSaved);
+      $('detailMyListBtn').textContent = nowSaved ? '✓ In My List' : '+ My List';
+    };
   }
 
   const wrap = $('detailServersWrap');
@@ -1226,6 +1421,21 @@ function renderDetailView(detail) {
     block.appendChild(grid);
     wrap.appendChild(block);
   });
+
+  // More Like This (Similar Movies Row)
+  const simWrap = $('detailSimilarWrap');
+  if (simWrap && Array.isArray(detail.similar) && detail.similar.length > 0) {
+    simWrap.innerHTML = `
+      <div class="section-head"><div class="section-title">✨ More Like This</div></div>
+      <div class="row-rail-wrap"><div class="row-rail" id="detailSimilarRail"></div></div>
+    `;
+    const rail = $('detailSimilarRail');
+    detail.similar.forEach((simMovie) => {
+      const card = createMovieCardElement(simMovie);
+      card.onclick = () => openMovieDetail(simMovie, false);
+      rail.appendChild(card);
+    });
+  }
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
@@ -1942,8 +2152,8 @@ function openPlayer(movie, episode, startSec = 0, { preserveFailover = false } =
   document.documentElement.style.overflow = 'hidden';
   document.body.style.overflow = 'hidden';
 
-  $('hudMovieTitle').textContent = `${movie.name} • ${episode.name}`;
-  if ($('miniTitle')) $('miniTitle').textContent = `${movie.name} • ${episode.name}`;
+  $('hudMovieTitle').textContent = `${getDisplayTitle(movie)} • ${episode.name}`;
+  if ($('miniTitle')) $('miniTitle').textContent = `${getDisplayTitle(movie)} • ${episode.name}`;
   updateSubStatusBadge(tr('checkingSavedSub'));
   applyVolumeBoost(state.volumeScale);
   setControlsVisible(true);
@@ -2996,6 +3206,7 @@ function showGestureToast(text) {
 function init() {
   applyUiTranslations();
   renderCategories();
+  renderMyListSection();
   loadCategory('hot');
 
   // Netflix transparent-to-solid sticky navbar on scroll
@@ -3023,13 +3234,33 @@ function init() {
   };
   $('countryPickerSelect')?.addEventListener('change', (e) => {
     const slug = e.target.value;
-    if (!slug) {
+    const hasAdv = Boolean($('advGenreSelect')?.value || $('advYearSelect')?.value || Number($('advRatingSelect')?.value || 0) > 0);
+    if (hasAdv) {
+      executeAdvancedFilter();
+    } else if (!slug) {
       loadCategory('hot');
     } else {
       $('searchInputDesktop').value = '';
       $('searchInputMobile').value = '';
       loadCategory(slug);
     }
+  });
+  $('advFilterToggleBtn')?.addEventListener('click', () => {
+    const panel = $('advFilterPanel');
+    if (!panel) return;
+    const willOpen = panel.style.display === 'none';
+    panel.style.display = willOpen ? 'flex' : 'none';
+    $('advFilterToggleBtn').classList.toggle('active', willOpen);
+  });
+  $('advFilterApplyBtn')?.addEventListener('click', () => executeAdvancedFilter());
+  $('advFilterResetBtn')?.addEventListener('click', () => {
+    if ($('countryPickerSelect')) $('countryPickerSelect').value = '';
+    if ($('advGenreSelect')) $('advGenreSelect').value = '';
+    if ($('advYearSelect')) $('advYearSelect').value = '';
+    if ($('advRatingSelect')) $('advRatingSelect').value = '0';
+    if ($('advFilterPanel')) $('advFilterPanel').style.display = 'none';
+    $('advFilterToggleBtn')?.classList.remove('active');
+    loadCategory('hot');
   });
   $('searchBtnDesktop').onclick = () => executeSearch($('searchInputDesktop').value);
   $('searchInputDesktop').addEventListener('keydown', (e) => {

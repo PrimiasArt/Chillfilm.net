@@ -15,7 +15,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Sarabun:wght@500;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=9" />
+  <link rel="stylesheet" href="./styles.css?v=10" />
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js" defer></script>
 </head>
 <body>
@@ -79,12 +79,52 @@
       <section class="hero" id="heroBox" style="display:none;"></section>
 
       <div class="container content-lift">
-        <!-- Mobile / Quick Genre Strip + All 36 Countries Selector -->
+        <!-- Mobile / Quick Genre Strip + All 36 Countries Selector + Advanced Filter Toggle -->
         <div class="cat-toolbar">
           <nav class="cat-strip" id="catStrip"></nav>
-          <select class="country-picker-select" id="countryPickerSelect" title="Browse All 36+ Countries">
-            <option value="">🌍 All Countries (36+)</option>
+          <div class="toolbar-right-controls">
+            <select class="country-picker-select" id="countryPickerSelect" title="Browse All 36+ Countries">
+              <option value="">🌍 All Countries (36+)</option>
+            </select>
+            <button class="filter-toggle-btn" id="advFilterToggleBtn" type="button" title="Advanced Filters (Genre, Year, Rating)">
+              <svg class="ui-ico" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="7" y1="12" x2="17" y2="12"/><line x1="10" y1="18" x2="14" y2="18"/></svg>
+              <span>Filter</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Collapsible Advanced Filter Bar (Country • Genre • Year • Min Rating) -->
+        <div class="adv-filter-panel" id="advFilterPanel" style="display:none;">
+          <select class="adv-filter-select" id="advGenreSelect" aria-label="Filter by genre">
+            <option value="">All Genres</option>
+            <option value="action">Action</option>
+            <option value="romance">Romance</option>
+            <option value="sci-fi">Sci-Fi</option>
+            <option value="horror">Horror</option>
+            <option value="comedy">Comedy</option>
+            <option value="drama">Drama</option>
+            <option value="thriller">Thriller / Mystery</option>
+            <option value="crime">Crime</option>
+            <option value="historical">Historical</option>
+            <option value="anime">Anime / Animation</option>
+            <option value="documentary">Documentary</option>
           </select>
+          <select class="adv-filter-select" id="advYearSelect" aria-label="Filter by release year">
+            <option value="">Any Year</option>
+            <option value="2026">2026</option>
+            <option value="2025">2025</option>
+            <option value="2024">2024</option>
+            <option value="2020s">2020 – 2023</option>
+            <option value="classic">Classic (&lt; 2015)</option>
+          </select>
+          <select class="adv-filter-select" id="advRatingSelect" aria-label="Filter by min rating">
+            <option value="0">Any Rating</option>
+            <option value="6">★ 6.0+</option>
+            <option value="7">★ 7.0+</option>
+            <option value="8">★ 8.0+</option>
+          </select>
+          <button class="btn-grad" id="advFilterApplyBtn" type="button" style="padding:7px 14px;font-size:12px;">Apply Filters</button>
+          <button class="btn-glass" id="advFilterResetBtn" type="button" style="padding:7px 11px;font-size:12px;">Reset</button>
         </div>
 
         <!-- Continue Watching Swimlane -->
@@ -94,6 +134,16 @@
           </div>
           <div class="row-rail-wrap">
             <div class="row-rail" id="historyGrid"></div>
+          </div>
+        </section>
+
+        <!-- My List (Saved for Later — Local + Cloud Synced) -->
+        <section id="myListSection" style="display:none;" class="nf-row-section">
+          <div class="section-head">
+            <div class="section-title">❤️ <span id="myListSectionTitle">My List</span></div>
+          </div>
+          <div class="row-rail-wrap">
+            <div class="row-rail" id="myListGrid"></div>
           </div>
         </section>
 
@@ -677,6 +727,6 @@
 
   <div class="toast" id="toast"></div>
 
-  <script type="module" src="./app.js?v=9"></script>
+  <script type="module" src="./app.js?v=10"></script>
 </body>
 </html>

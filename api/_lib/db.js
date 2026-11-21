@@ -164,8 +164,36 @@ export async function ensureSchema() {
         category_tag TEXT NOT NULL DEFAULT 'latest',
         first_seen_at BIGINT NOT NULL,
         updated_at BIGINT NOT NULL,
-        last_verified_at BIGINT NOT NULL
+        last_verified_at BIGINT NOT NULL,
+        name_en TEXT NOT NULL DEFAULT '',
+        name_vi TEXT NOT NULL DEFAULT '',
+        content_en TEXT NOT NULL DEFAULT '',
+        content_vi TEXT NOT NULL DEFAULT ''
       )
+    `;
+    await sql`ALTER TABLE nki_catalog_items ADD COLUMN IF NOT EXISTS name_en TEXT NOT NULL DEFAULT ''`;
+    await sql`ALTER TABLE nki_catalog_items ADD COLUMN IF NOT EXISTS name_vi TEXT NOT NULL DEFAULT ''`;
+    await sql`ALTER TABLE nki_catalog_items ADD COLUMN IF NOT EXISTS content_en TEXT NOT NULL DEFAULT ''`;
+    await sql`ALTER TABLE nki_catalog_items ADD COLUMN IF NOT EXISTS content_vi TEXT NOT NULL DEFAULT ''`;
+    await sql`
+      CREATE TABLE IF NOT EXISTS nki_my_list (
+        user_id TEXT NOT NULL,
+        item_key TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'phimapi',
+        source_id TEXT NOT NULL DEFAULT '',
+        slug TEXT NOT NULL,
+        name TEXT NOT NULL,
+        origin_name TEXT NOT NULL DEFAULT '',
+        poster TEXT NOT NULL DEFAULT '',
+        year TEXT NOT NULL DEFAULT '',
+        quality TEXT NOT NULL DEFAULT 'HD',
+        added_at BIGINT NOT NULL,
+        PRIMARY KEY (user_id, item_key)
+      )
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_nki_my_list_user_added
+      ON nki_my_list (user_id, added_at DESC)
     `;
     await sql`
       CREATE INDEX IF NOT EXISTS idx_nki_catalog_updated

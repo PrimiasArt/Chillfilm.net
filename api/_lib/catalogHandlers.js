@@ -1,8 +1,9 @@
 import { metric, waitUntil } from '@vercel/functions';
-import { normalizeMovieSlug } from './db.js';
+import { ensureSchema, getSql, normalizeMovieSlug } from './db.js';
 import { CORS_HEADERS, jsonResponse } from './auth.js';
 import { filterSafeMovies, isBlockedCategoryTag, isBlockedContent } from './safety.js';
 import {
+  findSimilarMovies,
   getCrawledFeedData,
   runCatalogCrawlAndHealthCheck,
   searchCrawledCatalog,
@@ -28,12 +29,58 @@ const NGUONC_API = 'https://phim.nguonc.com/api/films/phim-moi-cap-nhat?page=1';
 const IPTV_MOVIES_URL = 'https://iptv-org.github.io/iptv/categories/movies.m3u';
 let _bootCrawlTriggered = false;
 
+const GENRE_MAP_PHIMAPI = {
+  action: { slug: 'hanh-dong', sqlTerm: 'Action' },
+  romance: { slug: 'tinh-cam', sqlTerm: 'Romance' },
+  'sci-fi': { slug: 'vien-tuong', sqlTerm: 'Sci-Fi' },
+  horror: { slug: 'kinh-di', sqlTerm: 'Horror' },
+  comedy: { slug: 'hai-huoc', sqlTerm: 'Comedy' },
+  drama: { slug: 'chinh-kich', sqlTerm: 'Drama' },
+  thriller: { slug: 'tam-ly', sqlTerm: 'Thriller' },
+  crime: { slug: 'hinh-su', sqlTerm: 'Crime' },
+  historical: { slug: 'co-trang', sqlTerm: 'Historical' },
+  documentary: { slug: 'tai-lieu', sqlTerm: 'Documentary' },
+  anime: { slug: 'hoat-hinh', sqlTerm: 'Anime' },
+};
+
+async function verifyStreamAlive(streamUrl, timeoutMs = 2200) {
+  if (!streamUrl || !streamUrl.startsWith('http')) return false;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(streamUrl, {
+      method: 'HEAD',
+      signal: ctrl.signal,
+      headers: { 'User-Agent': 'ChillFilm-NKI/3.5' },
+    });
+    if (res.ok) return true;
+    if (res.status === 405 || res.status === 403) {
+      const getRes = await fetch(streamUrl, {
+        method: 'GET',
+        signal: ctrl.signal,
+        headers: { 'User-Agent': 'ChillFilm-NKI/3.5', Range: 'bytes=0-128' },
+      });
+      return getRes.ok;
+    }
+    return false;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function enrichHeroMovie(movie, blockedTerms) {
   if (movie.source && movie.source !== 'phimapi') return movie;
   const detail = await fetchJsonSafe(`${PHIM_API}/phim/${encodeURIComponent(movie.slug)}`, 6000);
   const m = detail?.movie;
   if (!m) return movie;
   if (isBlockedContent(m, blockedTerms)) return null;
+  const firstStream = (detail?.episodes || [])
+    .flatMap((s) => s?.server_data || [])
+    .find((e) => e?.link_m3u8)?.link_m3u8 || '';
+  if (!firstStream) return null;
+  const streamAlive = await verifyStreamAlive(firstStream, 2200);
   const desc = stripHtml(m.content || '').slice(0, 260);
   const genres = Array.isArray(m.category)
     ? m.category.map((c) => c?.name).filter(Boolean).slice(0, 3)
@@ -56,6 +103,7 @@ async function enrichHeroMovie(movie, blockedTerms) {
     imdbId,
     tmdbScore: Number.isFinite(voteAvg) && voteAvg > 0 ? Math.round(voteAvg * 10) / 10 : movie.tmdbScore,
     content: desc,
+    streamVerified: streamAlive,
   };
 }
 
@@ -184,8 +232,10 @@ export async function handleCatalogFeed(request) {
       .sort((a, b) => b.s - a.s)
       .map((x) => x.m);
 
-    const enrichedHeroes = await Promise.all(rankedTrending.slice(0, 8).map((m) => enrichHeroMovie(m, blockedTerms)));
-    const heroMovies = enrichedHeroes.filter(Boolean).slice(0, 6);
+    const enrichedHeroes = await Promise.all(rankedTrending.slice(0, 9).map((m) => enrichHeroMovie(m, blockedTerms)));
+    const validHeroes = enrichedHeroes.filter(Boolean);
+    const verifiedHeroes = validHeroes.filter((m) => m.streamVerified);
+    const heroMovies = (verifiedHeroes.length >= 3 ? verifiedHeroes : validHeroes).slice(0, 6);
 
     const rows = [
       { id: 'hot', isTopTen: true, movies: rankedTrending.slice(0, 20) },
@@ -256,10 +306,13 @@ export async function handleCatalogBrowse(request) {
     const q = (url.searchParams.get('q') || '').trim();
     const country = (url.searchParams.get('country') || '').trim().toLowerCase();
     const category = (url.searchParams.get('category') || '').trim().toLowerCase();
+    const genre = (url.searchParams.get('genre') || '').trim().toLowerCase();
+    const year = (url.searchParams.get('year') || '').trim().toLowerCase();
+    const minRating = Math.max(0, Math.min(10, Number(url.searchParams.get('minRating') || 0)));
     const sourceId = (url.searchParams.get('sourceId') || '').trim();
     const page = Math.max(1, Math.min(50, Number(url.searchParams.get('page') || 1)));
 
-    if (isBlockedCategoryTag(category) || isBlockedCategoryTag(country)) {
+    if (isBlockedCategoryTag(category) || isBlockedCategoryTag(country) || isBlockedCategoryTag(genre)) {
       return jsonResponse({ ok: true, items: [], blocked: true, reason: 'Blocked by VN-Safe anti-porn policy' });
     }
 
@@ -323,6 +376,50 @@ export async function handleCatalogBrowse(request) {
         limit: 36,
         blockedTerms,
       });
+    } else if (genre || year || minRating > 0) {
+      // Advanced Multi-Filter Mode (Genre + Country + Year + Min TMDB Score across KKPhim + Neon Index)
+      const gInfo = GENRE_MAP_PHIMAPI[genre];
+      const countryInfo = GLOBAL_COUNTRIES.find((c) => c.slug === country);
+      const qsParts = [`page=${page}`, 'sort_field=modified.time', 'sort_type=desc', 'limit=36'];
+      if (country) qsParts.push(`country=${encodeURIComponent(country)}`);
+      if (year && /^\d{4}$/.test(year)) qsParts.push(`year=${encodeURIComponent(year)}`);
+
+      const phimUrl = gInfo
+        ? (gInfo.slug === 'hoat-hinh'
+          ? `${PHIM_API}/v1/api/danh-sach/hoat-hinh?${qsParts.join('&')}`
+          : `${PHIM_API}/v1/api/the-loai/${gInfo.slug}?${qsParts.join('&')}`)
+        : country
+          ? `${PHIM_API}/v1/api/quoc-gia/${encodeURIComponent(country)}?${qsParts.join('&')}`
+          : `${PHIM_API}/v1/api/danh-sach/phim-le?${qsParts.join('&')}`;
+
+      const [phimFiltered, dbFiltered] = await Promise.all([
+        fetchPhimApiList(phimUrl, blockedTerms),
+        searchCrawledCatalog({
+          country: countryInfo ? countryInfo.name.split(' ')[0] : '',
+          genre: gInfo ? gInfo.sqlTerm : genre,
+          year,
+          minRating,
+          page,
+          limit: 28,
+          blockedTerms,
+        }),
+      ]);
+
+      const merged = [];
+      const seen = new Set();
+      for (const m of [...phimFiltered, ...dbFiltered]) {
+        const yNum = Number(m.year || 0);
+        if (year === 'classic' && (!yNum || yNum >= 2015)) continue;
+        if (year === '2020s' && (!yNum || yNum < 2020 || yNum > 2023)) continue;
+        if (/^\d{4}$/.test(year) && String(m.year || '') !== year) continue;
+        if (minRating > 0 && Number(m.tmdbScore || 0) < minRating) continue;
+        const key = `${m.source || 'phimapi'}::${m.sourceId || ''}::${m.slug}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          merged.push(m);
+        }
+      }
+      items = merged;
     } else if (country) {
       const [phimCountry, archCountry] = await Promise.all([
         fetchPhimApiList(
@@ -407,7 +504,33 @@ export async function handleCatalogDetail(request) {
         const detail = await resolveMacCmsDetail(target, slug, blockedTerms);
         if (!detail) return jsonResponse({ error: 'Movie not found in MacCMS source' }, 404);
         if (detail.blocked) return jsonResponse({ error: 'Content blocked by VN-Safe anti-porn policy' }, 403);
-        return jsonResponse({ ok: true, detail });
+        // Hydrate cached bilingual translation + similar movies from Neon Postgres
+        let cachedMeta = null;
+        try {
+          await ensureSchema();
+          const sql = getSql();
+          const key = `maccms::${target.id}::${slug}`;
+          const rows = await sql`SELECT name_en, name_vi, content_en, content_vi, genres_json, countries_json FROM nki_catalog_items WHERE item_key = ${key} LIMIT 1`;
+          cachedMeta = rows?.[0] || null;
+        } catch { /* non-fatal */ }
+        const similar = await findSimilarMovies({
+          slug,
+          genres: Array.isArray(cachedMeta?.genres_json) ? cachedMeta.genres_json : [],
+          countries: Array.isArray(cachedMeta?.countries_json) ? cachedMeta.countries_json : [],
+          limit: 10,
+          blockedTerms,
+        });
+        return jsonResponse({
+          ok: true,
+          detail: {
+            ...detail,
+            nameEn: cachedMeta?.name_en || '',
+            nameVi: cachedMeta?.name_vi || '',
+            contentEn: cachedMeta?.content_en || '',
+            contentVi: cachedMeta?.content_vi || '',
+            similar,
+          },
+        });
       }
 
       const base = target.baseUrl.replace(/\/+$/, '');
@@ -457,6 +580,16 @@ export async function handleCatalogDetail(request) {
       }))
       .filter((s) => s.episodes.length);
 
+    const genres = Array.isArray(m.category) ? m.category.map((c) => c?.name).filter(Boolean) : [];
+    const countries = Array.isArray(m.country) ? m.country.map((c) => c?.name).filter(Boolean) : [];
+    const similar = await findSimilarMovies({
+      slug: m.slug || slug,
+      genres,
+      countries,
+      limit: 10,
+      blockedTerms,
+    });
+
     return new Response(
       JSON.stringify({
         ok: true,
@@ -471,9 +604,12 @@ export async function handleCatalogDetail(request) {
           content: stripHtml(m.content || ''),
           imdbId: String(m.imdb?.id || '').startsWith('tt') ? m.imdb.id : '',
           type: m.type || 'single',
+          genres,
+          countries,
           poster: normalizeImage(m.poster_url || m.thumb_url),
           backdrop: normalizeImage(m.thumb_url || m.poster_url),
           servers,
+          similar,
         },
       }),
       {

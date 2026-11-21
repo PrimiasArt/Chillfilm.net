@@ -168,12 +168,21 @@ export async function cloudPullState(since = 0) {
   return apiFetch(`/api/sync/state${q}`, { method: 'GET', auth: true });
 }
 
-export async function cloudPushState({ watchProgress = [], prefs = null, prefsUpdatedAt = 0, useBeacon = false } = {}) {
+export async function cloudPushState({
+  watchProgress = [],
+  myList = [],
+  myListRemoved = [],
+  prefs = null,
+  prefsUpdatedAt = 0,
+  useBeacon = false,
+} = {}) {
   const session = getCloudSession();
   if (!session?.token) return null;
-  if (!watchProgress.length && !prefs) return null;
+  if (!watchProgress.length && !myList.length && !myListRemoved.length && !prefs) return null;
 
   const payload = { watchProgress };
+  if (myList.length) payload.myList = myList;
+  if (myListRemoved.length) payload.myListRemoved = myListRemoved;
   if (prefs) {
     payload.prefs = prefs;
     payload.prefsUpdatedAt = prefsUpdatedAt || Date.now();

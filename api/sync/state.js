@@ -29,7 +29,7 @@ export async function GET(request) {
     await ensureSchema();
     const sql = getSql();
 
-    const [progressRows, prefsRows] = await Promise.all([
+    const [progressRows, prefsRows, myListRows] = await Promise.all([
       since > 0
         ? sql`
             SELECT movie_slug, episode_key, title, poster_url, country_code, episode_name, stream_url, position_ms, duration_ms, updated_at
@@ -46,6 +46,13 @@ export async function GET(request) {
             LIMIT 250
           `,
       sql`SELECT prefs_json, updated_at FROM nki_user_prefs WHERE user_id = ${user.id} LIMIT 1`,
+      sql`
+        SELECT item_key, source, source_id, slug, name, origin_name, poster, year, quality, added_at
+        FROM nki_my_list
+        WHERE user_id = ${user.id}
+        ORDER BY added_at DESC
+        LIMIT 200
+      `,
     ]);
 
     metric('sync.state', 1, { direction: 'pull', outcome: 'success' });
@@ -63,6 +70,18 @@ export async function GET(request) {
         positionMs: Number(r.position_ms || 0),
         durationMs: Number(r.duration_ms || 0),
         updatedAt: Number(r.updated_at || 0),
+      })),
+      myList: myListRows.map((r) => ({
+        itemKey: r.item_key,
+        source: r.source,
+        sourceId: r.source_id,
+        slug: r.slug,
+        name: r.name,
+        origin_name: r.origin_name,
+        poster: r.poster,
+        year: r.year,
+        quality: r.quality,
+        addedAt: Number(r.added_at || 0),
       })),
       prefs: prefsRows.length ? prefsRows[0].prefs_json : null,
       prefsUpdatedAt: prefsRows.length ? Number(prefsRows[0].updated_at || 0) : 0,
@@ -140,6 +159,37 @@ export async function POST(request) {
           updated_at = EXCLUDED.updated_at
         WHERE EXCLUDED.updated_at >= nki_user_prefs.updated_at
       `;
+    }
+
+    if (Array.isArray(body.myList) && body.myList.length > 0) {
+      for (const raw of body.myList.slice(0, 120)) {
+        if (!raw || !raw.slug) continue;
+        const source = String(raw.source || 'phimapi').trim().slice(0, 24);
+        const sourceId = String(raw.sourceId || '').trim().slice(0, 64);
+        const slug = String(raw.slug).trim().slice(0, 140);
+        const itemKey = String(raw.itemKey || `${source}::${sourceId}::${slug}`).slice(0, 220);
+        const name = String(raw.name || slug).trim().slice(0, 180);
+        const originName = String(raw.origin_name || '').trim().slice(0, 180);
+        const poster = String(raw.poster || '').trim().slice(0, 500);
+        const year = String(raw.year || '').trim().slice(0, 10);
+        const quality = String(raw.quality || 'HD').trim().slice(0, 24);
+        const addedAt = Math.min(now + 60_000, Math.max(1, Math.round(Number(raw.addedAt || now))));
+        await sql`
+          INSERT INTO nki_my_list (user_id, item_key, source, source_id, slug, name, origin_name, poster, year, quality, added_at)
+          VALUES (${user.id}, ${itemKey}, ${source}, ${sourceId}, ${slug}, ${name}, ${originName}, ${poster}, ${year}, ${quality}, ${addedAt})
+          ON CONFLICT (user_id, item_key) DO UPDATE SET
+            name = EXCLUDED.name,
+            poster = CASE WHEN EXCLUDED.poster <> '' THEN EXCLUDED.poster ELSE nki_my_list.poster END,
+            added_at = GREATEST(nki_my_list.added_at, EXCLUDED.added_at)
+        `;
+      }
+    }
+
+    if (Array.isArray(body.myListRemoved) && body.myListRemoved.length > 0) {
+      const removeKeys = body.myListRemoved.map((k) => String(k || '').trim()).filter(Boolean).slice(0, 100);
+      if (removeKeys.length) {
+        await sql`DELETE FROM nki_my_list WHERE user_id = ${user.id} AND item_key = ANY(${removeKeys})`;
+      }
     }
 
     await sql`UPDATE nki_users SET last_seen_at = ${now} WHERE id = ${user.id}`;

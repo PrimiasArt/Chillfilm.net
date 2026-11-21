@@ -11,7 +11,8 @@
 
 import crypto from 'node:crypto';
 import { metric } from '@vercel/functions';
-import { ensureSchema, getSql } from './db.js';
+import { ensureSchema, getServerGeminiConfig, getSql } from './db.js';
+import { translateCatalogItemsBilingual } from './gemini.js';
 import { filterSafeMovies, isBlockedContent } from './safety.js';
 import {
   fetchArchiveCinema,
@@ -136,6 +137,8 @@ function mapDbRowToMovie(r) {
     sourceId: String(r.source_id || ''),
     sourceName: String(r.source_name || ''),
     name: String(r.name || ''),
+    nameEn: String(r.name_en || ''),
+    nameVi: String(r.name_vi || ''),
     origin_name: String(r.origin_name || ''),
     type: String(r.media_type || 'single'),
     year: String(r.year || ''),
@@ -148,11 +151,74 @@ function mapDbRowToMovie(r) {
     imdbId: String(r.imdb_id || ''),
     tmdbScore: Number(r.tmdb_score || 0) || 0,
     content: String(r.content || ''),
+    contentEn: String(r.content_en || ''),
+    contentVi: String(r.content_vi || ''),
     streamUrl: String(r.stream_url || ''),
     categoryTag: String(r.category_tag || 'latest'),
     firstSeenAt: Number(r.first_seen_at || 0),
     updatedAt: Number(r.updated_at || 0),
   };
+}
+
+/**
+ * Translates up to 60 newly crawled untranslated MacCMS foreign titles & synopses into
+ * BOTH English (`name_en`, `content_en`) and Vietnamese (`name_vi`, `content_vi`) once permanently.
+ */
+async function translatePendingMacCmsItems(sql, maxItems = 60) {
+  try {
+    const aiCfg = await getServerGeminiConfig();
+    if (!aiCfg?.apiKey) return 0;
+    const pending = await sql`
+      SELECT item_key, name, origin_name, content
+      FROM nki_catalog_items
+      WHERE source = 'maccms' AND (name_vi = '' OR name_en = '')
+      ORDER BY updated_at DESC
+      LIMIT ${maxItems}
+    `;
+    if (!pending.length) return 0;
+
+    const batches = [];
+    for (let i = 0; i < pending.length; i += 20) {
+      batches.push(pending.slice(i, i + 20));
+    }
+
+    const batchResults = await Promise.allSettled(
+      batches.map((batch) =>
+        translateCatalogItemsBilingual({
+          items: batch,
+          apiKey: aiCfg.apiKey,
+          preferredModel: aiCfg.defaultModel,
+        })
+      )
+    );
+
+    const translatedAll = [];
+    for (const res of batchResults) {
+      if (res.status === 'fulfilled' && Array.isArray(res.value)) {
+        translatedAll.push(...res.value.filter((x) => x.itemKey && (x.nameEn || x.nameVi)));
+      }
+    }
+    if (!translatedAll.length) return 0;
+
+    const BATCH_UPDATE = 20;
+    for (let i = 0; i < translatedAll.length; i += BATCH_UPDATE) {
+      await Promise.all(
+        translatedAll.slice(i, i + BATCH_UPDATE).map((row) => sql`
+          UPDATE nki_catalog_items
+          SET name_en = CASE WHEN ${row.nameEn} <> '' THEN ${row.nameEn} ELSE name_en END,
+              name_vi = CASE WHEN ${row.nameVi} <> '' THEN ${row.nameVi} ELSE name_vi END,
+              content_en = CASE WHEN ${row.contentEn} <> '' THEN ${row.contentEn} ELSE content_en END,
+              content_vi = CASE WHEN ${row.contentVi} <> '' THEN ${row.contentVi} ELSE content_vi END
+          WHERE item_key = ${row.itemKey}
+        `)
+      );
+    }
+    metric('crawler.items_translated', translatedAll.length);
+    return translatedAll.length;
+  } catch (err) {
+    console.warn('[crawler] bilingual translation skipped:', err?.message || err);
+    return 0;
+  }
 }
 
 async function probeAndCrawlSingleSource(source, blockedTerms) {
@@ -460,8 +526,9 @@ export async function runCatalogCrawlAndHealthCheck({
       }
     }
 
-    // 4. Persist all verified clean movies into Neon Postgres
+    // 4. Persist all verified clean movies into Neon Postgres & auto-translate up to 60 new MacCMS items
     const { discovered, newCount } = await upsertCatalogItems(sql, finalSafeItems, now);
+    const itemsTranslated = await translatePendingMacCmsItems(sql, 60);
 
     const countRows = await sql`SELECT COUNT(*)::int AS total FROM nki_catalog_items`;
     const totalIndexed = Number(countRows?.[0]?.total || 0);
@@ -470,6 +537,7 @@ export async function runCatalogCrawlAndHealthCheck({
     const summary = {
       coreKkphim: kkP1.length + kkP2.length + kkP3.length + kkTvShows.length,
       coreArchive: archiveP1.length + archiveP2.length,
+      itemsTranslated,
       sources: sourceSummaries,
     };
 
@@ -515,6 +583,7 @@ export async function runCatalogCrawlAndHealthCheck({
       sourcesHealthy: healthyCount,
       itemsDiscovered: discovered,
       itemsNew: newCount,
+      itemsTranslated,
       itemsBlockedSfw: totalBlockedSfw,
       totalIndexed,
       sources: sourceSummaries,
@@ -547,9 +616,9 @@ export async function getCrawledFeedData(blockedTerms = []) {
         LIMIT 1
       `,
       sql`
-        SELECT source, source_id, source_name, slug, name, origin_name, media_type,
+        SELECT source, source_id, source_name, slug, name, name_en, name_vi, origin_name, media_type,
                year, quality, episode_current, poster, backdrop, genres_json,
-               countries_json, imdb_id, tmdb_score, content, stream_url,
+               countries_json, imdb_id, tmdb_score, content, content_en, content_vi, stream_url,
                category_tag, first_seen_at, updated_at
         FROM nki_catalog_items
         ORDER BY updated_at DESC
@@ -612,7 +681,18 @@ export async function getCrawledFeedData(blockedTerms = []) {
   }
 }
 
-export async function searchCrawledCatalog({ query = '', sourceId = '', category = '', page = 1, limit = 24, blockedTerms = [] } = {}) {
+export async function searchCrawledCatalog({
+  query = '',
+  sourceId = '',
+  category = '',
+  country = '',
+  genre = '',
+  year = '',
+  minRating = 0,
+  page = 1,
+  limit = 24,
+  blockedTerms = [],
+} = {}) {
   try {
     await ensureSchema();
     const sql = getSql();
@@ -622,12 +702,14 @@ export async function searchCrawledCatalog({ query = '', sourceId = '', category
     if (query && query.trim()) {
       const pattern = `%${query.trim()}%`;
       rows = await sql`
-        SELECT source, source_id, source_name, slug, name, origin_name, media_type,
+        SELECT source, source_id, source_name, slug, name, name_en, name_vi, origin_name, media_type,
                year, quality, episode_current, poster, backdrop, genres_json,
-               countries_json, imdb_id, tmdb_score, content, stream_url,
+               countries_json, imdb_id, tmdb_score, content, content_en, content_vi, stream_url,
                category_tag, first_seen_at, updated_at
         FROM nki_catalog_items
         WHERE name ILIKE ${pattern}
+           OR name_en ILIKE ${pattern}
+           OR name_vi ILIKE ${pattern}
            OR origin_name ILIKE ${pattern}
            OR source_name ILIKE ${pattern}
         ORDER BY updated_at DESC
@@ -635,20 +717,38 @@ export async function searchCrawledCatalog({ query = '', sourceId = '', category
       `;
     } else if (sourceId) {
       rows = await sql`
-        SELECT source, source_id, source_name, slug, name, origin_name, media_type,
+        SELECT source, source_id, source_name, slug, name, name_en, name_vi, origin_name, media_type,
                year, quality, episode_current, poster, backdrop, genres_json,
-               countries_json, imdb_id, tmdb_score, content, stream_url,
+               countries_json, imdb_id, tmdb_score, content, content_en, content_vi, stream_url,
                category_tag, first_seen_at, updated_at
         FROM nki_catalog_items
         WHERE source_id = ${sourceId}
         ORDER BY updated_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
+    } else if (genre || year || Number(minRating) > 0 || country) {
+      const gPat = genre ? `%${genre}%` : '%';
+      const cPat = country ? `%${country}%` : '%';
+      const yVal = String(year || '').trim();
+      const minR = Math.max(0, Number(minRating || 0));
+      rows = await sql`
+        SELECT source, source_id, source_name, slug, name, name_en, name_vi, origin_name, media_type,
+               year, quality, episode_current, poster, backdrop, genres_json,
+               countries_json, imdb_id, tmdb_score, content, content_en, content_vi, stream_url,
+               category_tag, first_seen_at, updated_at
+        FROM nki_catalog_items
+        WHERE (${genre === ''} OR genres_json::text ILIKE ${gPat})
+          AND (${country === ''} OR countries_json::text ILIKE ${cPat})
+          AND (${yVal === ''} OR (${yVal === 'classic'} AND year ~ '^[0-9]{4}$' AND year::int < 2015) OR (${yVal === '2020s'} AND year ~ '^[0-9]{4}$' AND year::int >= 2020 AND year::int <= 2023) OR year = ${yVal})
+          AND (${minR <= 0} OR tmdb_score >= ${minR})
+        ORDER BY tmdb_score DESC, updated_at DESC
+        LIMIT ${limit} OFFSET ${offset}
+      `;
     } else if (category === 'crawled') {
       rows = await sql`
-        SELECT source, source_id, source_name, slug, name, origin_name, media_type,
+        SELECT source, source_id, source_name, slug, name, name_en, name_vi, origin_name, media_type,
                year, quality, episode_current, poster, backdrop, genres_json,
-               countries_json, imdb_id, tmdb_score, content, stream_url,
+               countries_json, imdb_id, tmdb_score, content, content_en, content_vi, stream_url,
                category_tag, first_seen_at, updated_at
         FROM nki_catalog_items
         ORDER BY first_seen_at DESC, updated_at DESC
@@ -659,6 +759,60 @@ export async function searchCrawledCatalog({ query = '', sourceId = '', category
     }
 
     return filterSafeMovies(rows.map(mapDbRowToMovie), blockedTerms);
+  } catch {
+    return [];
+  }
+}
+
+export async function findSimilarMovies({ slug = '', genres = [], countries = [], limit = 10, blockedTerms = [] } = {}) {
+  try {
+    await ensureSchema();
+    const sql = getSql();
+    const gTerm = Array.isArray(genres) && genres.length ? String(genres[0] || '').trim() : '';
+    const cTerm = Array.isArray(countries) && countries.length ? String(countries[0] || '').trim() : '';
+    const gPat = gTerm ? `%${gTerm}%` : '';
+    const cPat = cTerm ? `%${cTerm}%` : '';
+
+    let rows = [];
+    if (gPat || cPat) {
+      rows = await sql`
+        SELECT source, source_id, source_name, slug, name, name_en, name_vi, origin_name, media_type,
+               year, quality, episode_current, poster, backdrop, genres_json,
+               countries_json, imdb_id, tmdb_score, content, content_en, content_vi, stream_url,
+               category_tag, first_seen_at, updated_at
+        FROM nki_catalog_items
+        WHERE slug <> ${slug}
+          AND poster <> ''
+          AND (
+            (${gPat !== ''} AND genres_json::text ILIKE ${gPat})
+            OR (${cPat !== ''} AND countries_json::text ILIKE ${cPat})
+          )
+        ORDER BY
+          CASE WHEN (${gPat !== ''} AND genres_json::text ILIKE ${gPat} AND ${cPat !== ''} AND countries_json::text ILIKE ${cPat}) THEN 2
+               WHEN (${gPat !== ''} AND genres_json::text ILIKE ${gPat}) THEN 1
+               ELSE 0 END DESC,
+          tmdb_score DESC,
+          updated_at DESC
+        LIMIT ${limit + 4}
+      `;
+    }
+    if (rows.length < 6) {
+      const fallback = await sql`
+        SELECT source, source_id, source_name, slug, name, name_en, name_vi, origin_name, media_type,
+               year, quality, episode_current, poster, backdrop, genres_json,
+               countries_json, imdb_id, tmdb_score, content, content_en, content_vi, stream_url,
+               category_tag, first_seen_at, updated_at
+        FROM nki_catalog_items
+        WHERE slug <> ${slug} AND poster <> ''
+        ORDER BY tmdb_score DESC, updated_at DESC
+        LIMIT ${limit}
+      `;
+      const seen = new Set(rows.map((r) => r.slug));
+      for (const r of fallback) {
+        if (!seen.has(r.slug)) rows.push(r);
+      }
+    }
+    return filterSafeMovies(rows.map(mapDbRowToMovie), blockedTerms).slice(0, limit);
   } catch {
     return [];
   }

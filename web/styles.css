@@ -2403,3 +2403,110 @@ button > svg {
   padding: 26%;
   background: radial-gradient(circle at center, #1c2720 0%, #111315 100%);
 }
+
+/* ==================== PHASE 2: ADVANCED FILTER BAR, MY LIST & MORE LIKE THIS ==================== */
+.toolbar-right-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.filter-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 13px;
+  border-radius: 99px;
+  background: rgba(28, 28, 32, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: #f3f4f6;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.filter-toggle-btn:hover,
+.filter-toggle-btn.active {
+  border-color: var(--emerald-neon);
+  background: rgba(0, 200, 83, 0.2);
+  color: var(--emerald-neon);
+}
+
+.adv-filter-panel {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+  margin-bottom: 16px;
+  border-radius: 10px;
+  background: rgba(20, 20, 24, 0.88);
+  backdrop-filter: blur(14px);
+  border: 1px solid rgba(0, 230, 118, 0.28);
+}
+
+.adv-filter-select {
+  background: #1c1c20;
+  color: #f3f4f6;
+  color-scheme: dark;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 7px;
+  padding: 7px 11px;
+  font-size: 12px;
+  font-weight: 700;
+  outline: none;
+  cursor: pointer;
+}
+
+.adv-filter-select:focus {
+  border-color: var(--emerald-neon);
+}
+
+.adv-filter-select option {
+  background-color: #1c1c20;
+  color: #f5f5f5;
+}
+
+.btn-nf-mylist {
+  background: rgba(34, 34, 38, 0.72);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  color: #ffffff;
+  font-weight: 700;
+  border-radius: 4px;
+  padding: 11px 18px;
+  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  white-space: nowrap;
+}
+
+.btn-nf-mylist:hover,
+.btn-nf-mylist.saved {
+  background: rgba(0, 200, 83, 0.22);
+  border-color: var(--emerald-neon);
+  color: #86efac;
+}
+
+.similar-section {
+  margin-top: 28px;
+}
+
+@media (max-width: 680px) {
+  .toolbar-right-controls {
+    width: 100%;
+  }
+  .toolbar-right-controls .country-picker-select {
+    flex: 1;
+  }
+  .adv-filter-panel {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+}
