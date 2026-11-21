@@ -118,14 +118,29 @@ export async function setCustomBlockedTerms(terms) {
   return clean;
 }
 
-export async function listDynamicSources({ onlyEnabled = true } = {}) {
+export async function listDynamicSources({ onlyEnabled = true, skipOffline = false } = {}) {
   try {
     await ensureSchema();
     const sql = getSql();
     const rows = onlyEnabled
-      ? await sql`SELECT id, name, source_type, base_url, country_hint, enabled, priority, created_at FROM nki_sources WHERE enabled = TRUE ORDER BY priority ASC, created_at DESC LIMIT 30`
-      : await sql`SELECT id, name, source_type, base_url, country_hint, enabled, priority, created_at FROM nki_sources ORDER BY priority ASC, created_at DESC LIMIT 50`;
-    return rows.map((r) => ({
+      ? await sql`
+          SELECT id, name, source_type, base_url, country_hint, enabled, priority, created_at,
+                 is_builtin, last_checked_at, last_status, last_latency_ms, last_error,
+                 consecutive_failures, items_crawled, total_remote
+          FROM nki_sources
+          WHERE enabled = TRUE
+          ORDER BY priority ASC, created_at DESC
+          LIMIT 40
+        `
+      : await sql`
+          SELECT id, name, source_type, base_url, country_hint, enabled, priority, created_at,
+                 is_builtin, last_checked_at, last_status, last_latency_ms, last_error,
+                 consecutive_failures, items_crawled, total_remote
+          FROM nki_sources
+          ORDER BY priority ASC, created_at DESC
+          LIMIT 60
+        `;
+    const mapped = rows.map((r) => ({
       id: r.id,
       name: r.name,
       sourceType: r.source_type,
@@ -134,7 +149,19 @@ export async function listDynamicSources({ onlyEnabled = true } = {}) {
       enabled: Boolean(r.enabled),
       priority: Number(r.priority || 50),
       createdAt: Number(r.created_at || 0),
+      isBuiltin: Boolean(r.is_builtin),
+      lastCheckedAt: Number(r.last_checked_at || 0),
+      lastStatus: String(r.last_status || 'PENDING'),
+      lastLatencyMs: Number(r.last_latency_ms || 0),
+      lastError: String(r.last_error || ''),
+      consecutiveFailures: Number(r.consecutive_failures || 0),
+      itemsCrawled: Number(r.items_crawled || 0),
+      totalRemote: Number(r.total_remote || 0),
     }));
+    if (skipOffline) {
+      return mapped.filter((s) => s.consecutiveFailures < 3 && s.lastStatus !== 'OFFLINE');
+    }
+    return mapped;
   } catch {
     return [];
   }
@@ -202,7 +229,10 @@ export async function fetchArchiveCinema({ query = '', country = '', page = 1, r
     nga: '(subject:russian OR subject:soviet OR language:rus)',
   };
 
-  let qParts = ['collection:(feature_films OR sci_fi_thriller_films OR comedy_films OR Film_Noir)', 'mediatype:movies'];
+  let qParts = [
+    'collection:(feature_films OR world_cinema OR sci_fi_thriller_films OR comedy_films OR Film_Noir OR classic_tv OR animationandcartoons)',
+    'mediatype:movies',
+  ];
   if (query && query.trim()) {
     const safeQ = query.trim().replace(/["'()]/g, ' ');
     qParts.push(`(title:(${safeQ}) OR description:(${safeQ}))`);
@@ -315,41 +345,149 @@ export async function resolveArchiveDetail(identifier, blockedTerms = []) {
 }
 
 /* ==================== 3. MACCMS v10 JSON CONNECTOR (ASIAN & GLOBAL VOD ECOSYSTEM) ==================== */
-export async function fetchMacCmsSource(source, { query = '', page = 1, blockedTerms = [] } = {}) {
-  if (!isSafeSourceUrl(source.baseUrl)) return [];
+const MACCMS_AREA_MAP = {
+  '美国': 'US',
+  '英国': 'UK',
+  '韩国': 'South Korea',
+  '日本': 'Japan',
+  '泰国': 'Thailand',
+  '中国大陆': 'China',
+  '大陆': 'China',
+  '内地': 'China',
+  '中国香港': 'Hong Kong',
+  '香港': 'Hong Kong',
+  '中国台湾': 'Taiwan',
+  '台湾': 'Taiwan',
+  '法国': 'France',
+  '德国': 'Germany',
+  '意大利': 'Italy',
+  '西班牙': 'Spain',
+  '印度': 'India',
+  '加拿大': 'Canada',
+  '澳大利亚': 'Australia',
+  '俄罗斯': 'Russia',
+  '波兰': 'Poland',
+  '瑞典': 'Sweden',
+  '挪威': 'Norway',
+  '丹麦': 'Denmark',
+  '巴西': 'Brazil',
+  '墨西哥': 'Mexico',
+  '土耳其': 'Turkey',
+  '新加坡': 'Singapore',
+  '马来西亚': 'Malaysia',
+  '越南': 'Vietnam',
+  '欧美': 'US / Europe',
+  '其他': 'Global',
+};
+
+const MACCMS_GENRE_MAP = {
+  '动作片': 'Action',
+  '喜剧片': 'Comedy',
+  '爱情片': 'Romance',
+  '科幻片': 'Sci-Fi',
+  '恐怖片': 'Horror',
+  '剧情片': 'Drama',
+  '战争片': 'War',
+  '犯罪片': 'Crime',
+  '悬疑片': 'Mystery',
+  '惊悚片': 'Thriller',
+  '纪录片': 'Documentary',
+  '记录片': 'Documentary',
+  '动画电影': 'Animated Film',
+  '动漫电影': 'Animated Film',
+  '日韩动漫': 'Anime',
+  '国产动漫': 'Animation',
+  '欧美动漫': 'Animation',
+  '韩国剧': 'K-Drama',
+  '韩剧': 'K-Drama',
+  '日本剧': 'J-Drama',
+  '日剧': 'J-Drama',
+  '欧美剧': 'Western Series',
+  '泰国剧': 'Thai Drama',
+  '泰剧': 'Thai Drama',
+  '国产剧': 'C-Drama',
+  '香港剧': 'HK Drama',
+  '台湾剧': 'TW Drama',
+  '海外剧': 'Global Series',
+};
+
+function normalizeMacCmsArea(raw, fallback = 'Global') {
+  const parts = String(raw || '')
+    .split(/[/,、\s]+/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  const mapped = parts.map((p) => MACCMS_AREA_MAP[p] || p);
+  const unique = [...new Set(mapped)].slice(0, 2);
+  return unique.length ? unique : [fallback || 'Global'];
+}
+
+function normalizeMacCmsGenres(typeName, vodClass) {
+  const rawList = [typeName, ...(String(vodClass || '').split(/[,/]/))]
+    .map((s) => String(s || '').trim())
+    .filter(Boolean);
+  const mapped = rawList.map((g) => MACCMS_GENRE_MAP[g] || g);
+  return [...new Set(mapped)].slice(0, 3);
+}
+
+export async function fetchMacCmsSourceWithStats(source, { query = '', page = 1, blockedTerms = [], timeoutMs = 8500 } = {}) {
+  if (!isSafeSourceUrl(source.baseUrl)) {
+    return { ok: false, items: [], rawCount: 0, blockedCount: 0, totalRemote: 0, error: 'Blocked URL' };
+  }
   const sep = source.baseUrl.includes('?') ? '&' : '?';
   const qParam = query ? `&wd=${encodeURIComponent(query.trim())}` : '';
   const url = `${source.baseUrl}${sep}ac=detail&pg=${Math.max(1, page)}${qParam}`;
-  const json = await fetchJsonSafe(url, 8000);
-  const list = Array.isArray(json?.list) ? json.list : [];
+  const json = await fetchJsonSafe(url, timeoutMs);
+  if (!json || !Array.isArray(json.list)) {
+    return { ok: false, items: [], rawCount: 0, blockedCount: 0, totalRemote: 0, error: 'Invalid JSON / timeout' };
+  }
+  const list = json.list;
+  const totalRemote = Number(json.total || 0) || 0;
 
   const mapped = list
-    .filter((v) => v && v.vod_id && v.vod_name)
-    .map((v) => ({
-      slug: String(v.vod_id),
-      source: 'maccms',
-      sourceId: source.id,
-      sourceName: source.name,
-      name: String(v.vod_name).trim(),
-      origin_name: String(v.vod_en || v.vod_sub || '').trim(),
-      type: String(v.vod_remarks || '').toLowerCase().includes('full') ? 'single' : 'series',
-      year: String(v.vod_year || '').trim(),
-      quality: String(v.vod_remarks || 'HD').trim().slice(0, 18),
-      episode_current: String(v.vod_remarks || '').trim().slice(0, 20),
-      poster: normalizeImage(v.vod_pic || '', source.baseUrl),
-      backdrop: normalizeImage(v.vod_pic_slide || v.vod_pic || '', source.baseUrl),
-      genres: [v.type_name, ...(String(v.vod_class || '').split(','))].map((s) => String(s || '').trim()).filter(Boolean).slice(0, 3),
-      type_name: String(v.type_name || ''),
-      countries: [String(v.vod_area || source.countryHint || 'Global').trim()],
-      imdbId: '',
-      tmdbScore: Number(v.vod_douban_score || v.vod_score || 0) || 0,
-      content: stripHtml(v.vod_content || v.vod_blurb || '').slice(0, 260),
-      // Keep raw play url for instant detail resolution
-      _vodPlayFrom: String(v.vod_play_from || ''),
-      _vodPlayUrl: String(v.vod_play_url || ''),
-    }));
+    .filter((v) => v && v.vod_id && v.vod_name && String(v.vod_play_url || '').includes('.m3u8'))
+    .map((v) => {
+      const enSub = String(v.vod_sub || '').trim();
+      const originLabel = enSub && !/^[\s,]+$/.test(enSub) ? enSub : String(v.vod_en || '').trim();
+      const remarks = String(v.vod_remarks || '').trim();
+      const isSingle = /hd|tc|ts|bd|1080|4k|正片|full|完结电影/i.test(remarks) || String(v.type_name || '').includes('片');
+      return {
+        slug: String(v.vod_id),
+        source: 'maccms',
+        sourceId: source.id,
+        sourceName: source.name,
+        name: String(v.vod_name).trim(),
+        origin_name: originLabel,
+        type: isSingle ? 'single' : 'series',
+        year: String(v.vod_year || '').trim().slice(0, 4),
+        quality: (remarks || 'HD').slice(0, 18),
+        episode_current: remarks.slice(0, 20),
+        poster: normalizeImage(v.vod_pic || '', source.baseUrl),
+        backdrop: normalizeImage(v.vod_pic_slide || v.vod_pic || '', source.baseUrl),
+        genres: normalizeMacCmsGenres(v.type_name, v.vod_class),
+        // Preserve raw Chinese type_name for Hard VN-Safe anti-porn inspection!
+        type_name: String(v.type_name || ''),
+        category: [v.type_name, ...(String(v.vod_class || '').split(','))].filter(Boolean),
+        countries: normalizeMacCmsArea(v.vod_area, source.countryHint),
+        imdbId: '',
+        tmdbScore: Number(v.vod_douban_score || v.vod_score || 0) || 0,
+        content: stripHtml(v.vod_content || v.vod_blurb || '').slice(0, 260),
+      };
+    });
 
-  return filterSafeMovies(mapped, blockedTerms).map(({ _vodPlayFrom, _vodPlayUrl, ...pub }) => pub);
+  const safe = filterSafeMovies(mapped, blockedTerms).map(({ type_name, category, ...pub }) => pub);
+  return {
+    ok: true,
+    items: safe,
+    rawCount: mapped.length,
+    blockedCount: Math.max(0, mapped.length - safe.length),
+    totalRemote,
+    error: '',
+  };
+}
+
+export async function fetchMacCmsSource(source, { query = '', page = 1, blockedTerms = [] } = {}) {
+  const res = await fetchMacCmsSourceWithStats(source, { query, page, blockedTerms });
+  return res.items;
 }
 
 export async function resolveMacCmsDetail(source, vodId, blockedTerms = []) {

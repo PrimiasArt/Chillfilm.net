@@ -20,7 +20,8 @@ object ContentSafetyFilter {
         "porno", "jav", "hentai", "ecchi-18", "erotic", "erotica", "softcore", "sex", "phim-sex",
         "phim-cap-3", "cap-3", "phim-nguoi-lon", "phim-khieu-dam", "khieu-dam", "clip-nong",
         "uncensored", "av", "cam", "webcam", "onlyfans", "luan-ly",
-        "伦理片", "伦理", "福利", "福利片", "情色", "色情", "里番", "成人", "无码", "有码", "無修正", "アダルト"
+        "伦理片", "伦理", "理论片", "理论", "福利", "福利片", "情色", "色情", "里番", "里番动漫",
+        "午夜", "写真", "成人", "无码", "有码", "無修正", "アダルト"
     )
 
     private val MAINSTREAM_SAFE_WHITELIST = listOf(
@@ -83,9 +84,11 @@ object ContentSafetyFilter {
             clean == "xxx" ||
             clean == "jav" ||
             rawLower.contains("伦理") ||
+            rawLower.contains("理论") ||
             rawLower.contains("福利") ||
             rawLower.contains("色情") ||
             rawLower.contains("里番") ||
+            rawLower.contains("午夜") ||
             rawLower.contains("成人")
     }
 

@@ -39,6 +39,7 @@ const APK_RELEASE_URL = 'https://github.com/PrimiasArt/Chillfilm.net/releases/do
 
 const CATEGORIES = [
   { id: 'hot', label: 'Trending', url: `${PHIM_API}/danh-sach/phim-moi-cap-nhat-v3?page=1` },
+  { id: 'crawled', label: '🤖 Auto-Crawled', browse: { category: 'crawled' } },
   { id: 'phim-le', label: 'Movies', browse: { category: 'phim-le' }, url: `${PHIM_API}/v1/api/danh-sach/phim-le?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
   { id: 'phim-bo', label: 'TV Series', browse: { category: 'phim-bo' }, url: `${PHIM_API}/v1/api/danh-sach/phim-bo?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
   { id: 'hoat-hinh', label: 'Animation', browse: { category: 'hoat-hinh' }, url: `${PHIM_API}/v1/api/danh-sach/hoat-hinh?page=1&sort_field=modified.time&sort_type=desc&limit=24` },
@@ -123,6 +124,7 @@ const state = {
   modelsLoading: false,
   adminGlobalModel: '',
   globalCountries: [],
+  crawlerStatus: null,
 };
 
 function loadCachedLiveModels() {
@@ -623,6 +625,7 @@ async function loadCategory(catId, { forceRefresh = false, silent = false } = {}
       const feed = await fetchLiveCatalogFeed(forceRefresh);
       if (feed?.ok && Array.isArray(feed.rows) && feed.rows.length > 0) {
         state.catalogUpdatedAt = feed.updatedAt || Date.now();
+        state.crawlerStatus = feed.crawlerStatus || null;
         if (Array.isArray(feed.countries) && feed.countries.length) {
           renderCountryPicker(feed.countries);
         }
@@ -703,9 +706,13 @@ function renderHomeSwimlanes() {
 
     const head = document.createElement('div');
     head.className = 'section-head';
-    const updatedLabel = row.isTopTen && state.catalogUpdatedAt
-      ? `<span class="live-feed-pill">● LIVE ${new Date(state.catalogUpdatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>`
-      : '';
+    let updatedLabel = '';
+    if (row.isTopTen && state.catalogUpdatedAt) {
+      updatedLabel = `<span class="live-feed-pill">● LIVE ${new Date(state.catalogUpdatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>`;
+    } else if (row.id === 'crawled' && state.crawlerStatus?.totalIndexed > 0) {
+      const cs = state.crawlerStatus;
+      updatedLabel = `<span class="live-feed-pill">⚡ ${cs.totalIndexed} INDEXED • ${cs.healthySources} SOURCES • ${escapeHtml(cs.schedule || 'AUTO')}</span>`;
+    }
     const rowLabel = row.customTitle || getCategoryLabel(row.id);
     head.innerHTML = `
       <div class="section-title">
@@ -960,10 +967,18 @@ function renderMovieGrid(list, title) {
 
 function createMovieCardElement(movie) {
   const el = document.createElement('div');
+  const metaBits = [
+    movie.year || '',
+    Array.isArray(movie.countries) && movie.countries.length ? movie.countries[0] : '',
+    movie.sourceName && movie.source !== 'phimapi' ? movie.sourceName.split(' ')[0] : '',
+  ].filter(Boolean);
+  const metaLine = metaBits.length ? metaBits.join(' • ') : (movie.origin_name || 'HD • AI Sub');
+  const posterSrc = movie.poster || './assets/icon-192.png?v=2';
+
   el.className = 'movie-card';
   el.innerHTML = `
     <div class="poster-wrap">
-      <img loading="lazy" src="${movie.poster}" alt="${escapeHtml(movie.name)}" />
+      <img loading="lazy" src="${escapeHtml(posterSrc)}" alt="${escapeHtml(movie.name)}" />
       <span class="card-nki-mark">NKI</span>
       <span class="card-badge">AI</span>
       <span class="card-quality">${escapeHtml((movie.episode_current || movie.quality || 'HD').slice(0, 12))}</span>
@@ -972,7 +987,7 @@ function createMovieCardElement(movie) {
     </div>
     <div class="card-info">
       <div class="card-title">${escapeHtml(movie.name)}</div>
-      <div class="card-meta">${escapeHtml(movie.year || movie.origin_name || 'HD • AI Sub')}</div>
+      <div class="card-meta">${escapeHtml(metaLine)}</div>
     </div>
   `;
   return el;
@@ -2061,24 +2076,51 @@ async function loadAdminVaultPanel() {
       });
     }
 
-    // Dynamic Global Movie Sources list
+    // Auto-Crawler Status Box & Dynamic Global Movie Sources with Live Health Badges
+    const crawlerBox = $('adminCrawlerStatusBox');
+    if (crawlerBox) {
+      const cs = data.crawlerStats || {};
+      const lr = cs.lastRun;
+      const lastRunStr = lr?.finishedAt
+        ? `${new Date(lr.finishedAt).toLocaleString()} (${lr.triggerType}: +${lr.itemsNew} new, ${lr.sourcesHealthy}/${lr.sourcesChecked} online, ${lr.itemsBlockedSfw} SFW blocked)`
+        : 'Waiting for first crawl — click "🤖 Crawl & Check All Now" to seed immediately!';
+      crawlerBox.innerHTML = [
+        `⏰ <strong>Auto-Schedule:</strong> ${escapeHtml(cs.schedule || 'Every 3h (VN)')} • <strong>Indexed Films:</strong> ${Number(cs.totalIndexed || 0)} • <strong>Healthy Sources:</strong> ${Number(cs.healthySources || 0)}/${Number(cs.totalSources || 0)}`,
+        `📡 <strong>Last Run:</strong> ${escapeHtml(lastRunStr)}`,
+      ].join('<br>');
+    }
+
     const srcWrap = $('adminSourcesList');
     if (srcWrap) {
       const sources = Array.isArray(data.sources) ? data.sources : [];
+      const fmtRemote = (n) => (n >= 1000 ? `${Math.round(n / 1000)}k catalog` : (n > 0 ? `${n} items` : ''));
       srcWrap.innerHTML = sources.length
-        ? sources.map((s) => `
+        ? sources.map((s) => {
+            const st = s.lastStatus || 'PENDING';
+            const dot = st === 'ONLINE' ? '🟢' : st === 'DEGRADED' ? '🟡' : st === 'OFFLINE' ? '🔴' : '⚪';
+            const lat = s.lastLatencyMs > 0 ? `${s.lastLatencyMs}ms` : '';
+            const remoteStr = fmtRemote(s.totalRemote);
+            const crawledStr = s.itemsCrawled > 0 ? `${s.itemsCrawled} crawled` : '';
+            const metaParts = [dot + ' ' + st, lat, crawledStr, remoteStr, s.lastError ? `⚠️ ${s.lastError}` : ''].filter(Boolean).join(' • ');
+            return `
             <div class="admin-row">
               <div style="min-width:0;flex:1;">
-                <div style="font-weight:800;color:${s.enabled ? '#86efac' : '#9ca3af'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(s.name)} <span style="font-size:10px;opacity:.8;">[${escapeHtml(s.sourceType)}]</span></div>
-                <div style="font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(s.baseUrl)}</div>
+                <div style="font-weight:800;color:${s.enabled ? '#86efac' : '#9ca3af'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+                  ${escapeHtml(s.name)}
+                  <span style="font-size:10px;opacity:.8;">[${escapeHtml(s.sourceType)}]</span>
+                  ${s.isBuiltin ? '<span style="font-size:9.5px;background:rgba(0,200,83,0.18);color:#86efac;padding:1px 5px;border-radius:4px;margin-left:4px;">VERIFIED</span>' : ''}
+                </div>
+                <div style="font-size:10.5px;color:#cbd5e1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(metaParts)}</div>
+                <div style="font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(s.baseUrl)}</div>
               </div>
               <div style="display:flex;gap:5px;flex-shrink:0;">
                 <button class="btn-glass" data-toggle-src="${escapeHtml(s.id)}" data-src-next="${s.enabled ? '0' : '1'}" style="padding:4px 8px;font-size:11px;">${s.enabled ? 'Pause' : 'Enable'}</button>
-                <button class="btn-glass" data-del-src="${escapeHtml(s.id)}" style="padding:4px 8px;font-size:11px;color:#fca5a5;">Del</button>
+                ${s.isBuiltin ? '' : `<button class="btn-glass" data-del-src="${escapeHtml(s.id)}" style="padding:4px 8px;font-size:11px;color:#fca5a5;">Del</button>`}
               </div>
             </div>
-          `).join('')
-        : '<div style="font-size:11.5px;color:var(--muted);">Built-in active: KKPhim (36 countries) + Internet Archive (29k+ films) + Live Cinema. Add more MacCMS / OPhim / M3U sources above!</div>';
+          `;
+          }).join('')
+        : '<div style="font-size:11.5px;color:var(--muted);">Built-in verified sources will auto-seed on next crawl.</div>';
 
       srcWrap.querySelectorAll('[data-toggle-src]').forEach((btn) => {
         btn.onclick = async () => {
@@ -2098,6 +2140,25 @@ async function loadAdminVaultPanel() {
           loadAdminVaultPanel();
         };
       });
+    }
+
+    const histWrap = $('adminCrawlHistoryList');
+    if (histWrap) {
+      const runs = Array.isArray(data.crawlRuns) ? data.crawlRuns.slice(0, 5) : [];
+      histWrap.innerHTML = runs.length
+        ? `<div style="font-size:10.5px;color:var(--muted);font-weight:700;margin-bottom:4px;">RECENT AUTO-CRAWL LOGS</div>` +
+          runs.map((r) => `
+            <div class="admin-row" style="padding:5px 8px;">
+              <div style="font-size:11px;color:#e2e8f0;">
+                ${r.triggerType === 'SCHEDULE' ? '⏰' : r.triggerType === 'ADMIN_MANUAL' ? '👆' : '🚀'}
+                <strong>${escapeHtml(r.triggerType)}</strong> • ${new Date(r.finishedAt).toLocaleString()}
+              </div>
+              <div style="font-size:10.5px;color:#86efac;white-space:nowrap;">
+                +${r.itemsNew} new • 🟢${r.sourcesHealthy}/${r.sourcesChecked} • 🛡️${r.itemsBlockedSfw}
+              </div>
+            </div>
+          `).join('')
+        : '';
     }
 
     if ($('adminBlockedTermsInput') && Array.isArray(cfg.customBlockedTerms)) {
@@ -2405,6 +2466,24 @@ function init() {
       loadAdminVaultPanel();
     } catch (err) {
       showToast(err.message || 'Invite creation failed');
+    }
+  });
+  $('adminRunCrawlBtn')?.addEventListener('click', async () => {
+    const btn = $('adminRunCrawlBtn');
+    const prevTxt = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '⏳ Checking & Crawling...';
+    try {
+      const res = await cloudAdminAction({ action: 'runCrawlNow' });
+      const rep = res?.report || {};
+      showToast(`🤖 Crawled ${rep.itemsDiscovered || 0} films (+${rep.itemsNew || 0} new) • 🟢 ${rep.sourcesHealthy || 0}/${rep.sourcesChecked || 0} online!`);
+      await loadAdminVaultPanel();
+      loadCategory('hot', { forceRefresh: true, silent: true });
+    } catch (err) {
+      showToast(err.message || 'Auto-crawl failed');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = prevTxt;
     }
   });
   $('adminAddSourceBtn')?.addEventListener('click', async () => {

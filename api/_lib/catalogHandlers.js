@@ -1,7 +1,13 @@
-import { metric } from '@vercel/functions';
+import { metric, waitUntil } from '@vercel/functions';
 import { normalizeMovieSlug } from './db.js';
 import { CORS_HEADERS, jsonResponse } from './auth.js';
 import { filterSafeMovies, isBlockedCategoryTag, isBlockedContent } from './safety.js';
+import {
+  getCrawledFeedData,
+  runCatalogCrawlAndHealthCheck,
+  searchCrawledCatalog,
+  seedVerifiedBuiltinSources,
+} from './crawler.js';
 import {
   fetchArchiveCinema,
   fetchFromDynamicSource,
@@ -20,6 +26,7 @@ import {
 
 const NGUONC_API = 'https://phim.nguonc.com/api/films/phim-moi-cap-nhat?page=1';
 const IPTV_MOVIES_URL = 'https://iptv-org.github.io/iptv/categories/movies.m3u';
+let _bootCrawlTriggered = false;
 
 async function enrichHeroMovie(movie, blockedTerms) {
   if (movie.source && movie.source !== 'phimapi') return movie;
@@ -58,10 +65,34 @@ export async function handleCatalogFeed(request) {
     const url = new URL(request.url);
     const forceRefresh = url.searchParams.get('refresh') === '1';
 
-    const [blockedTerms, dynamicSources] = await Promise.all([
+    await seedVerifiedBuiltinSources();
+    const [blockedTerms, allEnabledSources, crawled] = await Promise.all([
       getCustomBlockedTerms(),
-      listDynamicSources({ onlyEnabled: true }),
+      listDynamicSources({ onlyEnabled: true, skipOffline: false }),
+      getCrawledFeedData([]),
     ]);
+    const healthyDynamicSources = allEnabledSources.filter(
+      (s) => s.consecutiveFailures < 3 && s.lastStatus !== 'OFFLINE'
+    );
+
+    // On first cold boot (or stale > 4 hours since last auto-crawl), trigger background crawl via waitUntil
+    const lastCrawlAgeMs = crawled.lastRun ? Date.now() - crawled.lastRun.finishedAt : Infinity;
+    if ((crawled.totalIndexed === 0 || lastCrawlAgeMs > 4 * 60 * 60 * 1000) && !_bootCrawlTriggered) {
+      _bootCrawlTriggered = true;
+      try {
+        waitUntil(
+          runCatalogCrawlAndHealthCheck({ triggerType: 'AUTO_BOOT' }).catch((e) => {
+            console.warn('[catalog/feed] background auto-crawl error:', e?.message || e);
+            _bootCrawlTriggered = false;
+          })
+        );
+      } catch {
+        _bootCrawlTriggered = false;
+      }
+    }
+
+    // Re-filter crawled slices with any latest Admin custom blocklist terms
+    const safeFreshCrawled = filterSafeMovies(crawled.freshMixed, blockedTerms);
 
     const [
       latestP1,
@@ -95,11 +126,16 @@ export async function handleCatalogFeed(request) {
       fetchArchiveCinema({ rows: 18, page: 1, blockedTerms }),
       fetchJsonSafe(NGUONC_API, 5000),
       Promise.all(
-        dynamicSources.slice(0, 6).map(async (src) => {
-          const movies = await fetchFromDynamicSource(src, { page: 1, blockedTerms });
+        healthyDynamicSources.slice(0, 7).map(async (src) => {
+          // Prefer instant pre-crawled Neon Postgres rows (<30ms); live-fetch fallback only on first boot!
+          const cachedFromDb = filterSafeMovies(crawled.bySourceId.get(src.id) || [], blockedTerms);
+          const movies = cachedFromDb.length >= 6
+            ? cachedFromDb
+            : await fetchFromDynamicSource(src, { page: 1, blockedTerms });
+          const icon = src.sourceType === 'M3U_PLAYLIST' ? '📡' : '🌐';
           return {
             id: `src_${src.id}`,
-            customTitle: `🌐 ${src.name}`,
+            customTitle: `${icon} ${src.name}`,
             isTopTen: false,
             movies: movies.slice(0, 20),
           };
@@ -153,7 +189,9 @@ export async function handleCatalogFeed(request) {
 
     const rows = [
       { id: 'hot', isTopTen: true, movies: rankedTrending.slice(0, 20) },
-      ...dynamicRows.filter((r) => r.movies.length > 0),
+      ...(safeFreshCrawled.length >= 6
+        ? [{ id: 'crawled', customTitle: '🤖 Auto-Crawled Global Releases', isTopTen: false, movies: safeFreshCrawled.slice(0, 20) }]
+        : []),
       { id: 'phim-le', isTopTen: false, movies: phimLe.slice(0, 20) },
       { id: 'phim-bo', isTopTen: false, movies: phimBo.slice(0, 20) },
       { id: 'han-quoc', isTopTen: false, movies: hanQuoc.slice(0, 20) },
@@ -164,6 +202,7 @@ export async function handleCatalogFeed(request) {
       { id: 'nhat-ban', isTopTen: false, movies: nhatBan.slice(0, 20) },
       { id: 'an-do', customTitle: '🇮🇳 India & Bollywood', isTopTen: false, movies: anDo.slice(0, 18) },
       { id: 'phap', customTitle: '🇫🇷 European Cinema (France & EU)', isTopTen: false, movies: chauAu.slice(0, 18) },
+      ...dynamicRows.filter((r) => r.movies.length > 0),
       { id: 'archive', customTitle: '🏛 World Public Cinema (Internet Archive)', isTopTen: false, movies: archiveGlobal.slice(0, 18) },
     ].filter((r) => r.movies.length > 0);
 
@@ -177,8 +216,15 @@ export async function handleCatalogFeed(request) {
           'KKPhim v3 (36 Countries)',
           'NguonC Trending Signal',
           'Internet Archive World Cinema',
-          ...dynamicSources.map((s) => s.name),
+          ...healthyDynamicSources.map((s) => s.name),
         ],
+        crawlerStatus: {
+          schedule: 'Every 3h (VN)',
+          totalIndexed: crawled.totalIndexed,
+          healthySources: healthyDynamicSources.length,
+          totalSources: allEnabledSources.length,
+          lastRun: crawled.lastRun,
+        },
         countries: GLOBAL_COUNTRIES,
         heroMovies,
         rows,
@@ -217,24 +263,26 @@ export async function handleCatalogBrowse(request) {
       return jsonResponse({ ok: true, items: [], blocked: true, reason: 'Blocked by VN-Safe anti-porn policy' });
     }
 
+    await seedVerifiedBuiltinSources();
     const [blockedTerms, dynamicSources] = await Promise.all([
       getCustomBlockedTerms(),
-      listDynamicSources({ onlyEnabled: true }),
+      listDynamicSources({ onlyEnabled: true, skipOffline: true }),
     ]);
 
     let items = [];
 
     if (q) {
-      const [phimHits, archiveHits, dynamicHits] = await Promise.all([
+      const [dbHits, phimHits, archiveHits, dynamicHits] = await Promise.all([
+        searchCrawledCatalog({ query: q, page, limit: 24, blockedTerms }),
         fetchPhimApiList(`${PHIM_API}/v1/api/tim-kiem?keyword=${encodeURIComponent(q)}&page=${page}&limit=24`, blockedTerms),
         fetchArchiveCinema({ query: q, page, rows: 12, blockedTerms }),
         Promise.all(
-          dynamicSources.slice(0, 6).map((src) => fetchFromDynamicSource(src, { query: q, page, blockedTerms }))
+          dynamicSources.slice(0, 5).map((src) => fetchFromDynamicSource(src, { query: q, page, blockedTerms }))
         ),
       ]);
       const seen = new Set();
-      for (const m of [...phimHits, ...dynamicHits.flat(), ...archiveHits]) {
-        const key = `${m.source || 'phimapi'}::${m.slug}`;
+      for (const m of [...phimHits, ...dbHits, ...dynamicHits.flat(), ...archiveHits]) {
+        const key = `${m.source || 'phimapi'}::${m.sourceId || ''}::${m.slug}`;
         if (!seen.has(key)) {
           seen.add(key);
           items.push(m);
@@ -252,9 +300,19 @@ export async function handleCatalogBrowse(request) {
     }
 
     if (sourceId) {
-      const target = dynamicSources.find((s) => s.id === sourceId);
-      if (target) {
-        items = await fetchFromDynamicSource(target, { page, blockedTerms });
+      const dbItems = await searchCrawledCatalog({ sourceId, page, limit: 24, blockedTerms });
+      if (dbItems.length) {
+        items = dbItems;
+      } else {
+        const target = dynamicSources.find((s) => s.id === sourceId);
+        if (target) {
+          items = await fetchFromDynamicSource(target, { page, blockedTerms });
+        }
+      }
+    } else if (category === 'crawled') {
+      items = await searchCrawledCatalog({ category: 'crawled', page, limit: 28, blockedTerms });
+      if (!items.length) {
+        items = await fetchPhimApiList(`${PHIM_API}/danh-sach/phim-moi-cap-nhat-v3?page=${page}`, blockedTerms);
       }
     } else if (category === 'archive') {
       items = await fetchArchiveCinema({ country, page, rows: 24, blockedTerms });
@@ -340,6 +398,7 @@ export async function handleCatalogDetail(request) {
     }
 
     if (source === 'maccms' || source === 'phimapi_custom') {
+      await seedVerifiedBuiltinSources();
       const sources = await listDynamicSources({ onlyEnabled: false });
       const target = sources.find((s) => s.id === sourceId);
       if (!target) return jsonResponse({ error: 'Custom source not found' }, 404);

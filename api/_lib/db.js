@@ -119,8 +119,84 @@ export async function ensureSchema() {
         enabled BOOLEAN NOT NULL DEFAULT TRUE,
         priority INT NOT NULL DEFAULT 50,
         created_by TEXT NOT NULL DEFAULT '',
-        created_at BIGINT NOT NULL
+        created_at BIGINT NOT NULL,
+        is_builtin BOOLEAN NOT NULL DEFAULT FALSE,
+        last_checked_at BIGINT NOT NULL DEFAULT 0,
+        last_status TEXT NOT NULL DEFAULT 'PENDING',
+        last_latency_ms INT NOT NULL DEFAULT 0,
+        last_error TEXT NOT NULL DEFAULT '',
+        consecutive_failures INT NOT NULL DEFAULT 0,
+        items_crawled INT NOT NULL DEFAULT 0,
+        total_remote INT NOT NULL DEFAULT 0
       )
+    `;
+    // Safe zero-downtime migration for existing nki_sources tables
+    await sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS is_builtin BOOLEAN NOT NULL DEFAULT FALSE`;
+    await sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS last_checked_at BIGINT NOT NULL DEFAULT 0`;
+    await sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS last_status TEXT NOT NULL DEFAULT 'PENDING'`;
+    await sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS last_latency_ms INT NOT NULL DEFAULT 0`;
+    await sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS last_error TEXT NOT NULL DEFAULT ''`;
+    await sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS consecutive_failures INT NOT NULL DEFAULT 0`;
+    await sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS items_crawled INT NOT NULL DEFAULT 0`;
+    await sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS total_remote INT NOT NULL DEFAULT 0`;
+
+    await sql`
+      CREATE TABLE IF NOT EXISTS nki_catalog_items (
+        item_key TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        source_id TEXT NOT NULL DEFAULT '',
+        source_name TEXT NOT NULL DEFAULT '',
+        slug TEXT NOT NULL,
+        name TEXT NOT NULL,
+        origin_name TEXT NOT NULL DEFAULT '',
+        media_type TEXT NOT NULL DEFAULT 'single',
+        year TEXT NOT NULL DEFAULT '',
+        quality TEXT NOT NULL DEFAULT 'HD',
+        episode_current TEXT NOT NULL DEFAULT '',
+        poster TEXT NOT NULL DEFAULT '',
+        backdrop TEXT NOT NULL DEFAULT '',
+        genres_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        countries_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        imdb_id TEXT NOT NULL DEFAULT '',
+        tmdb_score REAL NOT NULL DEFAULT 0,
+        content TEXT NOT NULL DEFAULT '',
+        stream_url TEXT NOT NULL DEFAULT '',
+        category_tag TEXT NOT NULL DEFAULT 'latest',
+        first_seen_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL,
+        last_verified_at BIGINT NOT NULL
+      )
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_nki_catalog_updated
+      ON nki_catalog_items (updated_at DESC)
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_nki_catalog_source_updated
+      ON nki_catalog_items (source_id, updated_at DESC)
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_nki_catalog_tag_updated
+      ON nki_catalog_items (category_tag, updated_at DESC)
+    `;
+    await sql`
+      CREATE TABLE IF NOT EXISTS nki_crawl_runs (
+        execution_id TEXT PRIMARY KEY,
+        trigger_type TEXT NOT NULL DEFAULT 'SCHEDULE',
+        started_at BIGINT NOT NULL,
+        finished_at BIGINT NOT NULL,
+        sources_checked INT NOT NULL DEFAULT 0,
+        sources_healthy INT NOT NULL DEFAULT 0,
+        items_discovered INT NOT NULL DEFAULT 0,
+        items_new INT NOT NULL DEFAULT 0,
+        items_blocked_sfw INT NOT NULL DEFAULT 0,
+        total_indexed INT NOT NULL DEFAULT 0,
+        summary_json JSONB NOT NULL DEFAULT '{}'::jsonb
+      )
+    `;
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_nki_crawl_runs_finished
+      ON nki_crawl_runs (finished_at DESC)
     `;
   })().catch((err) => {
     _schemaReadyPromise = null;

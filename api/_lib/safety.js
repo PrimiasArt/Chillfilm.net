@@ -45,11 +45,20 @@ const BLOCKED_CATEGORY_SLUGS = new Set([
   'luan-ly',
   '伦理片',
   '伦理',
+  '理论片',
+  '理论',
   '福利',
   '福利片',
   '情色',
   '色情',
   '里番',
+  '里番动漫',
+  '午夜',
+  '写真',
+  '韩国伦理',
+  '日本伦理',
+  '港台伦理',
+  '欧美伦理',
   '成人',
   '无码',
   '有码',
@@ -181,10 +190,12 @@ export function isBlockedCategoryTag(rawSlugOrName) {
     clean === 'xxx' ||
     clean === 'jav' ||
     rawLower.includes('伦理') ||
+    rawLower.includes('理论') ||
     rawLower.includes('福利') ||
     rawLower.includes('色情') ||
     rawLower.includes('情色') ||
     rawLower.includes('里番') ||
+    rawLower.includes('午夜') ||
     rawLower.includes('成人')
   ) {
     return true;
