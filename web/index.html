@@ -627,23 +627,39 @@
             <span class="cloud-badge" id="cloudRoleBadge" style="display:none;">MEMBER</span>
           </div>
 
-          <!-- Signed Out Auth Form -->
+          <!-- Signed Out Auth Form (Clear labels, Display Name ABOVE Password, Confirm Password to prevent autofill leaks) -->
           <div id="cloudAuthFormWrap">
             <div class="cloud-tabs">
-              <button class="cloud-tab active" id="cloudTabLogin" type="button">Sign In</button>
-              <button class="cloud-tab" id="cloudTabRegister" type="button">Create Account</button>
+              <button class="cloud-tab active" id="cloudTabLogin" type="button">Đăng nhập</button>
+              <button class="cloud-tab" id="cloudTabRegister" type="button">Tạo tài khoản</button>
             </div>
-            <div class="field-group" style="margin-top:8px;">
-              <input class="field-input" id="cloudUsernameInput" placeholder="Username (e.g. admin or email)" autocomplete="username" />
-              <input class="field-input" id="cloudPasswordInput" type="password" placeholder="Password (min 6 chars)" autocomplete="current-password" />
-              <input class="field-input" id="cloudDisplayNameInput" placeholder="Display Name (optional)" style="display:none;" />
-              <input class="field-input" id="cloudInviteInput" placeholder="Invite Code (e.g. NKI-XXXX-XXXX)" style="display:none;" />
+            <div class="field-group" style="margin-top:10px;gap:8px;">
+              <div>
+                <span class="field-label" style="display:block;margin-bottom:4px;">TÊN ĐĂNG NHẬP (USERNAME)</span>
+                <input class="field-input" id="cloudUsernameInput" name="username" placeholder="vd: admin hoặc email" autocomplete="username" />
+              </div>
+              <div id="cloudDisplayNameWrap" style="display:none;">
+                <span class="field-label" style="display:block;margin-bottom:4px;">TÊN HIỂN THỊ CÔNG KHAI (BIỆT DANH — KHÔNG NHẬP MẬT KHẨU)</span>
+                <input class="field-input" id="cloudDisplayNameInput" name="nickname" placeholder="vd: Minh, Phyll... (tùy chọn)" autocomplete="nickname" />
+              </div>
+              <div>
+                <span class="field-label" style="display:block;margin-bottom:4px;">MẬT KHẨU</span>
+                <input class="field-input" id="cloudPasswordInput" name="password" type="password" placeholder="Mật khẩu (tối thiểu 6 ký tự)" autocomplete="current-password" />
+              </div>
+              <div id="cloudConfirmPasswordWrap" style="display:none;">
+                <span class="field-label" style="display:block;margin-bottom:4px;">XÁC NHẬN MẬT KHẨU</span>
+                <input class="field-input" id="cloudConfirmPasswordInput" name="confirm-password" type="password" placeholder="Nhập lại mật khẩu để xác nhận" autocomplete="new-password" />
+              </div>
+              <div id="cloudInviteWrap" style="display:none;">
+                <span class="field-label" style="display:block;margin-bottom:4px;">MÃ MỜI (INVITE CODE)</span>
+                <input class="field-input" id="cloudInviteInput" name="invite-code" placeholder="vd: NKI-XXXX-XXXX" autocomplete="off" />
+              </div>
             </div>
             <div class="cloud-hint" id="cloudBootstrapHint" style="display:none;"></div>
-            <button class="btn-grad" id="cloudAuthSubmitBtn" type="button" style="width:100%;margin-top:8px;">☁️ Sign In &amp; Auto-Sync</button>
+            <button class="btn-grad" id="cloudAuthSubmitBtn" type="button" style="width:100%;margin-top:8px;">☁️ Đăng nhập &amp; Đồng bộ</button>
           </div>
 
-          <!-- Signed In Summary -->
+          <!-- Signed In Summary & Profile Management -->
           <div id="cloudConnectedWrap" style="display:none;">
             <div class="cloud-profile-row">
               <div>
@@ -652,9 +668,40 @@
               </div>
               <div style="display:flex;gap:6px;">
                 <button class="btn-glass" id="cloudSyncNowBtn" type="button" style="padding:6px 10px;font-size:12px;">🔄 Sync</button>
-                <button class="btn-glass" id="cloudLogoutBtn" type="button" style="padding:6px 10px;font-size:12px;color:#fca5a5;">Sign Out</button>
+                <button class="btn-glass" id="cloudLogoutBtn" type="button" style="padding:6px 10px;font-size:12px;color:#fca5a5;">Đăng xuất</button>
               </div>
             </div>
+
+            <!-- Profile & Security Management (Visible to ALL signed-in users: rename, change password, revoke devices) -->
+            <details class="admin-vault-box" id="cloudProfileManageDetails" style="margin-top:10px;">
+              <summary>👤 Quản lý hồ sơ &amp; Bảo mật (Đổi tên • Đổi mật khẩu)</summary>
+              <div class="admin-vault-body">
+                <div class="info-box" id="profileAccountMeta" style="font-size:11.5px;">
+                  Đang tải thông tin tài khoản...
+                </div>
+
+                <div class="field-group">
+                  <span class="field-label">TÊN HIỂN THỊ CÔNG KHAI (NICKNAME)</span>
+                  <div style="display:flex;gap:6px;">
+                    <input class="field-input" id="profileDisplayNameInput" maxlength="48" placeholder="Nhập biệt danh mới (vd: Phyll, Admin...)" autocomplete="nickname" />
+                    <button class="btn-grad" id="profileSaveNameBtn" type="button" style="white-space:nowrap;">💾 Đổi tên</button>
+                  </div>
+                </div>
+
+                <hr style="border:none;border-top:1px solid rgba(255,255,255,0.08);" />
+
+                <div class="field-group">
+                  <span class="field-label">🔑 ĐỔI MẬT KHẨU TÀI KHOẢN</span>
+                  <input class="field-input" id="profileCurPassInput" type="password" placeholder="Mật khẩu hiện tại" autocomplete="current-password" />
+                  <input class="field-input" id="profileNewPassInput" type="password" placeholder="Mật khẩu mới (tối thiểu 6 ký tự)" autocomplete="new-password" />
+                  <input class="field-input" id="profileConfirmPassInput" type="password" placeholder="Nhập lại mật khẩu mới" autocomplete="new-password" />
+                  <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:2px;">
+                    <button class="btn-grad" id="profileSavePassBtn" type="button" style="flex:1;">🔑 Lưu mật khẩu mới</button>
+                    <button class="btn-glass" id="profileRevokeOthersBtn" type="button" style="font-size:11.5px;color:#fca5a5;">🛡️ Đăng xuất thiết bị khác</button>
+                  </div>
+                </div>
+              </div>
+            </details>
 
             <!-- Admin Vault & Invite Manager (Visible ONLY to ADMIN) -->
             <details class="admin-vault-box" id="adminVaultDetails" style="display:none;">
@@ -666,7 +713,7 @@
                 <div class="field-group">
                   <span class="field-label">UPDATE SERVER GEMINI API KEY (ENCRYPTED AES-256-GCM)</span>
                   <div style="display:flex;gap:6px;">
-                    <input class="field-input" id="adminVaultKeyInput" type="password" placeholder="Paste new AIzaSy... to rotate server key" />
+                    <input class="field-input" id="adminVaultKeyInput" type="password" autocomplete="new-password" data-lpignore="true" placeholder="Paste new AIzaSy... to rotate server key" />
                     <button class="btn-grad" id="adminSaveVaultBtn" type="button" style="white-space:nowrap;">Save Key</button>
                   </div>
                 </div>
@@ -762,7 +809,7 @@
             <div class="info-box" id="settingsPrivacyBox" style="font-size:11.5px;">
               When signed into <strong>NKI Cloud</strong>, you do NOT need a local key — server AI handles translation securely. Only enter a key here if you want offline/personal override.
             </div>
-            <input class="field-input" id="geminiKeyInput" type="password" placeholder="AIzaSy... (leave blank to use NKI Cloud AI)" />
+            <input class="field-input" id="geminiKeyInput" type="password" autocomplete="new-password" data-lpignore="true" placeholder="AIzaSy... (leave blank to use NKI Cloud AI)" />
           </div>
         </details>
 
@@ -883,6 +930,6 @@
 
   <div class="toast" id="toast"></div>
 
-  <script type="module" src="./app.js?v=14"></script>
+  <script type="module" src="./app.js?v=15"></script>
 </body>
 </html>

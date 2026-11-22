@@ -1,5 +1,10 @@
 import { jsonResponse, optionsResponse } from '../_lib/auth.js';
-import { handleAuthLogin, handleAuthMe, handleAuthRegister } from '../_lib/authHandlers.js';
+import {
+  handleAuthLogin,
+  handleAuthMe,
+  handleAuthRegister,
+  handleAuthUpdateProfile,
+} from '../_lib/authHandlers.js';
 
 export async function OPTIONS() {
   return optionsResponse();
@@ -15,5 +20,6 @@ export async function POST(request) {
   const op = new URL(request.url).searchParams.get('op') || 'login';
   if (op === 'login') return handleAuthLogin(request);
   if (op === 'register') return handleAuthRegister(request);
+  if (op === 'profile') return handleAuthUpdateProfile(request);
   return jsonResponse({ error: `Unsupported POST auth op: ${op}` }, 405);
 }

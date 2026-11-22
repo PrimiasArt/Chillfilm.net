@@ -76,7 +76,12 @@ export async function handleAuthRegister(request) {
 
     const rawUsername = String(body.username || '').trim().toLowerCase();
     const password = String(body.password || '');
-    const displayName = String(body.displayName || rawUsername).trim().slice(0, 48);
+    const rawDisplayName = String(body.displayName || '').trim().slice(0, 48);
+    // Security guard: NEVER allow a user's password to be accidentally stored as their public display name!
+    if (rawDisplayName && rawDisplayName === password) {
+      return jsonResponse({ error: 'Display Name cannot be the same as your Password. Please choose a public nickname.' }, 400);
+    }
+    const displayName = rawDisplayName || rawUsername;
     const inviteCode = String(body.inviteCode || '').trim().toUpperCase();
 
     if (!/^[a-z0-9._@-]{3,40}$/.test(rawUsername)) {
@@ -194,5 +199,129 @@ export async function handleAuthMe(request) {
   } catch (err) {
     console.error('[api/auth/me] error:', err);
     return jsonResponse({ error: err?.message || 'Failed to load profile' }, 500);
+  }
+}
+
+/**
+ * Updates the signed-in user's profile: Display Name (nickname), Password, or Revoke Other Sessions.
+ * Guards against accidentally setting displayName === password.
+ */
+export async function handleAuthUpdateProfile(request) {
+  const startedAt = performance.now();
+  try {
+    const body = await readJsonBody(request);
+    if (!body) return jsonResponse({ error: 'Invalid JSON payload' }, 400);
+
+    const auth = await requireAuth(request, body);
+    if (auth.errorResponse) return auth.errorResponse;
+    const { user } = auth;
+
+    await ensureSchema();
+    const sql = getSql();
+    const rows = await sql`
+      SELECT id, username, display_name, password_hash, role, status, daily_ai_limit, token_version, created_at, last_seen_at
+      FROM nki_users
+      WHERE id = ${user.id}
+      LIMIT 1
+    `;
+    if (!rows.length) return jsonResponse({ error: 'Account not found' }, 404);
+    const stored = rows[0];
+
+    let nextDisplayName = stored.display_name;
+    let nextPasswordHash = stored.password_hash;
+    let nextTokenVersion = Number(stored.token_version || 1);
+    let tokenRotated = false;
+    const changedFields = [];
+
+    // 1. Update Display Name (Nickname)
+    if (typeof body.displayName === 'string') {
+      const cleanName = body.displayName.trim().slice(0, 48);
+      if (cleanName.length < 2) {
+        return jsonResponse({ error: 'Tên hiển thị phải có ít nhất 2 ký tự.' }, 400);
+      }
+      if (verifyPassword(cleanName, stored.password_hash)) {
+        return jsonResponse({ error: 'Tên hiển thị không được trùng với mật khẩu hiện tại của bạn!' }, 400);
+      }
+      if (typeof body.newPassword === 'string' && body.newPassword && cleanName === body.newPassword) {
+        return jsonResponse({ error: 'Tên hiển thị không được trùng với mật khẩu mới!' }, 400);
+      }
+      nextDisplayName = cleanName;
+      changedFields.push('displayName');
+    }
+
+    // 2. Change Password (requires current password verification + rotates token_version)
+    if (typeof body.newPassword === 'string' && body.newPassword.length > 0) {
+      const currentPassword = String(body.currentPassword || '');
+      const newPassword = String(body.newPassword || '');
+      if (!currentPassword) {
+        return jsonResponse({ error: 'Vui lòng nhập mật khẩu hiện tại.' }, 400);
+      }
+      if (!verifyPassword(currentPassword, stored.password_hash)) {
+        metric('auth.profile_update', 1, { outcome: 'wrong_password' });
+        return jsonResponse({ error: 'Mật khẩu hiện tại không đúng.' }, 401);
+      }
+      if (newPassword.length < 6 || newPassword.length > 128) {
+        return jsonResponse({ error: 'Mật khẩu mới phải từ 6 đến 128 ký tự.' }, 400);
+      }
+      if (newPassword === nextDisplayName) {
+        return jsonResponse({ error: 'Mật khẩu mới không được giống tên hiển thị!' }, 400);
+      }
+      nextPasswordHash = hashPassword(newPassword);
+      nextTokenVersion += 1;
+      tokenRotated = true;
+      changedFields.push('password');
+    }
+
+    // 3. Optional: Sign out all other devices
+    if (body.revokeOtherSessions === true && !tokenRotated) {
+      nextTokenVersion += 1;
+      tokenRotated = true;
+      changedFields.push('sessions');
+    }
+
+    if (!changedFields.length) {
+      return jsonResponse({ error: 'Không có thông tin nào thay đổi.' }, 400);
+    }
+
+    const now = Date.now();
+    await sql`
+      UPDATE nki_users
+      SET
+        display_name = ${nextDisplayName},
+        password_hash = ${nextPasswordHash},
+        token_version = ${nextTokenVersion},
+        last_seen_at = ${now}
+      WHERE id = ${stored.id}
+    `;
+
+    const updatedUser = {
+      ...stored,
+      display_name: nextDisplayName,
+      token_version: nextTokenVersion,
+      last_seen_at: now,
+    };
+
+    const day = todayDayKey();
+    const [usageRows, aiCfg] = await Promise.all([
+      sql`SELECT requests_count, cues_count, audio_chunks FROM nki_ai_usage WHERE user_id = ${stored.id} AND day_key = ${day} LIMIT 1`,
+      getServerGeminiConfig(),
+    ]);
+
+    const freshToken = tokenRotated ? signSessionToken(updatedUser) : undefined;
+    metric('auth.profile_update', 1, { outcome: 'success' });
+    return jsonResponse({
+      ok: true,
+      changed: changedFields,
+      ...(freshToken ? { token: freshToken } : {}),
+      user: sanitizeUserPublic(updatedUser, usageRows[0] || { requests_count: 0, cues_count: 0, audio_chunks: 0 }),
+      serverAiReady: Boolean(aiCfg.apiKey),
+      defaultModel: aiCfg.defaultModel,
+    });
+  } catch (err) {
+    console.error('[api/auth/profile] error:', err);
+    metric('auth.profile_update', 1, { outcome: 'error' });
+    return jsonResponse({ error: err?.message || 'Failed to update profile' }, 500);
+  } finally {
+    metric('auth.profile_update.duration_ms', performance.now() - startedAt);
   }
 }

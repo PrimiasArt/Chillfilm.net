@@ -154,6 +154,39 @@ export async function cloudRefreshMe() {
   return next;
 }
 
+export async function cloudUpdateProfile({
+  displayName = undefined,
+  currentPassword = undefined,
+  newPassword = undefined,
+  revokeOtherSessions = false,
+} = {}) {
+  const cur = getCloudSession();
+  if (!cur?.token) throw new Error('Bạn chưa đăng nhập NKI Cloud');
+  const body = {};
+  if (typeof displayName === 'string') body.displayName = displayName.trim();
+  if (typeof newPassword === 'string' && newPassword.length > 0) {
+    body.currentPassword = currentPassword || '';
+    body.newPassword = newPassword;
+  }
+  if (revokeOtherSessions) body.revokeOtherSessions = true;
+
+  const data = await apiFetch('/api/auth/profile', {
+    method: 'POST',
+    auth: true,
+    body,
+  });
+  const next = {
+    ...cur,
+    token: data.token || cur.token,
+    user: data.user || cur.user,
+    serverAiReady: typeof data.serverAiReady === 'boolean' ? data.serverAiReady : cur.serverAiReady,
+    defaultModel: data.defaultModel || cur.defaultModel || 'gemini-2.5-flash',
+    updatedAt: Date.now(),
+  };
+  saveCloudSession(next);
+  return { session: next, changed: data.changed || [] };
+}
+
 export async function cloudFetchAdminConfig() {
   return apiFetch('/api/admin/config', { method: 'GET', auth: true });
 }

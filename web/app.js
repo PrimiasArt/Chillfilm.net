@@ -25,6 +25,7 @@ import {
   cloudLogin,
   cloudRegister,
   cloudRefreshMe,
+  cloudUpdateProfile,
   cloudFetchAdminConfig,
   cloudAdminAction,
   cloudPullState,
@@ -48,7 +49,7 @@ import {
   fetchMovieGlossary,
   saveMovieGlossary,
   fetchAiVibeSearch,
-} from './sync.js?v=14';
+} from './sync.js?v=15';
 
 const PHIM_API = 'https://phimapi.com';
 const PHIM_CDN = 'https://phimimg.com';
@@ -5024,7 +5025,8 @@ function updateCloudHeaderBadge() {
   if (btn && txt) {
     if (session?.user) {
       btn.classList.add('connected');
-      txt.textContent = session.user.username.slice(0, 12);
+      const label = (session.user.displayName || session.user.username || 'Cloud').trim();
+      txt.textContent = label.slice(0, 12);
     } else {
       btn.classList.remove('connected');
       txt.textContent = 'Cloud';
@@ -5077,6 +5079,16 @@ async function renderCloudCard() {
     if ($('cloudProfileName')) {
       $('cloudProfileName').textContent = `${session.user.displayName || session.user.username} (@${session.user.username})`;
     }
+    if ($('profileDisplayNameInput')) {
+      $('profileDisplayNameInput').value = session.user.displayName || session.user.username || '';
+    }
+    if ($('profileAccountMeta')) {
+      const createdStr = session.user.createdAt ? new Date(session.user.createdAt).toLocaleDateString() : '—';
+      $('profileAccountMeta').innerHTML = [
+        `👤 <strong>Username:</strong> @${escapeHtml(session.user.username)} • <strong>Vai trò:</strong> ${escapeHtml(session.user.role || 'MEMBER')}`,
+        `📅 <strong>Ngày tạo:</strong> ${escapeHtml(createdStr)} • <strong>Đồng bộ:</strong> Web ↔ Android ↔ Smart TV`,
+      ].join('<br>');
+    }
     const used = session.user.todayUsage?.requests ?? 0;
     const lim = session.user.dailyAiLimit;
     const quotaText = session.user.role === 'ADMIN' || !lim ? `${used} / ∞ AI today` : `${used} / ${lim} AI today`;
@@ -5102,23 +5114,27 @@ function syncCloudAuthFormFields() {
   const isReg = state.cloudAuthMode === 'register';
   $('cloudTabLogin')?.classList.toggle('active', !isReg);
   $('cloudTabRegister')?.classList.toggle('active', isReg);
-  if ($('cloudDisplayNameInput')) $('cloudDisplayNameInput').style.display = isReg ? 'block' : 'none';
+  if ($('cloudDisplayNameWrap')) $('cloudDisplayNameWrap').style.display = isReg ? 'block' : 'none';
+  if ($('cloudConfirmPasswordWrap')) $('cloudConfirmPasswordWrap').style.display = isReg ? 'block' : 'none';
+  if ($('cloudPasswordInput')) {
+    $('cloudPasswordInput').setAttribute('autocomplete', isReg ? 'new-password' : 'current-password');
+  }
   const needInvite = isReg && state.cloudHealth?.hasAdmin && state.cloudHealth?.registrationMode === 'INVITE_ONLY';
-  if ($('cloudInviteInput')) $('cloudInviteInput').style.display = needInvite ? 'block' : 'none';
+  if ($('cloudInviteWrap')) $('cloudInviteWrap').style.display = needInvite ? 'block' : 'none';
   const hint = $('cloudBootstrapHint');
   if (hint) {
     if (isReg && state.cloudHealth && !state.cloudHealth.hasAdmin) {
       hint.style.display = 'block';
-      hint.textContent = '👑 No Admin exists yet — creating this account will automatically make you the permanent ADMIN and lock sign-ups to Invite-Only!';
+      hint.textContent = '👑 Chưa có Admin — tài khoản đầu tiên sẽ tự động thành ADMIN và bật chế độ Invite-Only!';
     } else if (needInvite) {
       hint.style.display = 'block';
-      hint.textContent = '🔒 Admin enabled Invite-Only mode. Enter the NKI-XXXX-XXXX code shared by the Admin.';
+      hint.textContent = '🔒 Admin đang bật chế độ Invite-Only. Nhập mã mời NKI-XXXX-XXXX được cấp.';
     } else {
       hint.style.display = 'none';
     }
   }
   if ($('cloudAuthSubmitBtn')) {
-    $('cloudAuthSubmitBtn').textContent = isReg ? '✨ Create NKI Account & Sync' : '☁️ Sign In & Auto-Sync';
+    $('cloudAuthSubmitBtn').textContent = isReg ? '✨ Tạo tài khoản NKI & Đồng bộ' : '☁️ Đăng nhập & Đồng bộ';
   }
 }
 
@@ -5566,30 +5582,98 @@ function init() {
   $('cloudAuthSubmitBtn')?.addEventListener('click', async () => {
     const username = $('cloudUsernameInput')?.value.trim() || '';
     const password = $('cloudPasswordInput')?.value || '';
+    const confirmPassword = $('cloudConfirmPasswordInput')?.value || '';
     const displayName = $('cloudDisplayNameInput')?.value.trim() || '';
     const inviteCode = $('cloudInviteInput')?.value.trim() || '';
-    if (!username || !password) return showToast('Enter username and password');
+    if (!username || !password) return showToast('Vui lòng nhập tên đăng nhập và mật khẩu');
+    if (state.cloudAuthMode === 'register') {
+      if (password.length < 6) return showToast('Mật khẩu phải có ít nhất 6 ký tự');
+      if (password !== confirmPassword) return showToast('Mật khẩu xác nhận không khớp!');
+      if (displayName && displayName === password) {
+        return showToast('⚠️ Tên hiển thị không được trùng với mật khẩu! Vui lòng đặt biệt danh khác.');
+      }
+    }
     const btn = $('cloudAuthSubmitBtn');
     const prevTxt = btn.textContent;
     btn.disabled = true;
-    btn.textContent = '⏳ Connecting...';
+    btn.textContent = '⏳ Đang kết nối...';
     try {
       if (state.cloudAuthMode === 'register') {
         await cloudRegister({ username, password, displayName, inviteCode });
-        showToast('👑 NKI Cloud account created & synced!');
+        showToast('👑 Đã tạo tài khoản NKI Cloud & đồng bộ!');
       } else {
         await cloudLogin(username, password);
-        showToast('☁️ Signed into NKI Cloud! Auto-syncing...');
+        showToast('☁️ Đã đăng nhập NKI Cloud! Đang tự động đồng bộ...');
       }
       if ($('cloudPasswordInput')) $('cloudPasswordInput').value = '';
+      if ($('cloudConfirmPasswordInput')) $('cloudConfirmPasswordInput').value = '';
       await pullCloudStateAndMerge({ silent: true, force: true });
       renderCloudCard();
       loadLiveGeminiModels({ silent: true });
     } catch (err) {
-      showToast(err.message || 'Authentication failed');
+      showToast(err.message || 'Đăng nhập thất bại');
     } finally {
       btn.disabled = false;
       btn.textContent = prevTxt;
+    }
+  });
+  $('profileSaveNameBtn')?.addEventListener('click', async () => {
+    const newName = $('profileDisplayNameInput')?.value.trim() || '';
+    if (newName.length < 2) return showToast('Tên hiển thị phải có ít nhất 2 ký tự!');
+    const btn = $('profileSaveNameBtn');
+    const oldTxt = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '⏳...';
+    try {
+      await cloudUpdateProfile({ displayName: newName });
+      renderCloudCard();
+      showToast(`✅ Đã đổi tên hiển thị thành "${newName}"!`);
+    } catch (err) {
+      showToast(err?.message || 'Không thể đổi tên hiển thị');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = oldTxt;
+    }
+  });
+  $('profileSavePassBtn')?.addEventListener('click', async () => {
+    const currentPassword = $('profileCurPassInput')?.value || '';
+    const newPassword = $('profileNewPassInput')?.value || '';
+    const confirmPassword = $('profileConfirmPassInput')?.value || '';
+    if (!currentPassword) return showToast('Vui lòng nhập mật khẩu hiện tại');
+    if (newPassword.length < 6) return showToast('Mật khẩu mới phải có ít nhất 6 ký tự');
+    if (newPassword !== confirmPassword) return showToast('Mật khẩu xác nhận không khớp!');
+    const btn = $('profileSavePassBtn');
+    const oldTxt = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '⏳ Đang đổi...';
+    try {
+      await cloudUpdateProfile({ currentPassword, newPassword });
+      if ($('profileCurPassInput')) $('profileCurPassInput').value = '';
+      if ($('profileNewPassInput')) $('profileNewPassInput').value = '';
+      if ($('profileConfirmPassInput')) $('profileConfirmPassInput').value = '';
+      renderCloudCard();
+      showToast('🔑 Đã đổi mật khẩu thành công & cập nhật phiên đăng nhập mới!');
+    } catch (err) {
+      showToast(err?.message || 'Không thể đổi mật khẩu');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = oldTxt;
+    }
+  });
+  $('profileRevokeOthersBtn')?.addEventListener('click', async () => {
+    const btn = $('profileRevokeOthersBtn');
+    const oldTxt = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '⏳...';
+    try {
+      await cloudUpdateProfile({ revokeOtherSessions: true });
+      renderCloudCard();
+      showToast('🛡️ Đã đăng xuất tất cả các thiết bị khác (giữ lại thiết bị này)!');
+    } catch (err) {
+      showToast(err?.message || 'Thao tác thất bại');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = oldTxt;
     }
   });
   $('cloudSyncNowBtn')?.addEventListener('click', async () => {
