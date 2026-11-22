@@ -30,6 +30,30 @@ const NGUONC_API = 'https://phim.nguonc.com/api/films/phim-moi-cap-nhat?page=1';
 const IPTV_MOVIES_URL = 'https://iptv-org.github.io/iptv/categories/movies.m3u';
 let _bootCrawlTriggered = false;
 
+function cachedJsonResponse(data, sMaxAge = 300, swr = 1800, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      ...CORS_HEADERS,
+      'Cache-Control': `public, s-maxage=${sMaxAge}, stale-while-revalidate=${swr}`,
+    },
+  });
+}
+
+function withSoftTimeout(promise, ms, fallbackValue) {
+  return Promise.race([
+    promise.catch(() => fallbackValue),
+    new Promise((resolve) => setTimeout(() => resolve(fallbackValue), ms)),
+  ]);
+}
+
+function slimRowMovie(m) {
+  if (!m) return m;
+  const { content, contentEn, contentVi, category, ...rest } = m;
+  return rest;
+}
+
 const GENRE_MAP_PHIMAPI = {
   action: { slug: 'hanh-dong', sqlTerm: 'Action' },
   romance: { slug: 'tinh-cam', sqlTerm: 'Romance' },
@@ -66,7 +90,7 @@ async function verifyStreamAlive(streamUrl, timeoutMs = 2400) {
 
 async function enrichHeroMovie(movie, blockedTerms) {
   if (movie.source && movie.source !== 'phimapi') return movie;
-  const detail = await fetchJsonSafe(`${PHIM_API}/phim/${encodeURIComponent(movie.slug)}`, 6000);
+  const detail = await fetchJsonSafe(`${PHIM_API}/phim/${encodeURIComponent(movie.slug)}`, 3800);
   const m = detail?.movie;
   if (!m) return movie;
   if (isBlockedContent(m, blockedTerms)) return null;
@@ -74,7 +98,7 @@ async function enrichHeroMovie(movie, blockedTerms) {
     .flatMap((s) => s?.server_data || [])
     .find((e) => e?.link_m3u8)?.link_m3u8 || '';
   if (!firstStream) return null;
-  const streamAlive = await verifyStreamAlive(firstStream, 2200);
+  const streamAlive = await verifyStreamAlive(firstStream, 1400);
   const desc = stripHtml(m.content || '').slice(0, 260);
   const genres = Array.isArray(m.category)
     ? m.category.map((c) => c?.name).filter(Boolean).slice(0, 3)
@@ -272,7 +296,7 @@ export async function handleCatalogFeed(request) {
       (list || []).map((m) => (m && cloudSubSet.has(normalizeMovieSlug(m.slug)) ? { ...m, hasCloudSub: true } : m));
 
     const stampedHeroes = stampCloudSub(heroMovies);
-    const stampedRows = rows.map((r) => ({ ...r, movies: stampCloudSub(r.movies) }));
+    const stampedRows = rows.map((r) => ({ ...r, movies: stampCloudSub(r.movies).map(slimRowMovie) }));
 
     metric('catalog.feed', 1, { outcome: stampedRows.length ? 'success' : 'empty' });
     return new Response(
@@ -306,7 +330,7 @@ export async function handleCatalogFeed(request) {
           ...CORS_HEADERS,
           'Cache-Control': forceRefresh
             ? 'no-store, max-age=0'
-            : 'public, s-maxage=300, stale-while-revalidate=600',
+            : 'public, s-maxage=300, stale-while-revalidate=1800',
         },
       }
     );
@@ -345,12 +369,42 @@ export async function handleCatalogBrowse(request) {
     let items = [];
 
     if (q) {
+      const isFastSuggest = url.searchParams.get('fast') === '1';
+      const limitNum = Math.max(4, Math.min(36, Number(url.searchParams.get('limit') || 24)));
+      if (isFastSuggest) {
+        // Ultra-fast Instant Search mode (~200ms): queries ONLY Neon Postgres index + KKPhim in parallel!
+        const [dbHits, phimHits] = await Promise.all([
+          withSoftTimeout(searchCrawledCatalog({ query: q, page: 1, limit: limitNum, blockedTerms }), 1800, []),
+          withSoftTimeout(
+            fetchPhimApiList(`${PHIM_API}/v1/api/tim-kiem?keyword=${encodeURIComponent(q)}&page=1&limit=${limitNum}`, blockedTerms, { timeoutMs: 2400 }),
+            2500,
+            []
+          ),
+        ]);
+        const seen = new Set();
+        for (const m of [...phimHits, ...dbHits]) {
+          const key = `${m.source || 'phimapi'}::${m.sourceId || ''}::${m.slug}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            items.push(slimRowMovie(m));
+          }
+        }
+        metric('catalog.browse', 1, { mode: 'suggest', outcome: 'success' });
+        return cachedJsonResponse({ ok: true, mode: 'suggest', query: q, count: items.length, items: items.slice(0, limitNum) }, 180, 900);
+      }
+
       const [dbHits, phimHits, archiveHits, dynamicHits] = await Promise.all([
-        searchCrawledCatalog({ query: q, page, limit: 24, blockedTerms }),
-        fetchPhimApiList(`${PHIM_API}/v1/api/tim-kiem?keyword=${encodeURIComponent(q)}&page=${page}&limit=24`, blockedTerms),
-        fetchArchiveCinema({ query: q, page, rows: 12, blockedTerms }),
+        withSoftTimeout(searchCrawledCatalog({ query: q, page, limit: 24, blockedTerms }), 2400, []),
+        withSoftTimeout(
+          fetchPhimApiList(`${PHIM_API}/v1/api/tim-kiem?keyword=${encodeURIComponent(q)}&page=${page}&limit=24`, blockedTerms, { timeoutMs: 3800 }),
+          4000,
+          []
+        ),
+        withSoftTimeout(fetchArchiveCinema({ query: q, page, rows: 12, blockedTerms }), 2600, []),
         Promise.all(
-          dynamicSources.slice(0, 5).map((src) => fetchFromDynamicSource(src, { query: q, page, blockedTerms }))
+          dynamicSources.slice(0, 5).map((src) =>
+            withSoftTimeout(fetchFromDynamicSource(src, { query: q, page, blockedTerms }), 2600, [])
+          )
         ),
       ]);
       const seen = new Set();
@@ -358,18 +412,11 @@ export async function handleCatalogBrowse(request) {
         const key = `${m.source || 'phimapi'}::${m.sourceId || ''}::${m.slug}`;
         if (!seen.has(key)) {
           seen.add(key);
-          items.push(m);
+          items.push(slimRowMovie(m));
         }
       }
       metric('catalog.browse', 1, { mode: 'search', outcome: 'success' });
-      return new Response(JSON.stringify({ ok: true, mode: 'search', query: q, count: items.length, items }), {
-        status: 200,
-        headers: {
-          'Content-Type': 'application/json; charset=utf-8',
-          ...CORS_HEADERS,
-          'Cache-Control': 'public, s-maxage=120, stale-while-revalidate=300',
-        },
-      });
+      return cachedJsonResponse({ ok: true, mode: 'search', query: q, count: items.length, items }, 180, 900);
     }
 
     if (sourceId) {
@@ -487,29 +534,39 @@ export async function handleCatalogBrowse(request) {
 }
 
 async function resolveMacCmsDetailEnriched(target, slug, blockedTerms) {
-  const detail = await resolveMacCmsDetail(target, slug, blockedTerms);
+  const key = `maccms::${target.id}::${slug}`;
+  const normSlug = normalizeMovieSlug(slug);
+  // Parallelize MacCMS upstream fetch with Neon cached metadata + AI Glossary!
+  const [detail, dbBundle] = await Promise.all([
+    resolveMacCmsDetail(target, slug, blockedTerms),
+    (async () => {
+      try {
+        await ensureSchema();
+        const sql = getSql();
+        const [rows, gRows] = await Promise.all([
+          sql`SELECT name_en, name_vi, content_en, content_vi, genres_json, countries_json FROM nki_catalog_items WHERE item_key = ${key} LIMIT 1`,
+          sql`SELECT glossary_json FROM nki_movie_glossaries WHERE movie_slug = ${normSlug} LIMIT 1`,
+        ]);
+        return { cachedMeta: rows?.[0] || null, glossary: gRows?.[0]?.glossary_json || null };
+      } catch {
+        return { cachedMeta: null, glossary: null };
+      }
+    })(),
+  ]);
   if (!detail) return null;
   if (detail.blocked) return { blocked: true };
-  let cachedMeta = null;
-  let glossary = null;
-  try {
-    await ensureSchema();
-    const sql = getSql();
-    const key = `maccms::${target.id}::${slug}`;
-    const [rows, gRows] = await Promise.all([
-      sql`SELECT name_en, name_vi, content_en, content_vi, genres_json, countries_json FROM nki_catalog_items WHERE item_key = ${key} LIMIT 1`,
-      sql`SELECT glossary_json FROM nki_movie_glossaries WHERE movie_slug = ${normalizeMovieSlug(slug)} LIMIT 1`,
-    ]);
-    cachedMeta = rows?.[0] || null;
-    glossary = gRows?.[0]?.glossary_json || null;
-  } catch { /* non-fatal */ }
-  const similar = await findSimilarMovies({
-    slug,
-    genres: Array.isArray(cachedMeta?.genres_json) ? cachedMeta.genres_json : [],
-    countries: Array.isArray(cachedMeta?.countries_json) ? cachedMeta.countries_json : [],
-    limit: 10,
-    blockedTerms,
-  });
+  const { cachedMeta, glossary } = dbBundle;
+  const similar = await withSoftTimeout(
+    findSimilarMovies({
+      slug,
+      genres: Array.isArray(cachedMeta?.genres_json) ? cachedMeta.genres_json : [],
+      countries: Array.isArray(cachedMeta?.countries_json) ? cachedMeta.countries_json : [],
+      limit: 10,
+      blockedTerms,
+    }),
+    1200,
+    []
+  );
   return {
     ...detail,
     nameEn: cachedMeta?.name_en || '',
@@ -611,18 +668,18 @@ export async function handleCatalogDetail(request) {
         if (target) {
           const enriched = await resolveMacCmsDetailEnriched(target, slug, blockedTerms);
           if (enriched?.blocked) return jsonResponse({ error: 'Content blocked by VN-Safe anti-porn policy' }, 403);
-          if (enriched) return jsonResponse({ ok: true, detail: enriched });
+          if (enriched) return cachedJsonResponse({ ok: true, detail: enriched }, 300, 1800);
         }
         // Fallback: recover if sourceId was empty or stale
         const recovered = await autoResolveBySlugFallback(slug, blockedTerms);
         if (recovered?.blocked) return jsonResponse({ error: 'Content blocked by VN-Safe anti-porn policy' }, 403);
-        if (recovered) return jsonResponse({ ok: true, detail: recovered });
+        if (recovered) return cachedJsonResponse({ ok: true, detail: recovered }, 300, 1800);
         return jsonResponse({ error: 'Movie not found in MacCMS source' }, 404);
       }
 
       if (!target) return jsonResponse({ error: 'Custom source not found' }, 404);
       const base = target.baseUrl.replace(/\/+$/, '');
-      const json = await fetchJsonSafe(`${base}/phim/${encodeURIComponent(slug)}`, 8500);
+      const json = await fetchJsonSafe(`${base}/phim/${encodeURIComponent(slug)}`, 6000);
       const m = json?.movie;
       if (!m || (!m.name && !m.slug)) return jsonResponse({ error: 'Movie not found' }, 404);
       if (isBlockedContent(m, blockedTerms)) {
@@ -634,7 +691,7 @@ export async function handleCatalogDetail(request) {
           episodes: (s.server_data || []).filter((e) => e.link_m3u8),
         }))
         .filter((s) => s.episodes.length);
-      return jsonResponse({
+      return cachedJsonResponse({
         ok: true,
         detail: {
           slug: m.slug || slug,
@@ -652,23 +709,37 @@ export async function handleCatalogDetail(request) {
           backdrop: normalizeImage(m.thumb_url || m.poster_url, base),
           servers,
         },
-      });
+      }, 300, 1800);
     }
 
     // If a numeric MacCMS vod_id (e.g. `174008`) arrives with default `source=phimapi`, recover it first!
     if (/^\d{2,10}$/.test(slug)) {
       const recovered = await autoResolveBySlugFallback(slug, blockedTerms);
       if (recovered?.blocked) return jsonResponse({ error: 'Content blocked by VN-Safe anti-porn policy' }, 403);
-      if (recovered) return jsonResponse({ ok: true, detail: recovered });
+      if (recovered) return cachedJsonResponse({ ok: true, detail: recovered }, 300, 1800);
     }
 
-    const json = await fetchJsonSafe(`${PHIM_API}/phim/${encodeURIComponent(slug)}`, 8500);
+    // Parallelize PhimAPI detail fetch + saved AI Glossary lookup!
+    const normSlug = normalizeMovieSlug(slug);
+    const [json, glossaryInit] = await Promise.all([
+      fetchJsonSafe(`${PHIM_API}/phim/${encodeURIComponent(slug)}`, 6000),
+      (async () => {
+        try {
+          await ensureSchema();
+          const sql = getSql();
+          const gRows = await sql`SELECT glossary_json FROM nki_movie_glossaries WHERE movie_slug = ${normSlug} LIMIT 1`;
+          return gRows?.[0]?.glossary_json || null;
+        } catch {
+          return null;
+        }
+      })(),
+    ]);
     const m = json?.movie;
     if (!m || typeof m !== 'object' || (!m.name && !m.slug)) {
       // Fallback: check Neon catalog index (Archive / MacCMS) before returning 404!
       const recovered = await autoResolveBySlugFallback(slug, blockedTerms);
       if (recovered?.blocked) return jsonResponse({ error: 'Content blocked by VN-Safe anti-porn policy' }, 403);
-      if (recovered) return jsonResponse({ ok: true, detail: recovered });
+      if (recovered) return cachedJsonResponse({ ok: true, detail: recovered }, 300, 1800);
       return jsonResponse({ error: 'Movie not found' }, 404);
     }
     if (isBlockedContent(m, blockedTerms)) {
@@ -693,60 +764,47 @@ export async function handleCatalogDetail(request) {
       .slice(0, 6);
     const trailerUrl = String(m.trailer_url || '').trim();
     const voteAvg = Number(m.tmdb?.vote_average || 0);
+    const glossary = glossaryInit;
 
-    let glossary = null;
-    try {
-      await ensureSchema();
-      const sql = getSql();
-      const gRows = await sql`SELECT glossary_json FROM nki_movie_glossaries WHERE movie_slug = ${normalizeMovieSlug(m.slug || slug)} LIMIT 1`;
-      glossary = gRows?.[0]?.glossary_json || null;
-    } catch { /* non-fatal */ }
-
-    const similar = await findSimilarMovies({
-      slug: m.slug || slug,
-      genres,
-      countries,
-      limit: 10,
-      blockedTerms,
-    });
-
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        detail: {
-          slug: m.slug || slug,
-          source: 'phimapi',
-          name: m.name || slug,
-          origin_name: m.origin_name || '',
-          year: m.year ? String(m.year) : '',
-          quality: m.quality || 'FHD',
-          episode_current: String(m.episode_current || (servers[0]?.episodes?.length ? `Tập ${servers[0].episodes.length}` : 'Full')),
-          time: m.time || '',
-          content: stripHtml(m.content || ''),
-          imdbId: String(m.imdb?.id || '').startsWith('tt') ? m.imdb.id : '',
-          tmdbScore: Number.isFinite(voteAvg) && voteAvg > 0 ? Math.round(voteAvg * 10) / 10 : 0,
-          type: m.type || 'single',
-          genres,
-          countries,
-          actors,
-          directors,
-          trailerUrl,
-          glossary,
-          poster: normalizeImage(m.poster_url || m.thumb_url),
-          backdrop: normalizeImage(m.thumb_url || m.poster_url),
-          servers,
-          similar,
-        },
+    const similar = await withSoftTimeout(
+      findSimilarMovies({
+        slug: m.slug || slug,
+        genres,
+        countries,
+        limit: 10,
+        blockedTerms,
       }),
-      {
-        status: 200,
-        headers: {
-          'Content-Type': 'application/json; charset=utf-8',
-          ...CORS_HEADERS,
-          'Cache-Control': 'public, s-maxage=300, stale-while-revalidate=600',
-        },
-      }
+      1200,
+      []
     );
+
+    return cachedJsonResponse({
+      ok: true,
+      detail: {
+        slug: m.slug || slug,
+        source: 'phimapi',
+        name: m.name || slug,
+        origin_name: m.origin_name || '',
+        year: m.year ? String(m.year) : '',
+        quality: m.quality || 'FHD',
+        episode_current: String(m.episode_current || (servers[0]?.episodes?.length ? `Tập ${servers[0].episodes.length}` : 'Full')),
+        time: m.time || '',
+        content: stripHtml(m.content || ''),
+        imdbId: String(m.imdb?.id || '').startsWith('tt') ? m.imdb.id : '',
+        tmdbScore: Number.isFinite(voteAvg) && voteAvg > 0 ? Math.round(voteAvg * 10) / 10 : 0,
+        type: m.type || 'single',
+        genres,
+        countries,
+        actors,
+        directors,
+        trailerUrl,
+        glossary,
+        poster: normalizeImage(m.poster_url || m.thumb_url),
+        backdrop: normalizeImage(m.thumb_url || m.poster_url),
+        servers,
+        similar,
+      },
+    }, 300, 1800);
   } catch (err) {
     console.error('[catalog/detail] error:', err);
     return jsonResponse({ error: err?.message || 'Detail fetch failed' }, 500);
@@ -1056,12 +1114,12 @@ export async function handleCatalogGlossary(request) {
       const rows = await sql`SELECT glossary_json, updated_at FROM nki_movie_glossaries WHERE movie_slug = ${slugKey} LIMIT 1`;
       if (rows?.[0]?.glossary_json && ((rows[0].glossary_json.terms || []).length > 0 || rows[0].glossary_json.tone)) {
         metric('catalog.glossary', 1, { outcome: 'cache_hit' });
-        return jsonResponse({ ok: true, slug: slugKey, cached: true, glossary: rows[0].glossary_json });
+        return cachedJsonResponse({ ok: true, slug: slugKey, cached: true, glossary: rows[0].glossary_json }, 300, 1800);
       }
     }
 
     if (!shouldGenerate) {
-      return jsonResponse({ ok: true, slug: slugKey, cached: false, glossary: { terms: [], tone: '' } });
+      return cachedJsonResponse({ ok: true, slug: slugKey, cached: false, glossary: { terms: [], tone: '' } }, 120, 600);
     }
 
     const aiCfg = await getServerGeminiConfig();
@@ -1141,7 +1199,19 @@ export async function handleCatalogAiSearch(request) {
       searches.push(fetchPhimApiList(`${PHIM_API}/v1/api/quoc-gia/${encodeURIComponent(parsed.country)}?page=1&sort_field=modified.time&sort_type=desc&limit=18`, blockedTerms));
     }
 
-    const batches = await Promise.all(searches.map((p) => p.catch(() => [])));
+    const [batches, cloudSubSet] = await Promise.all([
+      Promise.all(searches.map((p) => withSoftTimeout(p, 3200, []))),
+      (async () => {
+        try {
+          await ensureSchema();
+          const sql = getSql();
+          const subRows = await sql`SELECT DISTINCT movie_slug FROM nki_subtitle_pool WHERE cue_count >= 3 LIMIT 400`;
+          return new Set((subRows || []).map((r) => normalizeMovieSlug(r.movie_slug)));
+        } catch {
+          return new Set();
+        }
+      })(),
+    ]);
     const seen = new Set();
     let merged = [];
     for (const batch of batches) {
@@ -1150,7 +1220,7 @@ export async function handleCatalogAiSearch(request) {
         const k = `${item.source || 'phimapi'}::${item.slug}`;
         if (seen.has(k)) continue;
         seen.add(k);
-        merged.push(item);
+        merged.push(slimRowMovie(item));
       }
     }
 
@@ -1159,26 +1229,17 @@ export async function handleCatalogAiSearch(request) {
       if (yearMatched.length >= 4) merged = yearMatched;
     }
 
-    // Also stamp Cloud Sub badges!
-    let cloudSubSet = new Set();
-    try {
-      await ensureSchema();
-      const sql = getSql();
-      const subRows = await sql`SELECT DISTINCT movie_slug FROM nki_subtitle_pool WHERE cue_count >= 3 LIMIT 400`;
-      cloudSubSet = new Set((subRows || []).map((r) => normalizeMovieSlug(r.movie_slug)));
-    } catch { /* non-fatal */ }
-
     const finalItems = filterSafeMovies(merged, blockedTerms)
       .slice(0, 36)
       .map((m) => (cloudSubSet.has(normalizeMovieSlug(m.slug)) ? { ...m, hasCloudSub: true } : m));
 
     metric('catalog.ai_search', 1, { outcome: finalItems.length ? 'hit' : 'miss' });
-    return jsonResponse({
+    return cachedJsonResponse({
       ok: true,
       vibeSummary: parsed.vibeSummary || `✨ AI đã lọc ${finalItems.length} phim hợp gu "${query}"`,
       parsed,
       items: finalItems,
-    });
+    }, 600, 1800);
   } catch (err) {
     console.error('[catalog/ai-search] error:', err);
     metric('catalog.ai_search', 1, { outcome: 'error' });

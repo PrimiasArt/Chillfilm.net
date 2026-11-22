@@ -596,16 +596,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _selectedCountry.value = country
         _searchQuery.value = ""
         _searchResults.value = emptyList()
-        refreshCatalog()
+        refreshCatalog(forceRefresh = false)
     }
 
-    fun refreshCatalog() {
+    fun refreshCatalog(forceRefresh: Boolean = true) {
         catalogJob?.cancel()
         catalogJob = viewModelScope.launch {
             _isLoadingCatalog.value = true
             val loaded = repository.loadHomeSections(
                 selectedCountry = _selectedCountry.value,
-                customProviders = prefs.customProviders.value
+                customProviders = prefs.customProviders.value,
+                forceRefresh = forceRefresh
             )
             _sections.value = loaded
             _isLoadingCatalog.value = false

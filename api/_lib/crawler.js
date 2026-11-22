@@ -91,9 +91,15 @@ export async function seedVerifiedBuiltinSources() {
   try {
     await ensureSchema();
     const sql = getSql();
+    // 1 fast COUNT check instead of 7 sequential INSERT round-trips on every cold boot!
+    const existing = await sql`SELECT COUNT(*)::int AS total FROM nki_sources WHERE is_builtin = TRUE`;
+    if (Number(existing?.[0]?.total || 0) >= VERIFIED_BUILTIN_SOURCES.length) {
+      _builtinSeeded = true;
+      return;
+    }
     const now = Date.now();
-    for (const src of VERIFIED_BUILTIN_SOURCES) {
-      await sql`
+    await Promise.all(
+      VERIFIED_BUILTIN_SOURCES.map((src) => sql`
         INSERT INTO nki_sources (
           id, name, source_type, base_url, country_hint, enabled, priority,
           created_by, created_at, is_builtin
@@ -103,8 +109,8 @@ export async function seedVerifiedBuiltinSources() {
           TRUE, ${src.priority}, 'system-verified', ${now}, TRUE
         )
         ON CONFLICT (id) DO NOTHING
-      `;
-    }
+      `)
+    );
     _builtinSeeded = true;
   } catch (err) {
     console.warn('[crawler] seedVerifiedBuiltinSources skipped:', err?.message || err);

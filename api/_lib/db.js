@@ -3,6 +3,10 @@ import { neon } from '@neondatabase/serverless';
 
 let _sql = null;
 let _schemaReadyPromise = null;
+const SCHEMA_VERSION_MARKER = 'v16';
+const _vaultCache = new Map(); // key -> { value, expiresAt }
+const VAULT_CACHE_TTL_MS = 60_000;
+let _geminiCfgCache = null; // { data, expiresAt }
 
 export function getSql() {
   if (!_sql) {
@@ -19,251 +23,249 @@ export async function ensureSchema() {
   if (_schemaReadyPromise) return _schemaReadyPromise;
   _schemaReadyPromise = (async () => {
     const sql = getSql();
-    await sql`
-      CREATE TABLE IF NOT EXISTS nki_users (
-        id TEXT PRIMARY KEY,
-        username TEXT UNIQUE NOT NULL,
-        display_name TEXT NOT NULL,
-        password_hash TEXT NOT NULL,
-        role TEXT NOT NULL DEFAULT 'MEMBER',
-        status TEXT NOT NULL DEFAULT 'ACTIVE',
-        daily_ai_limit INT NOT NULL DEFAULT 150,
-        token_version INT NOT NULL DEFAULT 1,
-        created_at BIGINT NOT NULL,
-        last_seen_at BIGINT NOT NULL
-      )
-    `;
-    await sql`
-      CREATE TABLE IF NOT EXISTS nki_invites (
-        code TEXT PRIMARY KEY,
-        label TEXT NOT NULL DEFAULT '',
-        max_uses INT NOT NULL DEFAULT 5,
-        used_count INT NOT NULL DEFAULT 0,
-        daily_ai_limit INT NOT NULL DEFAULT 150,
-        active BOOLEAN NOT NULL DEFAULT TRUE,
-        created_by TEXT NOT NULL,
-        created_at BIGINT NOT NULL
-      )
-    `;
-    await sql`
-      CREATE TABLE IF NOT EXISTS nki_config (
-        key TEXT PRIMARY KEY,
-        value_encrypted TEXT NOT NULL,
-        updated_at BIGINT NOT NULL
-      )
-    `;
-    await sql`
-      CREATE TABLE IF NOT EXISTS nki_watch_progress (
-        user_id TEXT NOT NULL,
-        movie_slug TEXT NOT NULL,
-        episode_key TEXT NOT NULL,
-        title TEXT NOT NULL,
-        poster_url TEXT NOT NULL DEFAULT '',
-        country_code TEXT NOT NULL DEFAULT '',
-        episode_name TEXT NOT NULL DEFAULT '',
-        stream_url TEXT NOT NULL DEFAULT '',
-        position_ms BIGINT NOT NULL DEFAULT 0,
-        duration_ms BIGINT NOT NULL DEFAULT 0,
-        updated_at BIGINT NOT NULL,
-        PRIMARY KEY (user_id, movie_slug, episode_key)
-      )
-    `;
-    await sql`
-      CREATE INDEX IF NOT EXISTS idx_nki_watch_progress_user_updated
-      ON nki_watch_progress (user_id, updated_at DESC)
-    `;
-    await sql`
-      CREATE TABLE IF NOT EXISTS nki_user_prefs (
-        user_id TEXT PRIMARY KEY,
-        prefs_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-        updated_at BIGINT NOT NULL
-      )
-    `;
-    await sql`
-      CREATE TABLE IF NOT EXISTS nki_subtitle_pool (
-        cache_key TEXT PRIMARY KEY,
-        movie_slug TEXT NOT NULL,
-        episode_key TEXT NOT NULL,
-        lang TEXT NOT NULL,
-        blob_pathname TEXT NOT NULL,
-        cue_count INT NOT NULL DEFAULT 0,
-        is_fully_translated BOOLEAN NOT NULL DEFAULT TRUE,
-        is_ai_audio BOOLEAN NOT NULL DEFAULT FALSE,
-        source_lang TEXT NOT NULL DEFAULT 'auto',
-        source_platform TEXT NOT NULL DEFAULT '',
-        created_by TEXT NOT NULL DEFAULT '',
-        updated_at BIGINT NOT NULL
-      )
-    `;
-    await sql`
-      CREATE INDEX IF NOT EXISTS idx_nki_subtitle_pool_lookup
-      ON nki_subtitle_pool (movie_slug, episode_key, lang)
-    `;
-    await sql`
-      CREATE TABLE IF NOT EXISTS nki_ai_usage (
-        user_id TEXT NOT NULL,
-        day_key TEXT NOT NULL,
-        requests_count INT NOT NULL DEFAULT 0,
-        cues_count INT NOT NULL DEFAULT 0,
-        audio_chunks INT NOT NULL DEFAULT 0,
-        PRIMARY KEY (user_id, day_key)
-      )
-    `;
-    await sql`
-      CREATE TABLE IF NOT EXISTS nki_sources (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        source_type TEXT NOT NULL,
-        base_url TEXT NOT NULL,
-        country_hint TEXT NOT NULL DEFAULT 'global',
-        enabled BOOLEAN NOT NULL DEFAULT TRUE,
-        priority INT NOT NULL DEFAULT 50,
-        created_by TEXT NOT NULL DEFAULT '',
-        created_at BIGINT NOT NULL,
-        is_builtin BOOLEAN NOT NULL DEFAULT FALSE,
-        last_checked_at BIGINT NOT NULL DEFAULT 0,
-        last_status TEXT NOT NULL DEFAULT 'PENDING',
-        last_latency_ms INT NOT NULL DEFAULT 0,
-        last_error TEXT NOT NULL DEFAULT '',
-        consecutive_failures INT NOT NULL DEFAULT 0,
-        items_crawled INT NOT NULL DEFAULT 0,
-        total_remote INT NOT NULL DEFAULT 0
-      )
-    `;
-    // Safe zero-downtime migration for existing nki_sources tables
-    await sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS is_builtin BOOLEAN NOT NULL DEFAULT FALSE`;
-    await sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS last_checked_at BIGINT NOT NULL DEFAULT 0`;
-    await sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS last_status TEXT NOT NULL DEFAULT 'PENDING'`;
-    await sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS last_latency_ms INT NOT NULL DEFAULT 0`;
-    await sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS last_error TEXT NOT NULL DEFAULT ''`;
-    await sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS consecutive_failures INT NOT NULL DEFAULT 0`;
-    await sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS items_crawled INT NOT NULL DEFAULT 0`;
-    await sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS total_remote INT NOT NULL DEFAULT 0`;
+    // Fast-path: 1 single lightweight PK lookup (~90ms) instead of 30 sequential DDL round-trips (~7,500ms)!
+    try {
+      const markerRows = await sql`SELECT value_encrypted FROM nki_config WHERE key = '__schema_ver' LIMIT 1`;
+      if (markerRows?.[0]?.value_encrypted === SCHEMA_VERSION_MARKER) {
+        return;
+      }
+    } catch {
+      // Table does not exist yet — proceed with full bootstrap DDL below
+    }
+
+    await Promise.all([
+      sql`
+        CREATE TABLE IF NOT EXISTS nki_users (
+          id TEXT PRIMARY KEY,
+          username TEXT UNIQUE NOT NULL,
+          display_name TEXT NOT NULL,
+          password_hash TEXT NOT NULL,
+          role TEXT NOT NULL DEFAULT 'MEMBER',
+          status TEXT NOT NULL DEFAULT 'ACTIVE',
+          daily_ai_limit INT NOT NULL DEFAULT 150,
+          token_version INT NOT NULL DEFAULT 1,
+          created_at BIGINT NOT NULL,
+          last_seen_at BIGINT NOT NULL
+        )
+      `,
+      sql`
+        CREATE TABLE IF NOT EXISTS nki_invites (
+          code TEXT PRIMARY KEY,
+          label TEXT NOT NULL DEFAULT '',
+          max_uses INT NOT NULL DEFAULT 5,
+          used_count INT NOT NULL DEFAULT 0,
+          daily_ai_limit INT NOT NULL DEFAULT 150,
+          active BOOLEAN NOT NULL DEFAULT TRUE,
+          created_by TEXT NOT NULL,
+          created_at BIGINT NOT NULL
+        )
+      `,
+      sql`
+        CREATE TABLE IF NOT EXISTS nki_config (
+          key TEXT PRIMARY KEY,
+          value_encrypted TEXT NOT NULL,
+          updated_at BIGINT NOT NULL
+        )
+      `,
+      sql`
+        CREATE TABLE IF NOT EXISTS nki_watch_progress (
+          user_id TEXT NOT NULL,
+          movie_slug TEXT NOT NULL,
+          episode_key TEXT NOT NULL,
+          title TEXT NOT NULL,
+          poster_url TEXT NOT NULL DEFAULT '',
+          country_code TEXT NOT NULL DEFAULT '',
+          episode_name TEXT NOT NULL DEFAULT '',
+          stream_url TEXT NOT NULL DEFAULT '',
+          position_ms BIGINT NOT NULL DEFAULT 0,
+          duration_ms BIGINT NOT NULL DEFAULT 0,
+          updated_at BIGINT NOT NULL,
+          PRIMARY KEY (user_id, movie_slug, episode_key)
+        )
+      `,
+      sql`
+        CREATE TABLE IF NOT EXISTS nki_user_prefs (
+          user_id TEXT PRIMARY KEY,
+          prefs_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+          updated_at BIGINT NOT NULL
+        )
+      `,
+      sql`
+        CREATE TABLE IF NOT EXISTS nki_subtitle_pool (
+          cache_key TEXT PRIMARY KEY,
+          movie_slug TEXT NOT NULL,
+          episode_key TEXT NOT NULL,
+          lang TEXT NOT NULL,
+          blob_pathname TEXT NOT NULL,
+          cue_count INT NOT NULL DEFAULT 0,
+          is_fully_translated BOOLEAN NOT NULL DEFAULT TRUE,
+          is_ai_audio BOOLEAN NOT NULL DEFAULT FALSE,
+          source_lang TEXT NOT NULL DEFAULT 'auto',
+          source_platform TEXT NOT NULL DEFAULT '',
+          created_by TEXT NOT NULL DEFAULT '',
+          updated_at BIGINT NOT NULL
+        )
+      `,
+      sql`
+        CREATE TABLE IF NOT EXISTS nki_ai_usage (
+          user_id TEXT NOT NULL,
+          day_key TEXT NOT NULL,
+          requests_count INT NOT NULL DEFAULT 0,
+          cues_count INT NOT NULL DEFAULT 0,
+          audio_chunks INT NOT NULL DEFAULT 0,
+          PRIMARY KEY (user_id, day_key)
+        )
+      `,
+      sql`
+        CREATE TABLE IF NOT EXISTS nki_sources (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          source_type TEXT NOT NULL,
+          base_url TEXT NOT NULL,
+          country_hint TEXT NOT NULL DEFAULT 'global',
+          enabled BOOLEAN NOT NULL DEFAULT TRUE,
+          priority INT NOT NULL DEFAULT 50,
+          created_by TEXT NOT NULL DEFAULT '',
+          created_at BIGINT NOT NULL,
+          is_builtin BOOLEAN NOT NULL DEFAULT FALSE,
+          last_checked_at BIGINT NOT NULL DEFAULT 0,
+          last_status TEXT NOT NULL DEFAULT 'PENDING',
+          last_latency_ms INT NOT NULL DEFAULT 0,
+          last_error TEXT NOT NULL DEFAULT '',
+          consecutive_failures INT NOT NULL DEFAULT 0,
+          items_crawled INT NOT NULL DEFAULT 0,
+          total_remote INT NOT NULL DEFAULT 0
+        )
+      `,
+      sql`
+        CREATE TABLE IF NOT EXISTS nki_catalog_items (
+          item_key TEXT PRIMARY KEY,
+          source TEXT NOT NULL,
+          source_id TEXT NOT NULL DEFAULT '',
+          source_name TEXT NOT NULL DEFAULT '',
+          slug TEXT NOT NULL,
+          name TEXT NOT NULL,
+          origin_name TEXT NOT NULL DEFAULT '',
+          media_type TEXT NOT NULL DEFAULT 'single',
+          year TEXT NOT NULL DEFAULT '',
+          quality TEXT NOT NULL DEFAULT 'HD',
+          episode_current TEXT NOT NULL DEFAULT '',
+          poster TEXT NOT NULL DEFAULT '',
+          backdrop TEXT NOT NULL DEFAULT '',
+          genres_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+          countries_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+          imdb_id TEXT NOT NULL DEFAULT '',
+          tmdb_score REAL NOT NULL DEFAULT 0,
+          content TEXT NOT NULL DEFAULT '',
+          stream_url TEXT NOT NULL DEFAULT '',
+          category_tag TEXT NOT NULL DEFAULT 'latest',
+          first_seen_at BIGINT NOT NULL,
+          updated_at BIGINT NOT NULL,
+          last_verified_at BIGINT NOT NULL,
+          name_en TEXT NOT NULL DEFAULT '',
+          name_vi TEXT NOT NULL DEFAULT '',
+          content_en TEXT NOT NULL DEFAULT '',
+          content_vi TEXT NOT NULL DEFAULT ''
+        )
+      `,
+      sql`
+        CREATE TABLE IF NOT EXISTS nki_my_list (
+          user_id TEXT NOT NULL,
+          item_key TEXT NOT NULL,
+          source TEXT NOT NULL DEFAULT 'phimapi',
+          source_id TEXT NOT NULL DEFAULT '',
+          slug TEXT NOT NULL,
+          name TEXT NOT NULL,
+          origin_name TEXT NOT NULL DEFAULT '',
+          poster TEXT NOT NULL DEFAULT '',
+          year TEXT NOT NULL DEFAULT '',
+          quality TEXT NOT NULL DEFAULT 'HD',
+          last_known_episode TEXT NOT NULL DEFAULT '',
+          added_at BIGINT NOT NULL,
+          PRIMARY KEY (user_id, item_key)
+        )
+      `,
+      sql`
+        CREATE TABLE IF NOT EXISTS nki_movie_glossaries (
+          movie_slug TEXT PRIMARY KEY,
+          glossary_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+          updated_at BIGINT NOT NULL
+        )
+      `,
+      sql`
+        CREATE TABLE IF NOT EXISTS nki_watch_parties (
+          room_code TEXT PRIMARY KEY,
+          host_token TEXT NOT NULL,
+          host_name TEXT NOT NULL,
+          movie_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+          episode_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+          is_playing BOOLEAN NOT NULL DEFAULT FALSE,
+          position_sec REAL NOT NULL DEFAULT 0,
+          playback_rate REAL NOT NULL DEFAULT 1,
+          state_updated_at BIGINT NOT NULL,
+          members_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+          created_at BIGINT NOT NULL,
+          expires_at BIGINT NOT NULL
+        )
+      `,
+      sql`
+        CREATE TABLE IF NOT EXISTS nki_party_messages (
+          id BIGSERIAL PRIMARY KEY,
+          room_code TEXT NOT NULL,
+          sender_name TEXT NOT NULL,
+          sender_is_host BOOLEAN NOT NULL DEFAULT FALSE,
+          text TEXT NOT NULL,
+          created_at BIGINT NOT NULL
+        )
+      `,
+      sql`
+        CREATE TABLE IF NOT EXISTS nki_crawl_runs (
+          execution_id TEXT PRIMARY KEY,
+          trigger_type TEXT NOT NULL DEFAULT 'SCHEDULE',
+          started_at BIGINT NOT NULL,
+          finished_at BIGINT NOT NULL,
+          sources_checked INT NOT NULL DEFAULT 0,
+          sources_healthy INT NOT NULL DEFAULT 0,
+          items_discovered INT NOT NULL DEFAULT 0,
+          items_new INT NOT NULL DEFAULT 0,
+          items_blocked_sfw INT NOT NULL DEFAULT 0,
+          total_indexed INT NOT NULL DEFAULT 0,
+          summary_json JSONB NOT NULL DEFAULT '{}'::jsonb
+        )
+      `,
+    ]);
+
+    await Promise.all([
+      sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS is_builtin BOOLEAN NOT NULL DEFAULT FALSE`,
+      sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS last_checked_at BIGINT NOT NULL DEFAULT 0`,
+      sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS last_status TEXT NOT NULL DEFAULT 'PENDING'`,
+      sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS last_latency_ms INT NOT NULL DEFAULT 0`,
+      sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS last_error TEXT NOT NULL DEFAULT ''`,
+      sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS consecutive_failures INT NOT NULL DEFAULT 0`,
+      sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS items_crawled INT NOT NULL DEFAULT 0`,
+      sql`ALTER TABLE nki_sources ADD COLUMN IF NOT EXISTS total_remote INT NOT NULL DEFAULT 0`,
+      sql`ALTER TABLE nki_catalog_items ADD COLUMN IF NOT EXISTS name_en TEXT NOT NULL DEFAULT ''`,
+      sql`ALTER TABLE nki_catalog_items ADD COLUMN IF NOT EXISTS name_vi TEXT NOT NULL DEFAULT ''`,
+      sql`ALTER TABLE nki_catalog_items ADD COLUMN IF NOT EXISTS content_en TEXT NOT NULL DEFAULT ''`,
+      sql`ALTER TABLE nki_catalog_items ADD COLUMN IF NOT EXISTS content_vi TEXT NOT NULL DEFAULT ''`,
+      sql`ALTER TABLE nki_my_list ADD COLUMN IF NOT EXISTS last_known_episode TEXT NOT NULL DEFAULT ''`,
+      sql`CREATE INDEX IF NOT EXISTS idx_nki_watch_progress_user_updated ON nki_watch_progress (user_id, updated_at DESC)`,
+      sql`CREATE INDEX IF NOT EXISTS idx_nki_subtitle_pool_lookup ON nki_subtitle_pool (movie_slug, episode_key, lang)`,
+      sql`CREATE INDEX IF NOT EXISTS idx_nki_my_list_user_added ON nki_my_list (user_id, added_at DESC)`,
+      sql`CREATE INDEX IF NOT EXISTS idx_nki_party_messages_room ON nki_party_messages (room_code, id ASC)`,
+      sql`CREATE INDEX IF NOT EXISTS idx_nki_catalog_updated ON nki_catalog_items (updated_at DESC)`,
+      sql`CREATE INDEX IF NOT EXISTS idx_nki_catalog_source_updated ON nki_catalog_items (source_id, updated_at DESC)`,
+      sql`CREATE INDEX IF NOT EXISTS idx_nki_catalog_tag_updated ON nki_catalog_items (category_tag, updated_at DESC)`,
+      sql`CREATE INDEX IF NOT EXISTS idx_nki_catalog_slug ON nki_catalog_items (slug)`,
+      sql`CREATE INDEX IF NOT EXISTS idx_nki_crawl_runs_finished ON nki_crawl_runs (finished_at DESC)`,
+    ]);
 
     await sql`
-      CREATE TABLE IF NOT EXISTS nki_catalog_items (
-        item_key TEXT PRIMARY KEY,
-        source TEXT NOT NULL,
-        source_id TEXT NOT NULL DEFAULT '',
-        source_name TEXT NOT NULL DEFAULT '',
-        slug TEXT NOT NULL,
-        name TEXT NOT NULL,
-        origin_name TEXT NOT NULL DEFAULT '',
-        media_type TEXT NOT NULL DEFAULT 'single',
-        year TEXT NOT NULL DEFAULT '',
-        quality TEXT NOT NULL DEFAULT 'HD',
-        episode_current TEXT NOT NULL DEFAULT '',
-        poster TEXT NOT NULL DEFAULT '',
-        backdrop TEXT NOT NULL DEFAULT '',
-        genres_json JSONB NOT NULL DEFAULT '[]'::jsonb,
-        countries_json JSONB NOT NULL DEFAULT '[]'::jsonb,
-        imdb_id TEXT NOT NULL DEFAULT '',
-        tmdb_score REAL NOT NULL DEFAULT 0,
-        content TEXT NOT NULL DEFAULT '',
-        stream_url TEXT NOT NULL DEFAULT '',
-        category_tag TEXT NOT NULL DEFAULT 'latest',
-        first_seen_at BIGINT NOT NULL,
-        updated_at BIGINT NOT NULL,
-        last_verified_at BIGINT NOT NULL,
-        name_en TEXT NOT NULL DEFAULT '',
-        name_vi TEXT NOT NULL DEFAULT '',
-        content_en TEXT NOT NULL DEFAULT '',
-        content_vi TEXT NOT NULL DEFAULT ''
-      )
-    `;
-    await sql`ALTER TABLE nki_catalog_items ADD COLUMN IF NOT EXISTS name_en TEXT NOT NULL DEFAULT ''`;
-    await sql`ALTER TABLE nki_catalog_items ADD COLUMN IF NOT EXISTS name_vi TEXT NOT NULL DEFAULT ''`;
-    await sql`ALTER TABLE nki_catalog_items ADD COLUMN IF NOT EXISTS content_en TEXT NOT NULL DEFAULT ''`;
-    await sql`ALTER TABLE nki_catalog_items ADD COLUMN IF NOT EXISTS content_vi TEXT NOT NULL DEFAULT ''`;
-    await sql`
-      CREATE TABLE IF NOT EXISTS nki_my_list (
-        user_id TEXT NOT NULL,
-        item_key TEXT NOT NULL,
-        source TEXT NOT NULL DEFAULT 'phimapi',
-        source_id TEXT NOT NULL DEFAULT '',
-        slug TEXT NOT NULL,
-        name TEXT NOT NULL,
-        origin_name TEXT NOT NULL DEFAULT '',
-        poster TEXT NOT NULL DEFAULT '',
-        year TEXT NOT NULL DEFAULT '',
-        quality TEXT NOT NULL DEFAULT 'HD',
-        last_known_episode TEXT NOT NULL DEFAULT '',
-        added_at BIGINT NOT NULL,
-        PRIMARY KEY (user_id, item_key)
-      )
-    `;
-    await sql`ALTER TABLE nki_my_list ADD COLUMN IF NOT EXISTS last_known_episode TEXT NOT NULL DEFAULT ''`;
-    await sql`
-      CREATE TABLE IF NOT EXISTS nki_movie_glossaries (
-        movie_slug TEXT PRIMARY KEY,
-        glossary_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-        updated_at BIGINT NOT NULL
-      )
-    `;
-    await sql`
-      CREATE INDEX IF NOT EXISTS idx_nki_my_list_user_added
-      ON nki_my_list (user_id, added_at DESC)
-    `;
-    await sql`
-      CREATE TABLE IF NOT EXISTS nki_watch_parties (
-        room_code TEXT PRIMARY KEY,
-        host_token TEXT NOT NULL,
-        host_name TEXT NOT NULL,
-        movie_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-        episode_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-        is_playing BOOLEAN NOT NULL DEFAULT FALSE,
-        position_sec REAL NOT NULL DEFAULT 0,
-        playback_rate REAL NOT NULL DEFAULT 1,
-        state_updated_at BIGINT NOT NULL,
-        members_json JSONB NOT NULL DEFAULT '[]'::jsonb,
-        created_at BIGINT NOT NULL,
-        expires_at BIGINT NOT NULL
-      )
-    `;
-    await sql`
-      CREATE TABLE IF NOT EXISTS nki_party_messages (
-        id BIGSERIAL PRIMARY KEY,
-        room_code TEXT NOT NULL,
-        sender_name TEXT NOT NULL,
-        sender_is_host BOOLEAN NOT NULL DEFAULT FALSE,
-        text TEXT NOT NULL,
-        created_at BIGINT NOT NULL
-      )
-    `;
-    await sql`
-      CREATE INDEX IF NOT EXISTS idx_nki_party_messages_room
-      ON nki_party_messages (room_code, id ASC)
-    `;
-    await sql`
-      CREATE INDEX IF NOT EXISTS idx_nki_catalog_updated
-      ON nki_catalog_items (updated_at DESC)
-    `;
-    await sql`
-      CREATE INDEX IF NOT EXISTS idx_nki_catalog_source_updated
-      ON nki_catalog_items (source_id, updated_at DESC)
-    `;
-    await sql`
-      CREATE INDEX IF NOT EXISTS idx_nki_catalog_tag_updated
-      ON nki_catalog_items (category_tag, updated_at DESC)
-    `;
-    await sql`
-      CREATE TABLE IF NOT EXISTS nki_crawl_runs (
-        execution_id TEXT PRIMARY KEY,
-        trigger_type TEXT NOT NULL DEFAULT 'SCHEDULE',
-        started_at BIGINT NOT NULL,
-        finished_at BIGINT NOT NULL,
-        sources_checked INT NOT NULL DEFAULT 0,
-        sources_healthy INT NOT NULL DEFAULT 0,
-        items_discovered INT NOT NULL DEFAULT 0,
-        items_new INT NOT NULL DEFAULT 0,
-        items_blocked_sfw INT NOT NULL DEFAULT 0,
-        total_indexed INT NOT NULL DEFAULT 0,
-        summary_json JSONB NOT NULL DEFAULT '{}'::jsonb
-      )
-    `;
-    await sql`
-      CREATE INDEX IF NOT EXISTS idx_nki_crawl_runs_finished
-      ON nki_crawl_runs (finished_at DESC)
+      INSERT INTO nki_config (key, value_encrypted, updated_at)
+      VALUES ('__schema_ver', ${SCHEMA_VERSION_MARKER}, ${Date.now()})
+      ON CONFLICT (key) DO UPDATE SET
+        value_encrypted = EXCLUDED.value_encrypted,
+        updated_at = EXCLUDED.updated_at
     `;
   })().catch((err) => {
     _schemaReadyPromise = null;
@@ -358,21 +360,31 @@ export function decryptVaultValue(token) {
 }
 
 export async function getVaultConfigValue(key) {
+  const cached = _vaultCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value;
+  }
   await ensureSchema();
   const sql = getSql();
   const rows = await sql`SELECT value_encrypted FROM nki_config WHERE key = ${key} LIMIT 1`;
-  if (!rows.length) return '';
-  try {
-    return decryptVaultValue(rows[0].value_encrypted);
-  } catch {
-    return '';
+  let val = '';
+  if (rows.length) {
+    try {
+      val = decryptVaultValue(rows[0].value_encrypted);
+    } catch {
+      val = '';
+    }
   }
+  _vaultCache.set(key, { value: val, expiresAt: Date.now() + VAULT_CACHE_TTL_MS });
+  return val;
 }
 
 export async function setVaultConfigValue(key, plainValue) {
   await ensureSchema();
   const sql = getSql();
   const clean = String(plainValue ?? '').trim();
+  _vaultCache.delete(key);
+  _geminiCfgCache = null;
   if (!clean) {
     await sql`DELETE FROM nki_config WHERE key = ${key}`;
     return;
@@ -386,6 +398,7 @@ export async function setVaultConfigValue(key, plainValue) {
       value_encrypted = EXCLUDED.value_encrypted,
       updated_at = EXCLUDED.updated_at
   `;
+  _vaultCache.set(key, { value: clean, expiresAt: Date.now() + VAULT_CACHE_TTL_MS });
 }
 
 export function maskSecret(raw) {
@@ -396,24 +409,38 @@ export function maskSecret(raw) {
 }
 
 /**
- * Resolves the authoritative server-side Gemini API key & defaults.
- * Priority: Admin Vault override (AES-256-GCM in Neon) > Vercel Secret `GEMINI_API_KEY`.
- * NEVER returns the raw key to clients!
+ * Resolves the authoritative server-side Gemini API key & defaults in 1 single batched SQL query
+ * + 60s in-memory cache so AI translate/audio/health routes don't waste 300-600ms per call!
  */
-export async function getServerGeminiConfig() {
-  const [vaultKey, defaultModel, regMode] = await Promise.all([
-    getVaultConfigValue('gemini_api_key'),
-    getVaultConfigValue('default_gemini_model'),
-    getVaultConfigValue('registration_mode'),
-  ]);
+export async function getServerGeminiConfig({ bypassCache = false } = {}) {
+  if (!bypassCache && _geminiCfgCache && _geminiCfgCache.expiresAt > Date.now()) {
+    return _geminiCfgCache.data;
+  }
+  await ensureSchema();
+  const sql = getSql();
+  const keys = ['gemini_api_key', 'default_gemini_model', 'registration_mode'];
+  const rows = await sql`SELECT key, value_encrypted FROM nki_config WHERE key = ANY(${keys})`;
+  const map = {};
+  for (const r of rows || []) {
+    try {
+      map[r.key] = decryptVaultValue(r.value_encrypted);
+    } catch {
+      map[r.key] = '';
+    }
+  }
+  const vaultKey = map.gemini_api_key || '';
+  const defaultModel = map.default_gemini_model || '';
+  const regMode = map.registration_mode || '';
   const envKey = String(process.env.GEMINI_API_KEY || '').trim();
   const effectiveKey = vaultKey || envKey;
-  return {
+  const data = {
     apiKey: effectiveKey,
     hasVaultKey: Boolean(vaultKey),
     hasEnvKey: Boolean(envKey),
     maskedVaultKey: maskSecret(vaultKey),
-    defaultModel: defaultModel || 'gemini-3-flash-preview',
+    defaultModel: defaultModel || 'gemini-2.5-flash',
     registrationMode: regMode === 'OPEN' ? 'OPEN' : 'INVITE_ONLY',
   };
+  _geminiCfgCache = { data, expiresAt: Date.now() + VAULT_CACHE_TTL_MS };
+  return data;
 }

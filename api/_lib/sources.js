@@ -118,50 +118,54 @@ export async function setCustomBlockedTerms(terms) {
   return clean;
 }
 
-export async function listDynamicSources({ onlyEnabled = true, skipOffline = false } = {}) {
+let _dynamicSourcesCache = null; // { all, expiresAt }
+const SOURCES_CACHE_TTL_MS = 60_000;
+
+export function invalidateDynamicSourcesCache() {
+  _dynamicSourcesCache = null;
+}
+
+export async function listDynamicSources({ onlyEnabled = true, skipOffline = false, bypassCache = false } = {}) {
   try {
-    await ensureSchema();
-    const sql = getSql();
-    const rows = onlyEnabled
-      ? await sql`
-          SELECT id, name, source_type, base_url, country_hint, enabled, priority, created_at,
-                 is_builtin, last_checked_at, last_status, last_latency_ms, last_error,
-                 consecutive_failures, items_crawled, total_remote
-          FROM nki_sources
-          WHERE enabled = TRUE
-          ORDER BY priority ASC, created_at DESC
-          LIMIT 40
-        `
-      : await sql`
-          SELECT id, name, source_type, base_url, country_hint, enabled, priority, created_at,
-                 is_builtin, last_checked_at, last_status, last_latency_ms, last_error,
-                 consecutive_failures, items_crawled, total_remote
-          FROM nki_sources
-          ORDER BY priority ASC, created_at DESC
-          LIMIT 60
-        `;
-    const mapped = rows.map((r) => ({
-      id: r.id,
-      name: r.name,
-      sourceType: r.source_type,
-      baseUrl: r.base_url,
-      countryHint: r.country_hint,
-      enabled: Boolean(r.enabled),
-      priority: Number(r.priority || 50),
-      createdAt: Number(r.created_at || 0),
-      isBuiltin: Boolean(r.is_builtin),
-      lastCheckedAt: Number(r.last_checked_at || 0),
-      lastStatus: String(r.last_status || 'PENDING'),
-      lastLatencyMs: Number(r.last_latency_ms || 0),
-      lastError: String(r.last_error || ''),
-      consecutiveFailures: Number(r.consecutive_failures || 0),
-      itemsCrawled: Number(r.items_crawled || 0),
-      totalRemote: Number(r.total_remote || 0),
-    }));
-    if (skipOffline) {
-      return mapped.filter((s) => s.consecutiveFailures < 3 && s.lastStatus !== 'OFFLINE');
+    let allMapped = null;
+    if (!bypassCache && _dynamicSourcesCache && _dynamicSourcesCache.expiresAt > Date.now()) {
+      allMapped = _dynamicSourcesCache.all;
+    } else {
+      await ensureSchema();
+      const sql = getSql();
+      const rows = await sql`
+        SELECT id, name, source_type, base_url, country_hint, enabled, priority, created_at,
+               is_builtin, last_checked_at, last_status, last_latency_ms, last_error,
+               consecutive_failures, items_crawled, total_remote
+        FROM nki_sources
+        ORDER BY priority ASC, created_at DESC
+        LIMIT 60
+      `;
+      allMapped = rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        sourceType: r.source_type,
+        baseUrl: r.base_url,
+        countryHint: r.country_hint,
+        enabled: Boolean(r.enabled),
+        priority: Number(r.priority || 50),
+        createdAt: Number(r.created_at || 0),
+        isBuiltin: Boolean(r.is_builtin),
+        lastCheckedAt: Number(r.last_checked_at || 0),
+        lastStatus: String(r.last_status || 'PENDING'),
+        lastLatencyMs: Number(r.last_latency_ms || 0),
+        lastError: String(r.last_error || ''),
+        consecutiveFailures: Number(r.consecutive_failures || 0),
+        itemsCrawled: Number(r.items_crawled || 0),
+        totalRemote: Number(r.total_remote || 0),
+      }));
+      _dynamicSourcesCache = { all: allMapped, expiresAt: Date.now() + SOURCES_CACHE_TTL_MS };
     }
-    return mapped;
+    let out = onlyEnabled ? allMapped.filter((s) => s.enabled) : allMapped;
+    if (skipOffline) {
+      out = out.filter((s) => s.consecutiveFailures < 3 && s.lastStatus !== 'OFFLINE');
+    }
+    return out;
   } catch {
     return [];
   }
@@ -194,7 +198,6 @@ export function mapPhimItem(m, { cdnDomain = PHIM_CDN, source = 'phimapi', sourc
     poster: normalizeImage(m.poster_url || m.thumb_url, cdnDomain),
     backdrop: normalizeImage(m.thumb_url || m.poster_url, cdnDomain),
     genres: categories,
-    category: m.category || [],
     countries,
     imdbId: String(m.imdb?.id || '').startsWith('tt') ? String(m.imdb.id) : '',
     tmdbScore: Number.isFinite(voteAvg) && voteAvg > 0 ? Math.round(voteAvg * 10) / 10 : 0,
@@ -204,7 +207,7 @@ export function mapPhimItem(m, { cdnDomain = PHIM_CDN, source = 'phimapi', sourc
 }
 
 export async function fetchPhimApiList(url, blockedTerms = [], opts = {}) {
-  const json = await fetchJsonSafe(url, 8500);
+  const json = await fetchJsonSafe(url, opts.timeoutMs || 6500);
   if (!json) return [];
   const cdn = json?.data?.APP_DOMAIN_CDN_IMAGE || opts.cdnDomain || PHIM_CDN;
   const raw = json?.items || json?.data?.items || [];

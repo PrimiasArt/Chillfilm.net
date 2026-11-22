@@ -1,8 +1,9 @@
-/* ChillFilm — NKI AI Cinema PWA Service Worker (v16)
- * Network-first for HTML/JS/CSS shell so deploys update immediately;
- * NEVER intercepts /api/*, HLS streams (.m3u8/.ts/.mp4), or cross-origin media.
+/* ChillFilm — NKI AI Cinema PWA Service Worker (v17 Turbo)
+ * - Cache-First (<5ms) for versioned JS/CSS (?v=...) & static icons/assets
+ * - Network-First for HTML (/) so new deploys roll out immediately
+ * - NEVER intercepts /api/*, HLS streams (.m3u8/.ts/.mp4), or cross-origin media
  */
-const CACHE_NAME = 'chillfilm-nki-shell-v16';
+const CACHE_NAME = 'chillfilm-nki-shell-v17';
 const SHELL_ASSETS = [
   '/',
   '/index.html',
@@ -33,29 +34,29 @@ self.addEventListener('fetch', (event) => {
   if (req.method !== 'GET') return;
 
   const url = new URL(req.url);
-  // Only handle same-origin static shell requests — NEVER intercept API, streams, or third-party media
   if (url.origin !== self.location.origin) return;
   if (url.pathname.startsWith('/api/')) return;
   if (/\.(m3u8|ts|mp4|webm|mkv|aac|srt|vtt)(\?|$)/i.test(url.pathname)) return;
 
-  // Static icons/assets: stale-while-revalidate
-  if (url.pathname.startsWith('/assets/')) {
+  // Versioned JS/CSS (?v=...) and static icons: Cache-First (<5ms instant load!)
+  const isVersionedBundle = /\.(js|css)$/i.test(url.pathname) && url.searchParams.has('v');
+  if (isVersionedBundle || url.pathname.startsWith('/assets/')) {
     event.respondWith(
       caches.match(req).then((cached) => {
-        const net = fetch(req).then((res) => {
-          if (res && res.ok) {
+        if (cached) return cached;
+        return fetch(req).then((res) => {
+          if (res && res.ok && res.type === 'basic') {
             const clone = res.clone();
             caches.open(CACHE_NAME).then((c) => c.put(req, clone)).catch(() => {});
           }
           return res;
-        }).catch(() => cached);
-        return cached || net;
+        });
       })
     );
     return;
   }
 
-  // App shell (HTML / JS / CSS / manifest): network-first with offline cache fallback
+  // HTML document & unversioned files: network-first with offline cache fallback
   event.respondWith(
     fetch(req)
       .then((res) => {

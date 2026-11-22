@@ -36,13 +36,21 @@ export async function POST(request) {
     }
 
     const targetLang = String(body.targetLang || 'vi').trim();
-    const aiCfg = await getServerGeminiConfig();
+    let movieContext = body.movieContext || null;
+    const needGlossaryFetch = Boolean(movieContext && movieContext.slug && !movieContext.glossary);
+
+    // Parallelize Server AI Config + Daily Quota + Saved Glossary lookup (saves ~400-600ms per batch!)
+    const [aiCfg, quota, glossaryRows] = await Promise.all([
+      getServerGeminiConfig(),
+      checkAndIncrementAiQuota(user, { cuesDelta: rawTexts.length }),
+      needGlossaryFetch
+        ? getSql()`SELECT glossary_json FROM nki_movie_glossaries WHERE movie_slug = ${normalizeMovieSlug(movieContext.slug)} LIMIT 1`.catch(() => [])
+        : Promise.resolve([]),
+    ]);
     if (!aiCfg.apiKey) {
       metric('ai.translate', 1, { outcome: 'no_server_key' });
       return jsonResponse({ error: 'Server Gemini API Key is not configured yet by Admin' }, 503);
     }
-
-    const quota = await checkAndIncrementAiQuota(user, { cuesDelta: rawTexts.length });
     if (!quota.allowed) {
       metric('ai.translate', 1, { outcome: 'quota_exceeded' });
       return jsonResponse(
@@ -50,18 +58,8 @@ export async function POST(request) {
         429
       );
     }
-
-    // Hydrate saved Movie Glossary from Neon Postgres so all episodes keep consistent character names & xưng hô!
-    let movieContext = body.movieContext || null;
-    if (movieContext && movieContext.slug && !movieContext.glossary) {
-      try {
-        await ensureSchema();
-        const sql = getSql();
-        const gRows = await sql`SELECT glossary_json FROM nki_movie_glossaries WHERE movie_slug = ${normalizeMovieSlug(movieContext.slug)} LIMIT 1`;
-        if (gRows?.[0]?.glossary_json) {
-          movieContext = { ...movieContext, glossary: gRows[0].glossary_json };
-        }
-      } catch { /* non-fatal */ }
+    if (needGlossaryFetch && glossaryRows?.[0]?.glossary_json) {
+      movieContext = { ...movieContext, glossary: glossaryRows[0].glossary_json };
     }
 
     const preferredModel = String(body.model || aiCfg.defaultModel || 'gemini-2.5-flash').trim();

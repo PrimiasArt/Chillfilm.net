@@ -6,8 +6,8 @@ plugins {
 }
 
 val runNumEnv = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull()
-var computedVersionCode = 116
-var computedVersionName = "3.4.0"
+var computedVersionCode = 117
+var computedVersionName = "3.4.1"
 
 if (runNumEnv != null && runNumEnv > 0) {
     computedVersionCode = 100 + runNumEnv

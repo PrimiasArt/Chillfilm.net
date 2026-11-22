@@ -15,7 +15,7 @@ import {
   sanitizeUserPublic,
 } from '../_lib/auth.js';
 import { isSafeSourceUrl } from '../_lib/safety.js';
-import { getCustomBlockedTerms, listDynamicSources, setCustomBlockedTerms } from '../_lib/sources.js';
+import { getCustomBlockedTerms, invalidateDynamicSourcesCache, listDynamicSources, setCustomBlockedTerms } from '../_lib/sources.js';
 import {
   listRecentCrawlRuns,
   runCatalogCrawlAndHealthCheck,
@@ -37,13 +37,13 @@ export async function GET(request) {
     const day = todayDayKey();
 
     const [aiCfg, invites, users, usageToday, poolStats, catalogStats, sources, customBlockedTerms, crawlRuns] = await Promise.all([
-      getServerGeminiConfig(),
+      getServerGeminiConfig({ bypassCache: true }),
       sql`SELECT code, label, max_uses, used_count, daily_ai_limit, active, created_at FROM nki_invites ORDER BY created_at DESC LIMIT 50`,
       sql`SELECT id, username, display_name, role, status, daily_ai_limit, token_version, created_at, last_seen_at FROM nki_users ORDER BY created_at ASC LIMIT 100`,
       sql`SELECT user_id, requests_count, cues_count, audio_chunks FROM nki_ai_usage WHERE day_key = ${day}`,
       sql`SELECT COUNT(*)::int AS total_subs FROM nki_subtitle_pool`,
       sql`SELECT COUNT(*)::int AS total_items FROM nki_catalog_items`,
-      listDynamicSources({ onlyEnabled: false }),
+      listDynamicSources({ onlyEnabled: false, bypassCache: true }),
       getCustomBlockedTerms(),
       listRecentCrawlRuns(8),
     ]);
@@ -198,6 +198,7 @@ export async function POST(request) {
         INSERT INTO nki_sources (id, name, source_type, base_url, country_hint, enabled, priority, created_by, created_at)
         VALUES (${id}, ${name}, ${sourceType}, ${baseUrl}, ${countryHint}, TRUE, 50, ${adminUser.username}, ${now})
       `;
+      invalidateDynamicSourcesCache();
       return jsonResponse({
         ok: true,
         source: { id, name, sourceType, baseUrl, countryHint, enabled: true, priority: 50, createdAt: now },
@@ -209,6 +210,7 @@ export async function POST(request) {
       if (!id) return jsonResponse({ error: 'Source id required' }, 400);
       const enabled = Boolean(body.enabled);
       await sql`UPDATE nki_sources SET enabled = ${enabled} WHERE id = ${id}`;
+      invalidateDynamicSourcesCache();
       return jsonResponse({ ok: true, id, enabled });
     }
 
@@ -216,6 +218,7 @@ export async function POST(request) {
       const id = String(body.id || '').trim();
       if (!id) return jsonResponse({ error: 'Source id required' }, 400);
       await sql`DELETE FROM nki_sources WHERE id = ${id}`;
+      invalidateDynamicSourcesCache();
       return jsonResponse({ ok: true, id });
     }
 

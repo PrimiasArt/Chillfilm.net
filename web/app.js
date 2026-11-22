@@ -263,7 +263,138 @@ const state = {
   deferredPwaPrompt: null,
   isPopstateNav: false,
   hold2xActive: false,
+  // V17 Turbo Latency Engine (SWR RAM Caches + Hover Prefetch + Deferred Scrub)
+  detailMemCache: new Map(), // key -> { detail, ts }
+  detailInFlight: new Map(), // key -> Promise<detail>
+  browseMemCache: new Map(), // catId -> { items, countries, ts }
+  scrubDeferTimer: null,
 };
+
+const FEED_CACHE_STORAGE_KEY = 'chillfilm_nki_feed_cache_v1';
+const DETAIL_CACHE_TTL_MS = 5 * 60 * 1000;
+const BROWSE_CACHE_TTL_MS = 3 * 60 * 1000;
+
+function loadCachedHomeFeed() {
+  try {
+    const raw = localStorage.getItem(FEED_CACHE_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.rows) || !parsed.rows.length) return null;
+    if (Date.now() - Number(parsed._cachedAt || 0) > 60 * 60 * 1000) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function saveCachedHomeFeed(feed) {
+  if (!feed || !Array.isArray(feed.rows) || !feed.rows.length) return;
+  try {
+    const compact = {
+      ok: true,
+      updatedAt: feed.updatedAt || Date.now(),
+      crawlerStatus: feed.crawlerStatus || null,
+      cloudSubSlugs: Array.isArray(feed.cloudSubSlugs) ? feed.cloudSubSlugs.slice(0, 300) : [],
+      latestEpisodeMap: feed.latestEpisodeMap || {},
+      countries: Array.isArray(feed.countries) ? feed.countries : [],
+      heroMovies: Array.isArray(feed.heroMovies) ? feed.heroMovies.slice(0, 6) : [],
+      rows: feed.rows.slice(0, 14).map((r) => ({
+        id: r.id,
+        customTitle: r.customTitle || '',
+        isTopTen: Boolean(r.isTopTen),
+        movies: (r.movies || []).slice(0, 14),
+      })),
+      _cachedAt: Date.now(),
+    };
+    localStorage.setItem(FEED_CACHE_STORAGE_KEY, JSON.stringify(compact));
+  } catch {
+    // ignore storage quota
+  }
+}
+
+function getMovieDetailCacheKey(source, slug, sourceId = '') {
+  return `${String(source || 'phimapi').toLowerCase()}::${String(sourceId || '')}::${String(slug || '').trim()}`;
+}
+
+function getCachedMovieDetail(source, slug, sourceId = '') {
+  const key = getMovieDetailCacheKey(source, slug, sourceId);
+  const hit = state.detailMemCache.get(key);
+  if (hit && Date.now() - hit.ts < DETAIL_CACHE_TTL_MS) return hit.detail;
+  return null;
+}
+
+function setCachedMovieDetail(source, slug, sourceId, detail) {
+  if (!detail) return;
+  const keys = new Set([
+    getMovieDetailCacheKey(source, slug, sourceId),
+    getMovieDetailCacheKey(detail.source || source, detail.slug || slug, detail.sourceId || sourceId),
+  ]);
+  const entry = { detail, ts: Date.now() };
+  keys.forEach((k) => state.detailMemCache.set(k, entry));
+  if (state.detailMemCache.size > 60) {
+    const oldestKey = state.detailMemCache.keys().next().value;
+    if (oldestKey) state.detailMemCache.delete(oldestKey);
+  }
+}
+
+function prefetchMovieDetail(movie) {
+  if (!movie || !movie.slug || movie.source === 'direct') return;
+  const source = movie.source || 'phimapi';
+  const sourceId = movie.sourceId || '';
+  const key = getMovieDetailCacheKey(source, movie.slug, sourceId);
+  if (getCachedMovieDetail(source, movie.slug, sourceId)) return;
+  if (state.detailInFlight.has(key)) return;
+  const p = fetchCatalogDetail({ source, slug: movie.slug, sourceId })
+    .then((detail) => {
+      if (detail) setCachedMovieDetail(source, movie.slug, sourceId, detail);
+      return detail;
+    })
+    .catch(() => null)
+    .finally(() => {
+      state.detailInFlight.delete(key);
+    });
+  state.detailInFlight.set(key, p);
+}
+
+function renderDetailOptimisticShell(movieObj) {
+  if (!movieObj) return;
+  $('homeView').style.display = 'none';
+  $('topbar')?.classList.add('solid');
+  const dv = $('detailView');
+  dv.classList.add('active');
+  const dispTitle = getDisplayTitle(movieObj) || movieObj.slug || 'ChillFilm';
+  const posterSrc = movieObj.poster || './assets/icon-192.png?v=2';
+  const lang = resolveLanguage(state.prefs.primaryLang);
+  dv.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+      <button class="btn-glass" id="detailBackBtn">${escapeHtml(tr('backToCatalog'))}</button>
+    </div>
+    <div class="detail-hero">
+      <img class="detail-poster" src="${escapeHtml(posterSrc)}" alt="${escapeHtml(dispTitle)}" onerror="if(!this.dataset.fb){this.dataset.fb='1';this.src='./assets/icon-192.png?v=2';}" />
+      <div style="display:flex;flex-direction:column;gap:10px;min-width:0;flex:1;">
+        <div class="hero-meta">
+          <span class="badge-ai">AI SUB (${lang.badge})</span>
+          <span style="font-size:12px;color:#b3b3b3;font-weight:700;">${escapeHtml(movieObj.year || '')} • ${escapeHtml(movieObj.episode_current || movieObj.quality || 'HD')}</span>
+        </div>
+        <h2 style="font-size:clamp(20px,3.2vw,32px);font-weight:900;">${escapeHtml(dispTitle)}</h2>
+        <div class="shimmer-box" style="height:14px;width:92%;"></div>
+        <div class="shimmer-box" style="height:14px;width:74%;"></div>
+        <div style="display:flex;gap:10px;margin-top:8px;">
+          <div class="shimmer-box" style="height:40px;width:155px;border-radius:6px;"></div>
+          <div class="shimmer-box" style="height:40px;width:115px;border-radius:6px;"></div>
+        </div>
+      </div>
+    </div>
+    <div style="margin-top:22px;">
+      <div class="shimmer-box" style="height:18px;width:190px;margin-bottom:12px;"></div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(84px,1fr));gap:8px;">
+        ${Array.from({ length: 12 }).map(() => '<div class="shimmer-box" style="height:38px;border-radius:8px;"></div>').join('')}
+      </div>
+    </div>
+  `;
+  if ($('detailBackBtn')) $('detailBackBtn').onclick = closeDetailView;
+  window.scrollTo({ top: 0, behavior: 'auto' });
+}
 
 const MOVIE_INTRO_STORAGE_KEY = 'chillfilm_nki_movie_intro_v1';
 const MOVIE_SYNC_STORAGE_KEY = 'chillfilm_nki_movie_sync_v1';
@@ -1290,6 +1421,33 @@ function renderSkeletonGridHtml(count = 12) {
   return cards;
 }
 
+function applyFeedPayload(feed, { persistCache = false } = {}) {
+  if (!feed?.ok || !Array.isArray(feed.rows) || !feed.rows.length) return false;
+  state.catalogUpdatedAt = feed.updatedAt || Date.now();
+  state.crawlerStatus = feed.crawlerStatus || null;
+  if (Array.isArray(feed.cloudSubSlugs)) {
+    feed.cloudSubSlugs.forEach((s) => state.cloudSubSlugs.add(normalizeMovieSlug(s)));
+  }
+  if (feed.latestEpisodeMap && typeof feed.latestEpisodeMap === 'object') {
+    state.latestEpisodeMap = { ...state.latestEpisodeMap, ...feed.latestEpisodeMap };
+  }
+  if (Array.isArray(feed.countries) && feed.countries.length) {
+    renderCountryPicker(feed.countries);
+  }
+  state.homeRows = feed.rows;
+  state.movies = feed.rows[0]?.movies || [];
+  const heroList = Array.isArray(feed.heroMovies) && feed.heroMovies.length
+    ? feed.heroMovies
+    : state.movies.slice(0, 6);
+  setHeroSlides(heroList);
+  renderHistorySection();
+  renderMyListSection();
+  refreshEpisodeReleaseNotifications();
+  renderHomeSwimlanes();
+  if (persistCache) saveCachedHomeFeed(feed);
+  return true;
+}
+
 async function loadCategory(catId, { forceRefresh = false, silent = false } = {}) {
   state.activeCategory = catId;
   renderCategories();
@@ -1299,44 +1457,38 @@ async function loadCategory(catId, { forceRefresh = false, silent = false } = {}
   const swimWrap = $('homeSwimlanes');
   const gridSec = $('catalogGridSection');
 
-  // HOME ("hot"): Live Multi-Source Aggregated Feed (/api/catalog/feed) + Auto-Rotating Hero Billboard!
+  // HOME ("hot"): 0ms Instant Paint from LocalStorage SWR Cache + Background Live Refresh!
   if (catId === 'hot') {
     if (liftEl) liftEl.classList.remove('no-hero');
     $('topbar')?.classList.remove('solid');
     gridSec.style.display = 'none';
     swimWrap.style.display = 'block';
-    if (!silent) {
+
+    let paintedInstant = false;
+    if (!forceRefresh) {
+      if (state.homeRows.length > 0 && !silent) {
+        renderHomeSwimlanes();
+        paintedInstant = true;
+      } else {
+        const cachedFeed = loadCachedHomeFeed();
+        if (cachedFeed) {
+          paintedInstant = applyFeedPayload(cachedFeed, { persistCache: false });
+        }
+      }
+    }
+    if (!silent && !paintedInstant) {
       swimWrap.innerHTML = renderSkeletonRowsHtml(3, 8);
     }
 
     try {
       const feed = await fetchLiveCatalogFeed(forceRefresh);
-      if (feed?.ok && Array.isArray(feed.rows) && feed.rows.length > 0) {
-        state.catalogUpdatedAt = feed.updatedAt || Date.now();
-        state.crawlerStatus = feed.crawlerStatus || null;
-        if (Array.isArray(feed.cloudSubSlugs)) {
-          feed.cloudSubSlugs.forEach((s) => state.cloudSubSlugs.add(normalizeMovieSlug(s)));
-        }
-        if (feed.latestEpisodeMap && typeof feed.latestEpisodeMap === 'object') {
-          state.latestEpisodeMap = { ...state.latestEpisodeMap, ...feed.latestEpisodeMap };
-        }
-        if (Array.isArray(feed.countries) && feed.countries.length) {
-          renderCountryPicker(feed.countries);
-        }
-        state.homeRows = feed.rows;
-        state.movies = feed.rows[0]?.movies || [];
-        const heroList = Array.isArray(feed.heroMovies) && feed.heroMovies.length
-          ? feed.heroMovies
-          : state.movies.slice(0, 6);
-        setHeroSlides(heroList);
-        renderHistorySection();
-        renderMyListSection();
-        refreshEpisodeReleaseNotifications();
-        renderHomeSwimlanes();
-        if (forceRefresh && !silent) showToast('🔥 Updated latest multi-source movies!');
+      if (state.activeCategory !== 'hot') return;
+      if (applyFeedPayload(feed, { persistCache: true })) {
+        if (forceRefresh && !silent) showToast('🔥 Đã cập nhật kho phim mới nhất!');
         return;
       }
     } catch {
+      if (paintedInstant) return;
       // Graceful fallback to direct PhimAPI v3 if local/offline
     }
 
@@ -1355,18 +1507,27 @@ async function loadCategory(catId, { forceRefresh = false, silent = false } = {}
       renderHistorySection();
       renderMyListSection();
       renderHomeSwimlanes();
-    } else if (!silent) {
+    } else if (!silent && !paintedInstant) {
       swimWrap.innerHTML = `<div style="text-align:center;padding:36px;color:#fca5a5;">${escapeHtml(tr('loadError'))}</div>`;
     }
     return;
   }
 
-  // Dedicated Category Grid View
+  // Dedicated Category Grid View — 0ms RAM SWR Cache!
   if (liftEl) liftEl.classList.remove('no-hero');
   $('topbar')?.classList.remove('solid');
   swimWrap.style.display = 'none';
   gridSec.style.display = 'block';
-  if (!silent) {
+
+  const memHit = !forceRefresh ? state.browseMemCache.get(catId) : null;
+  if (memHit && memHit.items?.length && Date.now() - memHit.ts < BROWSE_CACHE_TTL_MS) {
+    state.movies = memHit.items;
+    setHeroSlides(memHit.items.slice(0, 5));
+    renderHistorySection();
+    renderMovieGrid(state.movies, getCategoryLabel(catId));
+    // Fresh enough (< 60s) -> skip network completely!
+    if (Date.now() - memHit.ts < 60_000) return;
+  } else if (!silent) {
     $('catalogGrid').innerHTML = renderSkeletonGridHtml(12);
   }
 
@@ -1382,12 +1543,14 @@ async function loadCategory(catId, { forceRefresh = false, silent = false } = {}
   } catch {
     if (cat?.url) list = await fetchCategoryList(cat);
   }
+  if (state.activeCategory !== catId) return;
   if (list.length) {
+    state.browseMemCache.set(catId, { items: list, ts: Date.now() });
     state.movies = list;
     setHeroSlides(list.slice(0, 5));
     renderHistorySection();
     renderMovieGrid(state.movies, getCategoryLabel(catId));
-  } else if (!silent) {
+  } else if (!silent && !memHit) {
     $('catalogGrid').innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:36px;color:#fca5a5;">${escapeHtml(tr('loadError'))}</div>`;
   }
 }
@@ -1805,10 +1968,19 @@ function createMovieCardElement(movie) {
       <div class="card-meta">${escapeHtml(metaLine)}</div>
     </div>
   `;
+  // Speculative Hover / Touch Prefetch: pre-warms detail into RAM so clicking opens in 0ms!
+  let hoverPrefetchTimer = null;
+  el.addEventListener('mouseenter', () => {
+    hoverPrefetchTimer = setTimeout(() => prefetchMovieDetail(movie), 110);
+  });
+  el.addEventListener('mouseleave', () => {
+    clearTimeout(hoverPrefetchTimer);
+  });
+  el.addEventListener('touchstart', () => prefetchMovieDetail(movie), { passive: true, once: true });
   return el;
 }
 
-/* ==================== MOVIE DETAIL (MULTI-SOURCE + VN-SAFE) ==================== */
+/* ==================== MOVIE DETAIL (MULTI-SOURCE + VN-SAFE + 0ms PREFETCH/OPTIMISTIC SHELL) ==================== */
 async function openMovieDetail(movieOrSlug, autoPlayFirst = false, resumeSec = 0, resumeUrl = '') {
   const movieObj = typeof movieOrSlug === 'object' && movieOrSlug ? movieOrSlug : null;
   const slug = movieObj ? movieObj.slug : String(movieOrSlug || '').trim();
@@ -1835,62 +2007,79 @@ async function openMovieDetail(movieOrSlug, autoPlayFirst = false, resumeSec = 0
     return;
   }
 
-  showToast('Đang tải thông tin phim...');
+  const cacheKey = getMovieDetailCacheKey(source, slug, sourceId);
+  let detail = getCachedMovieDetail(source, slug, sourceId);
+
+  if (!detail) {
+    if (!autoPlayFirst && movieObj) {
+      // Instant 0ms optimistic transition to Detail screen with poster/title + shimmer!
+      renderDetailOptimisticShell(movieObj);
+    } else {
+      showToast('⚡ Đang mở phim...');
+    }
+  }
+
   try {
-    let detail = null;
-    try {
-      detail = await fetchCatalogDetail({ source, slug, sourceId });
-    } catch (apiErr) {
-      if (String(apiErr?.message || '').toLowerCase().includes('blocked')) {
-        showToast('🛡️ Nội dung này bị chặn theo chính sách lọc phim sạch.');
-        return;
-      }
-      if (source !== 'phimapi') throw apiErr;
-      // Offline fallback for phimapi (strictly verify movie exists & has streams so MacCMS IDs don't render ghost pages!)
-      const res = await fetch(`${PHIM_API}/phim/${encodeURIComponent(slug)}`);
-      const json = await res.json();
-      const m = json?.movie;
-      const servers = (json?.episodes || []).map((s) => ({
-        server_name: s.server_name || 'Server',
-        episodes: (s.server_data || []).filter((e) => e.link_m3u8),
-      })).filter((s) => s.episodes.length);
-      if (m && typeof m === 'object' && (m.name || m.slug) && servers.length) {
-        detail = {
-          slug: m.slug || slug,
-          source: 'phimapi',
-          name: m.name || slug,
-          origin_name: m.origin_name || '',
-          year: m.year ? String(m.year) : '',
-          quality: m.quality || 'FHD',
-          time: m.time || '',
-          content: (m.content || '').replace(/<[^>]+>/g, '').trim(),
-          imdbId: m.imdb?.id || '',
-          type: m.type || 'single',
-          poster: normalizeImage(m.poster_url || m.thumb_url),
-          backdrop: normalizeImage(m.thumb_url || m.poster_url),
-          servers,
-        };
-      } else if (resumeUrl || movieObj?.epUrl) {
-        // Recover directly from saved watch history stream URL so user never loses an in-progress film!
-        const savedUrl = resumeUrl || movieObj.epUrl;
-        detail = {
-          slug,
-          source: movieObj?.source || 'direct',
-          sourceId: movieObj?.sourceId || '',
-          name: movieObj?.name || slug,
-          origin_name: movieObj?.origin_name || '',
-          year: movieObj?.year || '',
-          quality: 'HD',
-          time: '',
-          content: '',
-          imdbId: '',
-          type: 'single',
-          poster: movieObj?.poster || '',
-          backdrop: movieObj?.poster || '',
-          servers: [{ server_name: 'Saved Stream', episodes: [{ name: movieObj?.epName || 'Full', slug: 'full', link_m3u8: savedUrl }] }],
-        };
-      } else {
-        throw apiErr;
+    if (!detail) {
+      try {
+        const inFlight = state.detailInFlight.get(cacheKey);
+        detail = inFlight ? await inFlight : await fetchCatalogDetail({ source, slug, sourceId });
+        if (!detail) detail = await fetchCatalogDetail({ source, slug, sourceId });
+        if (detail) setCachedMovieDetail(source, slug, sourceId, detail);
+      } catch (apiErr) {
+        if (String(apiErr?.message || '').toLowerCase().includes('blocked')) {
+          closeDetailView();
+          showToast('🛡️ Nội dung này bị chặn theo chính sách lọc phim sạch.');
+          return;
+        }
+        if (source !== 'phimapi') throw apiErr;
+        // Offline fallback for phimapi (strictly verify movie exists & has streams so MacCMS IDs don't render ghost pages!)
+        const res = await fetch(`${PHIM_API}/phim/${encodeURIComponent(slug)}`);
+        const json = await res.json();
+        const m = json?.movie;
+        const servers = (json?.episodes || []).map((s) => ({
+          server_name: s.server_name || 'Server',
+          episodes: (s.server_data || []).filter((e) => e.link_m3u8),
+        })).filter((s) => s.episodes.length);
+        if (m && typeof m === 'object' && (m.name || m.slug) && servers.length) {
+          detail = {
+            slug: m.slug || slug,
+            source: 'phimapi',
+            name: m.name || slug,
+            origin_name: m.origin_name || '',
+            year: m.year ? String(m.year) : '',
+            quality: m.quality || 'FHD',
+            time: m.time || '',
+            content: (m.content || '').replace(/<[^>]+>/g, '').trim(),
+            imdbId: m.imdb?.id || '',
+            type: m.type || 'single',
+            poster: normalizeImage(m.poster_url || m.thumb_url),
+            backdrop: normalizeImage(m.thumb_url || m.poster_url),
+            servers,
+          };
+          setCachedMovieDetail(source, slug, sourceId, detail);
+        } else if (resumeUrl || movieObj?.epUrl) {
+          // Recover directly from saved watch history stream URL so user never loses an in-progress film!
+          const savedUrl = resumeUrl || movieObj.epUrl;
+          detail = {
+            slug,
+            source: movieObj?.source || 'direct',
+            sourceId: movieObj?.sourceId || '',
+            name: movieObj?.name || slug,
+            origin_name: movieObj?.origin_name || '',
+            year: movieObj?.year || '',
+            quality: 'HD',
+            time: '',
+            content: '',
+            imdbId: '',
+            type: 'single',
+            poster: movieObj?.poster || '',
+            backdrop: movieObj?.poster || '',
+            servers: [{ server_name: 'Saved Stream', episodes: [{ name: movieObj?.epName || 'Full', slug: 'full', link_m3u8: savedUrl }] }],
+          };
+        } else {
+          throw apiErr;
+        }
       }
     }
 
@@ -4650,6 +4839,12 @@ function openPlayer(movie, episode, startSec = 0, { preserveFailover = false, pr
     const hls = new window.Hls({
       enableWorker: true,
       lowLatencyMode: false,
+      startFragPrefetch: true,
+      maxBufferLength: 24,
+      maxMaxBufferLength: 45,
+      abrEwmaDefaultEstimate: 2_500_000,
+      manifestLoadingTimeOut: 10000,
+      fragLoadingTimeOut: 12000,
       startPosition: resolvedStartSec > 2 ? resolvedStartSec : -1,
       xhrSetup: (xhr) => { xhr.withCredentials = false; },
     });
@@ -4712,8 +4907,14 @@ function openPlayer(movie, episode, startSec = 0, { preserveFailover = false, pr
     };
   }
 
-  // Auto-discover (or seamlessly attach to Detail Page pre-translator / 10-min HLS lookahead!)
-  initScrubPreviewForStream(streamUrl);
+  // Defer scrub thumbnail preview by 2.8s so it NEVER competes for bandwidth during first-frame playback!
+  clearTimeout(state.scrubDeferTimer);
+  destroyScrubPreview();
+  state.scrubDeferTimer = setTimeout(() => {
+    if ($('playerModal')?.classList.contains('open') && state.currentEpisode?.link_m3u8 === streamUrl) {
+      initScrubPreviewForStream(streamUrl);
+    }
+  }, 2800);
   if (state.prefs.ambientGlow) startAmbientGlowLoop();
   autoLoadSubtitlesForMovie(movie, episode, resolvedStartSec);
 }
@@ -4770,6 +4971,7 @@ function closePlayer(e) {
   stopActiveSubJob(true, true);
   stopTtsSpeech();
   stopAmbientGlowLoop();
+  clearTimeout(state.scrubDeferTimer);
   destroyScrubPreview();
   cancelAutoNext(false);
   clearStallWatchdog();
@@ -6261,6 +6463,31 @@ function setupInstantSearchDropdown(inputId, dropdownId) {
     if (q.length < 2) renderHistoryInDropdown();
   });
 
+  const searchLocalRamCatalog = (query) => {
+    const needle = query.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    const pool = [
+      ...loadHistory(),
+      ...loadMyList(),
+      ...(state.homeRows || []).flatMap((r) => r.movies || []),
+      ...(state.movies || []),
+    ];
+    const seen = new Set();
+    const matches = [];
+    for (const m of pool) {
+      if (!m || !m.slug) continue;
+      const k = `${m.source || 'phimapi'}::${m.slug}`;
+      if (seen.has(k)) continue;
+      const hay = [m.name, m.nameVi, m.nameEn, m.origin_name, m.slug].filter(Boolean).join(' ')
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+      if (hay.includes(needle)) {
+        seen.add(k);
+        matches.push(m);
+        if (matches.length >= 6) break;
+      }
+    }
+    return matches;
+  };
+
   input.addEventListener('input', () => {
     const q = input.value.trim();
     clearTimeout(debounceTimer);
@@ -6268,17 +6495,31 @@ function setupInstantSearchDropdown(inputId, dropdownId) {
       renderHistoryInDropdown();
       return;
     }
+    // 0ms Instant Local RAM matches while fast server search runs in background!
+    const localHits = searchLocalRamCatalog(q);
+    if (localHits.length) {
+      renderResultsInDropdown(localHits, q);
+    }
     const seq = ++fetchSeq;
     debounceTimer = setTimeout(async () => {
       try {
-        const data = await fetchCatalogBrowse({ q, limit: 6 });
+        const data = await fetchCatalogBrowse({ q, limit: 6, fast: 1 });
         if (seq !== fetchSeq) return;
-        const items = Array.isArray(data?.items) ? data.items : [];
-        renderResultsInDropdown(items, q);
+        const remoteItems = Array.isArray(data?.items) ? data.items : [];
+        const seen = new Set();
+        const merged = [];
+        for (const it of [...remoteItems, ...localHits]) {
+          const k = `${it.source || 'phimapi'}::${it.slug}`;
+          if (!seen.has(k)) {
+            seen.add(k);
+            merged.push(it);
+          }
+        }
+        renderResultsInDropdown(merged.slice(0, 6), q);
       } catch {
         // ignore network hiccup on instant suggest
       }
-    }, 260);
+    }, 150);
   });
 
   input.addEventListener('keydown', (e) => {
@@ -7448,9 +7689,14 @@ function init() {
   updateCloudHeaderBadge();
   refreshEpisodeReleaseNotifications();
   if (isCloudSignedIn()) {
-    cloudRefreshMe().then(() => updateCloudHeaderBadge()).catch(() => {});
-    pullCloudStateAndMerge({ silent: true, force: true }).then(() => refreshEpisodeReleaseNotifications());
-    loadLiveGeminiModels({ silent: true });
+    // Stagger background sync slightly after first paint so Home Feed & posters load at max speed!
+    setTimeout(() => {
+      cloudRefreshMe().then(() => updateCloudHeaderBadge()).catch(() => {});
+      pullCloudStateAndMerge({ silent: true, force: true }).then(() => refreshEpisodeReleaseNotifications());
+      if (!state.liveModels.length) {
+        loadLiveGeminiModels({ silent: true });
+      }
+    }, 350);
   }
 
   // Auto-detect ?tvip=, ?party=, and ?movie=source:slug&sid=...&ep=...&play=1 deep-links on startup

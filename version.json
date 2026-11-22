@@ -1,6 +1,6 @@
 {
-  "versionName": "3.4.0",
-  "versionCode": 116,
+  "versionName": "3.4.1",
+  "versionCode": 117,
   "downloadUrl": "https://github.com/PrimiasArt/Chillfilm.net/releases/download/android-apk-latest/ChillFilm-latest.apk",
-  "releaseNotes": "ChillFilm 3.4.0: Profile & Security Manager (Rename/Change Password), Detail Page AI Subtitle Pre-Translator (0-100% Progress), AI Vibe Natural-Language Search, Continue Watching Remove & Watched Episode Checkmarks"
+  "releaseNotes": "ChillFilm 3.4.1 Turbo Speed Update: 1-Query Cold Start DB Guard (30x faster), CDN Caching on All Movie Details/Glossary/AI Search, Instant RAM Detail & Category Caching, Fast Suggest Mode & Deferred Scrub Bandwidth Optimization"
 }

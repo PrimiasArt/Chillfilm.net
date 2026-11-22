@@ -29,6 +29,13 @@ class MovieRepository {
     private val customSource = CustomVodApiSource()
 
     private val movieLookupCache = ConcurrentHashMap<String, MovieItem>()
+    private val resolvedDetailCache = ConcurrentHashMap<String, Pair<Long, MovieItem>>()
+    private val sectionsCache = ConcurrentHashMap<String, Pair<Long, List<CatalogSection>>>()
+
+    companion object {
+        private const val DETAIL_CACHE_TTL_MS = 5 * 60_000L
+        private const val SECTIONS_CACHE_TTL_MS = 3 * 60_000L
+    }
 
     init {
         modernSource.getVerifiedBlockbusters().forEach { movieLookupCache[it.id] = it }
@@ -36,8 +43,16 @@ class MovieRepository {
 
     suspend fun loadHomeSections(
         selectedCountry: CountryCategory,
-        customProviders: List<VodProviderConfig>
+        customProviders: List<VodProviderConfig>,
+        forceRefresh: Boolean = false
     ): List<CatalogSection> = coroutineScope {
+        val cacheKey = "${selectedCountry.code}::${customProviders.count { it.enabled }}"
+        if (!forceRefresh) {
+            val hit = sectionsCache[cacheKey]
+            if (hit != null && System.currentTimeMillis() - hit.first < SECTIONS_CACHE_TTL_MS && hit.second.isNotEmpty()) {
+                return@coroutineScope hit.second
+            }
+        }
         val sections = ArrayList<CatalogSection>()
         val blockbusters = modernSource.getVerifiedBlockbusters()
 
@@ -235,6 +250,9 @@ class MovieRepository {
             }
         }
 
+        if (sections.isNotEmpty()) {
+            sectionsCache[cacheKey] = System.currentTimeMillis() to sections
+        }
         sections
     }
 
@@ -279,7 +297,12 @@ class MovieRepository {
     ): MovieItem {
         if (movie.servers.isNotEmpty()) {
             movieLookupCache[movie.id] = movie
+            resolvedDetailCache[movie.id] = System.currentTimeMillis() to movie
             return movie
+        }
+        val cached = resolvedDetailCache[movie.id]
+        if (cached != null && System.currentTimeMillis() - cached.first < DETAIL_CACHE_TTL_MS && cached.second.servers.isNotEmpty()) {
+            return cached.second
         }
         val resolved = when {
             movie.providerId == "modern_vod" -> modernSource.resolveMovieDetails(movie)
@@ -291,6 +314,10 @@ class MovieRepository {
             }
         }
         movieLookupCache[resolved.id] = resolved
+        if (resolved.servers.isNotEmpty()) {
+            resolvedDetailCache[movie.id] = System.currentTimeMillis() to resolved
+            resolvedDetailCache[resolved.id] = System.currentTimeMillis() to resolved
+        }
         return resolved
     }
 

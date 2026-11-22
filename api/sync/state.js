@@ -1,4 +1,4 @@
-import { metric } from '@vercel/functions';
+import { metric, waitUntil } from '@vercel/functions';
 import {
   ensureSchema,
   getSql,
@@ -145,39 +145,48 @@ export async function POST(request) {
 
     if (Array.isArray(body.watchProgress) && body.watchProgress.length > 0) {
       const items = body.watchProgress.slice(0, 120);
+      const valid = [];
       for (const raw of items) {
         if (!raw) continue;
         const movieSlug = normalizeMovieSlug(raw.movieSlug || raw.movieId || raw.slug);
         if (!movieSlug || movieSlug === 'unknown') continue;
         const episodeName = String(raw.episodeName || raw.epName || 'Full').trim().slice(0, 80);
         const episodeKey = normalizeEpisodeKey(raw.episodeKey || episodeName || raw.episodeId);
-        const title = String(raw.title || raw.name || movieSlug).trim().slice(0, 180);
-        const posterUrl = String(raw.posterUrl || raw.poster || '').trim().slice(0, 500);
-        const countryCode = String(raw.countryCode || '').trim().slice(0, 20);
-        const streamUrl = String(raw.streamUrl || '').trim().slice(0, 700);
-        const positionMs = Math.max(0, Math.round(Number(raw.positionMs ?? (Number(raw.pos || 0) * 1000))));
-        const durationMs = Math.max(0, Math.round(Number(raw.durationMs ?? (Number(raw.dur || 0) * 1000))));
-        const updatedAt = Math.min(now + 60_000, Math.max(1, Math.round(Number(raw.updatedAt || now))));
-
-        await sql`
-          INSERT INTO nki_watch_progress (
-            user_id, movie_slug, episode_key, title, poster_url, country_code, episode_name, stream_url, position_ms, duration_ms, updated_at
-          )
-          VALUES (
-            ${user.id}, ${movieSlug}, ${episodeKey}, ${title}, ${posterUrl}, ${countryCode}, ${episodeName}, ${streamUrl}, ${positionMs}, ${durationMs}, ${updatedAt}
-          )
-          ON CONFLICT (user_id, movie_slug, episode_key) DO UPDATE SET
-            title = EXCLUDED.title,
-            poster_url = CASE WHEN EXCLUDED.poster_url <> '' THEN EXCLUDED.poster_url ELSE nki_watch_progress.poster_url END,
-            country_code = CASE WHEN EXCLUDED.country_code <> '' THEN EXCLUDED.country_code ELSE nki_watch_progress.country_code END,
-            episode_name = EXCLUDED.episode_name,
-            stream_url = CASE WHEN EXCLUDED.stream_url <> '' THEN EXCLUDED.stream_url ELSE nki_watch_progress.stream_url END,
-            position_ms = EXCLUDED.position_ms,
-            duration_ms = GREATEST(EXCLUDED.duration_ms, nki_watch_progress.duration_ms),
-            updated_at = EXCLUDED.updated_at
-          WHERE EXCLUDED.updated_at >= nki_watch_progress.updated_at
-        `;
-        upsertedCount++;
+        valid.push({
+          movieSlug,
+          episodeKey,
+          episodeName,
+          title: String(raw.title || raw.name || movieSlug).trim().slice(0, 180),
+          posterUrl: String(raw.posterUrl || raw.poster || '').trim().slice(0, 500),
+          countryCode: String(raw.countryCode || '').trim().slice(0, 20),
+          streamUrl: String(raw.streamUrl || '').trim().slice(0, 700),
+          positionMs: Math.max(0, Math.round(Number(raw.positionMs ?? (Number(raw.pos || 0) * 1000)))),
+          durationMs: Math.max(0, Math.round(Number(raw.durationMs ?? (Number(raw.dur || 0) * 1000)))),
+          updatedAt: Math.min(now + 60_000, Math.max(1, Math.round(Number(raw.updatedAt || now)))),
+        });
+      }
+      for (let i = 0; i < valid.length; i += 8) {
+        await Promise.all(
+          valid.slice(i, i + 8).map((v) => sql`
+            INSERT INTO nki_watch_progress (
+              user_id, movie_slug, episode_key, title, poster_url, country_code, episode_name, stream_url, position_ms, duration_ms, updated_at
+            )
+            VALUES (
+              ${user.id}, ${v.movieSlug}, ${v.episodeKey}, ${v.title}, ${v.posterUrl}, ${v.countryCode}, ${v.episodeName}, ${v.streamUrl}, ${v.positionMs}, ${v.durationMs}, ${v.updatedAt}
+            )
+            ON CONFLICT (user_id, movie_slug, episode_key) DO UPDATE SET
+              title = EXCLUDED.title,
+              poster_url = CASE WHEN EXCLUDED.poster_url <> '' THEN EXCLUDED.poster_url ELSE nki_watch_progress.poster_url END,
+              country_code = CASE WHEN EXCLUDED.country_code <> '' THEN EXCLUDED.country_code ELSE nki_watch_progress.country_code END,
+              episode_name = EXCLUDED.episode_name,
+              stream_url = CASE WHEN EXCLUDED.stream_url <> '' THEN EXCLUDED.stream_url ELSE nki_watch_progress.stream_url END,
+              position_ms = EXCLUDED.position_ms,
+              duration_ms = GREATEST(EXCLUDED.duration_ms, nki_watch_progress.duration_ms),
+              updated_at = EXCLUDED.updated_at
+            WHERE EXCLUDED.updated_at >= nki_watch_progress.updated_at
+          `)
+        );
+        upsertedCount += Math.min(8, valid.length - i);
       }
     }
 
@@ -238,7 +247,11 @@ export async function POST(request) {
       }
     }
 
-    await sql`UPDATE nki_users SET last_seen_at = ${now} WHERE id = ${user.id}`;
+    try {
+      waitUntil(sql`UPDATE nki_users SET last_seen_at = ${now} WHERE id = ${user.id}`.catch(() => {}));
+    } catch {
+      await sql`UPDATE nki_users SET last_seen_at = ${now} WHERE id = ${user.id}`.catch(() => {});
+    }
     metric('sync.state', 1, { direction: 'push', outcome: 'success' });
     return jsonResponse({
       ok: true,
