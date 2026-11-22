@@ -465,39 +465,155 @@ export async function fetchSubtitleTextSmart(track, signal = undefined) {
   return proxyRes.text();
 }
 
-/* ==================== WATCH PARTY CLIENT (/api/party) ==================== */
-export async function partyCreate({ movie, episode, nickname, positionSec = 0, isPlaying = false }) {
+/* ==================== WATCH PARTY 2.0 CLIENT (/api/party) ==================== */
+export async function partyListLobby() {
+  return apiFetch('/api/party?op=lobby', { method: 'GET', auth: false });
+}
+
+export async function partyCreate({
+  movie,
+  episode,
+  nickname,
+  roomTitle = '',
+  visibility = 'PRIVATE',
+  controlMode = 'HOST_ONLY',
+  passcode = '',
+  positionSec = 0,
+  isPlaying = false,
+}) {
   return apiFetch('/api/party', {
     method: 'POST',
     auth: false,
-    body: { action: 'create', movie, episode, nickname, positionSec, isPlaying },
+    body: {
+      action: 'create',
+      movie,
+      episode,
+      nickname,
+      roomTitle,
+      visibility,
+      controlMode,
+      passcode,
+      positionSec,
+      isPlaying,
+    },
   });
 }
 
-export async function partyJoin({ roomCode, nickname, memberId = '' }) {
+export async function partyJoin({ roomCode, nickname, memberId = '', passcode = '', hostToken = '', silentRejoin = false }) {
   return apiFetch('/api/party', {
     method: 'POST',
     auth: false,
-    body: { action: 'join', roomCode, nickname, memberId },
+    body: { action: 'join', roomCode, nickname, memberId, passcode, hostToken, silentRejoin },
   });
 }
 
-export async function partyPoll({ roomCode, sinceMsgId = 0, memberId = '', nickname = '', hostToken = '' }) {
+export async function partyPoll({
+  roomCode,
+  sinceMsgId = 0,
+  sinceReactionTs = 0,
+  memberId = '',
+  nickname = '',
+  hostToken = '',
+  status = 'playing',
+  pos = 0,
+}) {
   const qs = new URLSearchParams({
     room: roomCode,
     sinceMsgId: String(sinceMsgId || 0),
+    sinceReactionTs: String(sinceReactionTs || 0),
     memberId,
     nickname,
+    status,
+    pos: String(Math.round(pos || 0)),
   });
   if (hostToken) qs.set('hostToken', hostToken);
   return apiFetch(`/api/party?${qs.toString()}`, { method: 'GET', auth: false });
 }
 
-export async function partyControl({ roomCode, hostToken, isPlaying, positionSec, playbackRate = 1, episode = null }) {
+export async function partyControl({
+  roomCode,
+  hostToken = '',
+  nickname = '',
+  isPlaying,
+  positionSec,
+  playbackRate = 1,
+  movie = null,
+  episode = null,
+  countdown = false,
+  actionNote = '',
+}) {
   return apiFetch('/api/party', {
     method: 'POST',
     auth: false,
-    body: { action: 'control', roomCode, hostToken, isPlaying, positionSec, playbackRate, episode },
+    body: {
+      action: 'control',
+      roomCode,
+      hostToken,
+      nickname,
+      isPlaying,
+      positionSec,
+      playbackRate,
+      movie,
+      episode,
+      countdown,
+      actionNote,
+    },
+  });
+}
+
+export async function partyUpdateSettings({ roomCode, hostToken, controlMode, visibility, roomTitle, passcode }) {
+  return apiFetch('/api/party', {
+    method: 'POST',
+    auth: false,
+    body: { action: 'settings', roomCode, hostToken, controlMode, visibility, roomTitle, passcode },
+  });
+}
+
+export async function partyClaimHost({ roomCode, memberId, nickname }) {
+  return apiFetch('/api/party', {
+    method: 'POST',
+    auth: false,
+    body: { action: 'claim_host', roomCode, memberId, nickname },
+  });
+}
+
+export async function partyQueueAdd({ roomCode, movie, episode, nickname, memberId }) {
+  return apiFetch('/api/party', {
+    method: 'POST',
+    auth: false,
+    body: { action: 'queue_add', roomCode, movie, episode, nickname, memberId },
+  });
+}
+
+export async function partyQueueVote({ roomCode, itemId, memberId }) {
+  return apiFetch('/api/party', {
+    method: 'POST',
+    auth: false,
+    body: { action: 'queue_vote', roomCode, itemId, memberId },
+  });
+}
+
+export async function partyQueueRemove({ roomCode, itemId, memberId, hostToken = '' }) {
+  return apiFetch('/api/party', {
+    method: 'POST',
+    auth: false,
+    body: { action: 'queue_remove', roomCode, itemId, memberId, hostToken },
+  });
+}
+
+export async function partyQueuePlay({ roomCode, itemId = '', nickname = '', hostToken = '' }) {
+  return apiFetch('/api/party', {
+    method: 'POST',
+    auth: false,
+    body: { action: 'queue_play', roomCode, itemId, nickname, hostToken },
+  });
+}
+
+export async function partyReact({ roomCode, emoji, nickname }) {
+  return apiFetch('/api/party', {
+    method: 'POST',
+    auth: false,
+    body: { action: 'react', roomCode, emoji, nickname },
   });
 }
 

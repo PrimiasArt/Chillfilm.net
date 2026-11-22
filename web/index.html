@@ -18,7 +18,7 @@
   <link rel="preconnect" href="https://phimapi.com" />
   <link rel="dns-prefetch" href="https://cdn.jsdelivr.net" />
   <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Sarabun:wght@500;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=17" />
+  <link rel="stylesheet" href="./styles.css?v=18" />
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js" defer></script>
 </head>
 <body>
@@ -263,28 +263,106 @@
         </div>
       </div>
 
-      <!-- Watch Party Frosted-Glass Live Chat Overlay (Toggleable inside Player) -->
+      <!-- Watch Party 2.0 Floating Emoji Stage, 3-2-1 Sync Countdown & Action Pill -->
+      <div class="party-reaction-layer" id="partyReactionLayer" aria-hidden="true"></div>
+      <div class="party-countdown-overlay" id="partyCountdownOverlay" style="display:none;">
+        <div class="party-countdown-num" id="partyCountdownNum">3</div>
+        <div class="party-countdown-sub">Đồng bộ bắt đầu cùng lúc...</div>
+      </div>
+      <div class="party-action-pill" id="partyActionPill" style="display:none;"></div>
+
+      <!-- Watch Party 2.0 Pro Sidebar (Supports Theater Split Mode on PC + Floating Drawer on Mobile) -->
       <aside class="party-chat-panel" id="partyChatPanel" style="display:none;">
         <div class="party-chat-head">
-          <div style="min-width:0;">
-            <div class="party-room-badge" id="partyRoomBadge">🍿 ROOM • 1 watching</div>
-            <div class="party-role-sub" id="partyRoleSub">Synced Watch Party</div>
+          <div style="min-width:0;flex:1;">
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+              <div class="party-room-badge" id="partyRoomBadge">🍿 ROOM • 1</div>
+              <span class="party-sync-pill" id="partySyncBadge" title="Trạng thái đồng bộ thời gian thực">🟢 Khớp</span>
+            </div>
+            <div class="party-role-sub" id="partyRoleSub">Xem chung đồng bộ</div>
           </div>
-          <div style="display:flex;gap:5px;flex-shrink:0;">
-            <button class="icon-btn hud-glass-btn" id="partyCopyLinkBtn" title="Copy Invite Link" style="width:28px;height:28px;">
+          <div style="display:flex;gap:4px;flex-shrink:0;">
+            <button class="icon-btn hud-glass-btn" id="partyResyncBtn" title="Khớp lại giây ngay" style="width:28px;height:28px;font-size:12px;">🔄</button>
+            <button class="icon-btn hud-glass-btn" id="partySplitToggleBtn" title="Chế độ Rạp chia đôi / Cửa sổ nổi" style="width:28px;height:28px;font-size:12px;">🖥️</button>
+            <button class="icon-btn hud-glass-btn" id="partyCopyLinkBtn" title="Copy link mời phòng" style="width:28px;height:28px;">
               <svg class="ui-ico" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
             </button>
-            <button class="icon-btn hud-glass-btn" id="partyHideChatBtn" title="Hide Chat" style="width:28px;height:28px;">
+            <button class="icon-btn hud-glass-btn" id="partyHideChatBtn" title="Thu gọn bảng Xem chung" style="width:28px;height:28px;">
               <svg class="ui-ico" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
             </button>
           </div>
         </div>
-        <div class="party-messages" id="partyMessagesList"></div>
-        <div class="party-input-row">
-          <input class="party-chat-input" id="partyChatInput" type="text" maxlength="220" placeholder="Say something..." />
-          <button class="btn-grad" id="partySendBtn" type="button" style="padding:6px 10px;font-size:11.5px;">Send</button>
+
+        <!-- 3-Tab Watch Party Navigation (Chat • Up Next Queue • Room & Controls) -->
+        <div class="party-side-tabs" id="partySideTabs">
+          <button class="party-side-tab active" data-ptab="chat" type="button">💬 Chat</button>
+          <button class="party-side-tab" data-ptab="queue" type="button" id="partyQueueTabBtn">🎬 Hàng chờ</button>
+          <button class="party-side-tab" data-ptab="room" type="button" id="partyRoomTabBtn">👥 Phòng</button>
         </div>
-        <button class="party-leave-btn" id="partyLeaveBtn" type="button">Leave Watch Party</button>
+
+        <!-- TAB 1: LIVE CHAT + FLOATING EMOJI REACTIONS -->
+        <div class="party-tab-pane active" id="partyPaneChat">
+          <div class="party-messages" id="partyMessagesList"></div>
+          <div class="party-react-bar" id="partyReactBar">
+            <button class="party-react-btn" data-react="😂" type="button" title="Haha">😂</button>
+            <button class="party-react-btn" data-react="🔥" type="button" title="Cháy quá">🔥</button>
+            <button class="party-react-btn" data-react="😱" type="button" title="Sốc">😱</button>
+            <button class="party-react-btn" data-react="❤️" type="button" title="Yêu thích">❤️</button>
+            <button class="party-react-btn" data-react="👏" type="button" title="Tuyệt đỉnh">👏</button>
+            <button class="party-react-btn" data-react="😭" type="button" title="Cảm động">😭</button>
+          </div>
+          <div class="party-input-row">
+            <input class="party-chat-input" id="partyChatInput" type="text" maxlength="220" placeholder="Nhắn gì đó cùng phòng..." />
+            <button class="btn-grad" id="partySendBtn" type="button" style="padding:6px 10px;font-size:11.5px;">Gửi</button>
+          </div>
+        </div>
+
+        <!-- TAB 2: UP NEXT QUEUE + INLINE MOVIE PICKER (CHANGE MOVIE WITHOUT LEAVING ROOM!) -->
+        <div class="party-tab-pane" id="partyPaneQueue">
+          <div class="party-queue-add-box">
+            <div style="display:flex;gap:5px;">
+              <input class="party-chat-input" id="partyQueueSearchInput" type="search" placeholder="🔍 Tìm phim thêm vào hàng chờ / đổi phim..." />
+              <button class="btn-glass" id="partyQueueSearchBtn" type="button" style="padding:5px 9px;font-size:11px;white-space:nowrap;">Tìm</button>
+            </div>
+            <div class="party-queue-search-results" id="partyQueueSearchResults" style="display:none;"></div>
+          </div>
+          <div class="party-queue-list" id="partyQueueList">
+            <div class="party-empty-hint">Chưa có phim nào trong hàng chờ.<br>Tìm phim bên trên để xếp lịch xem nối tiếp hoặc đổi phim ngay!</div>
+          </div>
+        </div>
+
+        <!-- TAB 3: MEMBERS, QR INVITE & HOST / CO-CONTROL SETTINGS -->
+        <div class="party-tab-pane" id="partyPaneRoom">
+          <div class="party-room-scroll">
+            <div class="party-invite-card">
+              <img id="partyQrImg" class="party-qr-img" alt="QR Mời phòng" />
+              <div style="min-width:0;flex:1;display:flex;flex-direction:column;gap:5px;">
+                <div style="font-size:11px;color:#9ca3af;font-weight:700;">MÃ PHÒNG XEM CHUNG</div>
+                <div id="partyCodeDisplay" style="font-size:18px;font-weight:900;letter-spacing:2.5px;color:#34d399;">------</div>
+                <div style="display:flex;gap:5px;flex-wrap:wrap;">
+                  <button class="btn-grad" id="partyShareInviteBtn" type="button" style="padding:4px 9px;font-size:11px;">🔗 Chia sẻ</button>
+                  <button class="btn-glass" id="partyCountdownBtn" type="button" style="padding:4px 9px;font-size:11px;">⏱️ 3-2-1</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Live Host Settings (Control Mode & Visibility) -->
+            <div class="party-settings-box" id="partyHostControlsBox" style="display:none;">
+              <div class="party-subhead">⚙️ Quyền &amp; Chế độ phòng (Chủ phòng)</div>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                <button class="btn-glass" id="partyToggleControlModeBtn" type="button" style="flex:1;font-size:11px;padding:6px 8px;">👑 Chỉ Chủ phòng</button>
+                <button class="btn-glass" id="partyToggleVisibilityBtn" type="button" style="flex:1;font-size:11px;padding:6px 8px;">🔒 Riêng tư</button>
+              </div>
+            </div>
+
+            <!-- Auto Host Failover Claim Button (shown only if Host dropped >38s) -->
+            <button class="btn-grad" id="partyClaimHostBtn" type="button" style="display:none;width:100%;padding:7px;font-size:11.5px;">👑 Chủ phòng mất kết nối — Tiếp quản Chủ phòng</button>
+
+            <div class="party-subhead" id="partyMembersHeading">👥 Thành viên đang xem (1)</div>
+            <div class="party-members-list" id="partyMembersList"></div>
+          </div>
+          <button class="party-leave-btn" id="partyLeaveBtn" type="button">🚪 Rời phòng Xem chung</button>
+        </div>
       </aside>
 
       <!-- Right-Side Frosted-Glass Episodes & Servers Drawer -->
@@ -939,27 +1017,91 @@
     </div>
   </div>
 
-  <!-- WATCH PARTY JOIN / CREATE MODAL -->
+  <!-- WATCH PARTY 2.0 HUB MODAL (LIVE PUBLIC LOBBY • JOIN BY CODE/PASSCODE • CREATE ROOM) -->
   <div class="backdrop" id="partyModal">
-    <div class="modal-card" style="max-width:420px;">
+    <div class="modal-card" style="max-width:560px;">
       <div class="modal-head">
-        <h3>🍿 ChillFilm Watch Party</h3>
+        <h3>🍿 ChillFilm Xem Chung 2.0</h3>
         <button class="icon-btn" data-close="partyModal" aria-label="Close"><svg class="ui-ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
       </div>
       <div class="modal-body">
-        <div class="info-box" style="font-size:12px;">
-          Watch together in sync! Enter a 6-character room code from a friend to join instantly, or start any movie and click <strong>🍿 Party</strong> inside the player to host a room.
+        <div class="party-hub-tabs" id="partyHubTabs">
+          <button class="party-hub-tab active" data-hub-tab="lobby" type="button">🌐 Sảnh Công Khai</button>
+          <button class="party-hub-tab" data-hub-tab="join" type="button">🔑 Vào bằng Mã</button>
+          <button class="party-hub-tab" data-hub-tab="create" type="button">✨ Tạo Phòng Mới</button>
         </div>
-        <div class="field-group">
-          <span class="field-label">YOUR NICKNAME</span>
-          <input class="field-input" id="partyNickInput" maxlength="28" placeholder="e.g. Minh, Alex..." />
+
+        <div class="field-group" style="margin-top:2px;">
+          <span class="field-label">BIỆT DANH CỦA BẠN TRONG PHÒNG</span>
+          <input class="field-input" id="partyNickInput" maxlength="28" placeholder="vd: Minh, Linh..." />
         </div>
-        <div class="field-group">
-          <span class="field-label">6-CHARACTER ROOM CODE</span>
-          <div style="display:flex;gap:8px;">
-            <input class="field-input" id="partyCodeInput" maxlength="8" placeholder="e.g. CF7K2P" style="text-transform:uppercase;letter-spacing:2px;font-weight:800;" />
-            <button class="btn-grad" id="partyJoinSubmitBtn" type="button" style="white-space:nowrap;">🍿 Join Room</button>
+
+        <!-- HUB TAB 1: PUBLIC LIVE LOBBY -->
+        <div class="party-hub-pane active" id="partyHubLobby">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;">
+            <span style="font-size:12px;color:#9ca3af;font-weight:700;">Phòng đang phát công khai</span>
+            <button class="btn-glass" id="partyRefreshLobbyBtn" type="button" style="padding:4px 10px;font-size:11.5px;">🔄 Làm mới</button>
           </div>
+          <div class="party-lobby-list" id="partyLobbyList">
+            <div class="party-empty-hint">Đang tải danh sách phòng đang chiếu...</div>
+          </div>
+        </div>
+
+        <!-- HUB TAB 2: JOIN PRIVATE / LOCKED ROOM BY CODE -->
+        <div class="party-hub-pane" id="partyHubJoin">
+          <div class="field-group">
+            <span class="field-label">MÃ PHÒNG 6 KÝ TỰ</span>
+            <input class="field-input" id="partyCodeInput" maxlength="8" placeholder="vd: CF7K2P" style="text-transform:uppercase;letter-spacing:2.5px;font-weight:800;" />
+          </div>
+          <div class="field-group" id="partyJoinPassWrap">
+            <span class="field-label">MẬT KHẨU PHÒNG (NẾU PHÒNG CÓ KHÓA)</span>
+            <input class="field-input" id="partyJoinPassInput" type="password" autocomplete="off" placeholder="Để trống nếu phòng không đặt mật khẩu" />
+          </div>
+          <button class="btn-grad" id="partyJoinSubmitBtn" type="button" style="width:100%;margin-top:4px;">🍿 Vào Phòng Xem Ngay</button>
+        </div>
+
+        <!-- HUB TAB 3: CREATE NEW ROOM (PRIVATE OR PUBLIC, HOST-ONLY OR EVERYONE) -->
+        <div class="party-hub-pane" id="partyHubCreate">
+          <div class="field-group">
+            <span class="field-label">PHIM CHIẾU TRONG PHÒNG</span>
+            <div class="party-picked-movie" id="partyCreatePickedMovie">
+              <span style="font-size:12px;color:#9ca3af;">Chưa chọn phim — tìm nhanh bên dưới hoặc mở sẵn 1 bộ phim</span>
+            </div>
+            <div style="display:flex;gap:6px;margin-top:4px;">
+              <input class="field-input" id="partyCreateSearchInput" type="search" placeholder="🔍 Tìm phim để mở phòng ngay..." style="padding:7px 10px;font-size:12.5px;" />
+              <button class="btn-glass" id="partyCreateSearchBtn" type="button" style="white-space:nowrap;">Tìm</button>
+            </div>
+            <div class="party-queue-search-results" id="partyCreateSearchResults" style="display:none;"></div>
+          </div>
+
+          <div class="field-group">
+            <span class="field-label">TÊN PHÒNG (TÙY CHỌN)</span>
+            <input class="field-input" id="partyCreateTitleInput" maxlength="80" placeholder="vd: Đêm cày phim cùng hội bạn 🍿" />
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+            <div class="field-group">
+              <span class="field-label">CHẾ ĐỘ PHÒNG</span>
+              <select class="field-select" id="partyCreateVisSelect">
+                <option value="PRIVATE">🔒 Riêng tư (Link / Mã)</option>
+                <option value="PUBLIC">🌐 Công khai (Hiện ở Sảnh)</option>
+              </select>
+            </div>
+            <div class="field-group">
+              <span class="field-label">QUYỀN ĐIỀU KHIỂN PHIM</span>
+              <select class="field-select" id="partyCreateControlSelect">
+                <option value="EVERYONE">🤝 Ai cũng điều khiển</option>
+                <option value="HOST_ONLY">👑 Chỉ Chủ phòng</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <span class="field-label">MẬT KHẨU PHÒNG (TÙY CHỌN)</span>
+            <input class="field-input" id="partyCreatePassInput" type="password" autocomplete="new-password" placeholder="Để trống nếu không cần mật khẩu" />
+          </div>
+
+          <button class="btn-grad" id="partyCreateSubmitBtn" type="button" style="width:100%;margin-top:4px;">✨ Tạo Phòng &amp; Mời Bạn Bè</button>
         </div>
       </div>
     </div>
@@ -1007,6 +1149,6 @@
 
   <div class="toast" id="toast"></div>
 
-  <script type="module" src="./app.js?v=17"></script>
+  <script type="module" src="./app.js?v=18"></script>
 </body>
 </html>

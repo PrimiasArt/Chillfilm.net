@@ -3,7 +3,7 @@ import { neon } from '@neondatabase/serverless';
 
 let _sql = null;
 let _schemaReadyPromise = null;
-const SCHEMA_VERSION_MARKER = 'v16';
+const SCHEMA_VERSION_MARKER = 'v18';
 const _vaultCache = new Map(); // key -> { value, expiresAt }
 const VAULT_CACHE_TTL_MS = 60_000;
 let _geminiCfgCache = null; // { data, expiresAt }
@@ -249,6 +249,15 @@ export async function ensureSchema() {
       sql`ALTER TABLE nki_catalog_items ADD COLUMN IF NOT EXISTS content_en TEXT NOT NULL DEFAULT ''`,
       sql`ALTER TABLE nki_catalog_items ADD COLUMN IF NOT EXISTS content_vi TEXT NOT NULL DEFAULT ''`,
       sql`ALTER TABLE nki_my_list ADD COLUMN IF NOT EXISTS last_known_episode TEXT NOT NULL DEFAULT ''`,
+      sql`ALTER TABLE nki_watch_parties ADD COLUMN IF NOT EXISTS room_title TEXT NOT NULL DEFAULT ''`,
+      sql`ALTER TABLE nki_watch_parties ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'PRIVATE'`,
+      sql`ALTER TABLE nki_watch_parties ADD COLUMN IF NOT EXISTS passcode_hash TEXT NOT NULL DEFAULT ''`,
+      sql`ALTER TABLE nki_watch_parties ADD COLUMN IF NOT EXISTS control_mode TEXT NOT NULL DEFAULT 'HOST_ONLY'`,
+      sql`ALTER TABLE nki_watch_parties ADD COLUMN IF NOT EXISTS queue_json JSONB NOT NULL DEFAULT '[]'::jsonb`,
+      sql`ALTER TABLE nki_watch_parties ADD COLUMN IF NOT EXISTS reactions_json JSONB NOT NULL DEFAULT '[]'::jsonb`,
+      sql`ALTER TABLE nki_watch_parties ADD COLUMN IF NOT EXISTS last_action_text TEXT NOT NULL DEFAULT ''`,
+      sql`ALTER TABLE nki_watch_parties ADD COLUMN IF NOT EXISTS last_action_at BIGINT NOT NULL DEFAULT 0`,
+      sql`CREATE INDEX IF NOT EXISTS idx_nki_watch_parties_public ON nki_watch_parties (visibility, expires_at DESC)`,
       sql`CREATE INDEX IF NOT EXISTS idx_nki_watch_progress_user_updated ON nki_watch_progress (user_id, updated_at DESC)`,
       sql`CREATE INDEX IF NOT EXISTS idx_nki_subtitle_pool_lookup ON nki_subtitle_pool (movie_slug, episode_key, lang)`,
       sql`CREATE INDEX IF NOT EXISTS idx_nki_my_list_user_added ON nki_my_list (user_id, added_at DESC)`,

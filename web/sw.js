@@ -3,7 +3,7 @@
  * - Network-First for HTML (/) so new deploys roll out immediately
  * - NEVER intercepts /api/*, HLS streams (.m3u8/.ts/.mp4), or cross-origin media
  */
-const CACHE_NAME = 'chillfilm-nki-shell-v17';
+const CACHE_NAME = 'chillfilm-nki-shell-v18';
 const SHELL_ASSETS = [
   '/',
   '/index.html',

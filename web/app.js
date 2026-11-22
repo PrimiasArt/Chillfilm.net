@@ -40,16 +40,24 @@ import {
   fetchCatalogDetail,
   fetchCatalogSubtitles,
   fetchSubtitleTextSmart,
+  partyListLobby,
   partyCreate,
   partyJoin,
   partyPoll,
   partyControl,
+  partyUpdateSettings,
+  partyClaimHost,
+  partyQueueAdd,
+  partyQueueVote,
+  partyQueueRemove,
+  partyQueuePlay,
+  partyReact,
   partySendChat,
   partyLeave,
   fetchMovieGlossary,
   saveMovieGlossary,
   fetchAiVibeSearch,
-} from './sync.js?v=16';
+} from './sync.js?v=18';
 
 const PHIM_API = 'https://phimapi.com';
 const PHIM_CDN = 'https://phimimg.com';
@@ -159,18 +167,36 @@ const state = {
   audioSubLoopTimer: null,
   audioSubSessionId: 0,
   audioSubChunksDone: 0,
-  // Phase 3 Watch Party
+  // Watch Party 2.0 (Lobby • RTT Smooth Sync • Co-Control • Up Next Queue • Reactions • Split Theater)
   party: {
     roomCode: '',
+    roomTitle: '',
+    visibility: 'PRIVATE',
+    controlMode: 'HOST_ONLY',
+    hasPasscode: false,
     hostToken: '',
+    hostName: '',
+    hostInactive: false,
     memberId: '',
     nickname: '',
     isHost: false,
     pollTimer: null,
     lastMsgId: 0,
+    lastReactionTs: 0,
+    lastActionAt: 0,
+    lastStateUpdatedAt: 0,
     chatVisible: false,
+    splitMode: typeof window !== 'undefined' ? window.innerWidth >= 860 : false,
+    activeSideTab: 'chat',
     applyingRemoteSync: false,
+    softSyncActive: false,
+    lastMovieSlug: '',
     lastEpisodeUrl: '',
+    queue: [],
+    members: [],
+    countdownTimer: null,
+    createPickedMovie: null,
+    createPickedEpisode: null,
   },
   // Subtitles & Resume
   subTracks: [],
@@ -2202,6 +2228,7 @@ function renderDetailView(detail) {
         ${actors.length ? `<div class="detail-people-row"><span>Diễn viên:</span>${actors.map((a) => `<button type="button" class="person-chip" data-person="${escapeHtml(a)}">${escapeHtml(a)}</button>`).join('')}</div>` : ''}
         <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:6px;">
           ${resumeEp ? `<button class="btn-nf-play" id="detailPlayPrimary">${escapeHtml(primaryBtnLabel)}</button>` : `<span style="color:#fca5a5;font-size:13px;">${escapeHtml(tr('noStream'))}</span>`}
+          ${resumeEp ? `<button class="btn-glass" id="detailPartyBtn" type="button" style="padding:10px 15px;font-size:13.5px;border-color:rgba(0,230,118,0.45);color:#86efac;">🍿 Xem chung</button>` : ''}
           <button class="btn-nf-mylist ${savedInMyList ? 'saved' : ''}" id="detailMyListBtn" type="button">${escapeHtml(savedInMyList ? tr('inMyListBtn') : tr('addMyListBtn'))}</button>
           <button class="btn-glass" id="detailShareBtn" type="button" style="padding:10px 15px;font-size:13.5px;">${escapeHtml(tr('shareMovieBtn'))}</button>
           <button class="btn-glass" id="detailTrailerBtn" type="button" style="padding:10px 15px;font-size:13.5px;">${escapeHtml(tr('trailerBtn'))}</button>
@@ -2288,6 +2315,9 @@ function renderDetailView(detail) {
   }
   if ($('detailShareBtn')) {
     $('detailShareBtn').onclick = () => shareCurrentMovie(detail, resumeEp);
+  }
+  if ($('detailPartyBtn') && resumeEp) {
+    $('detailPartyBtn').onclick = () => openPartyHubModal('create', { movie: detail, episode: resumeEp });
   }
   if ($('detailTrailerBtn')) {
     $('detailTrailerBtn').onclick = () => openTrailerModal(detail);
@@ -4463,12 +4493,71 @@ function startWebAiAudioSub(scope = 'lookahead10') {
   startLiveMediaRecorderFallback();
 }
 
-/* ==================== PHASE 3: WATCH PARTY ENGINE (NEON SYNC + LIVE CHAT) ==================== */
+/* ==================== WATCH PARTY 2.0 ENGINE (LOBBY • RTT SOFT-SYNC • CO-CONTROL • QUEUE • REACTIONS • SPLIT THEATER) ==================== */
+const PARTY_SESSION_KEY = 'chillfilm_nki_party_session_v2';
+
 function getDefaultPartyNick() {
   const session = getCloudSession();
   if (session?.user?.displayName) return session.user.displayName;
   if (session?.user?.username) return session.user.username;
-  return localStorage.getItem('chillfilm_nki_party_nick_v1') || 'Guest';
+  return localStorage.getItem('chillfilm_nki_party_nick_v1') || 'Khách';
+}
+
+function canControlParty() {
+  const p = state.party;
+  return Boolean(p.roomCode && (p.isHost || p.controlMode === 'EVERYONE'));
+}
+
+function savePartySessionStorage() {
+  const p = state.party;
+  if (!p.roomCode) {
+    try { sessionStorage.removeItem(PARTY_SESSION_KEY); } catch { /* ignore */ }
+    return;
+  }
+  try {
+    sessionStorage.setItem(PARTY_SESSION_KEY, JSON.stringify({
+      roomCode: p.roomCode,
+      hostToken: p.hostToken || '',
+      memberId: p.memberId || '',
+      nickname: p.nickname || '',
+      ts: Date.now(),
+    }));
+  } catch { /* ignore */ }
+}
+
+function loadPartySessionStorage() {
+  try {
+    const raw = sessionStorage.getItem(PARTY_SESSION_KEY);
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    if (!obj?.roomCode || Date.now() - Number(obj.ts || 0) > 6 * 60 * 60 * 1000) return null;
+    return obj;
+  } catch {
+    return null;
+  }
+}
+
+function applyPartySplitLayout() {
+  const stage = $('playerStage');
+  const p = state.party;
+  const activeSplit = Boolean(p.roomCode && p.chatVisible && p.splitMode && !state.isMinimized);
+  stage?.classList.toggle('party-split-mode', activeSplit);
+  if ($('partySplitToggleBtn')) {
+    $('partySplitToggleBtn').title = p.splitMode ? 'Đổi sang khung nổi (Overlay)' : 'Đổi sang chế độ Rạp chia đôi (Split)';
+  }
+}
+
+function setPartySideTab(tabName) {
+  const clean = ['chat', 'queue', 'room'].includes(tabName) ? tabName : 'chat';
+  state.party.activeSideTab = clean;
+  document.querySelectorAll('#partySideTabs [data-ptab]').forEach((b) => {
+    b.classList.toggle('active', b.dataset.ptab === clean);
+  });
+  $('partyPaneChat')?.classList.toggle('active', clean === 'chat');
+  $('partyPaneQueue')?.classList.toggle('active', clean === 'queue');
+  $('partyPaneRoom')?.classList.toggle('active', clean === 'room');
+  if (clean === 'queue') renderPartyQueue();
+  if (clean === 'room') renderPartyRoomTab();
 }
 
 function renderPartyHeaderAndButton() {
@@ -4480,8 +4569,46 @@ function renderPartyHeaderAndButton() {
     hudBtn.textContent = p.roomCode ? `🍿 ${p.roomCode}` : '🍿 Party';
   }
   if (panel) {
-    panel.style.display = p.roomCode && p.chatVisible ? 'flex' : 'none';
+    panel.style.display = p.roomCode && p.chatVisible && !state.isMinimized ? 'flex' : 'none';
   }
+  if ($('partyQueueTabBtn')) {
+    const n = (p.queue || []).length;
+    $('partyQueueTabBtn').textContent = n > 0 ? `🎬 Hàng chờ (${n})` : '🎬 Hàng chờ';
+  }
+  if ($('partyRoomTabBtn')) {
+    const mCount = Math.max(1, (p.members || []).length);
+    $('partyRoomTabBtn').textContent = `👥 Phòng (${mCount})`;
+  }
+  applyPartySplitLayout();
+}
+
+function setPartySyncIndicator(text, tone = 'ok') {
+  const el = $('partySyncBadge');
+  if (!el) return;
+  el.textContent = text;
+  el.classList.toggle('adjusting', tone === 'adjusting');
+  el.classList.toggle('lag', tone === 'lag');
+}
+
+function showPartyActionPill(text) {
+  const el = $('partyActionPill');
+  if (!el || !text) return;
+  el.textContent = text;
+  el.style.display = 'block';
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.style.display = 'none'; }, 3600);
+}
+
+function spawnFloatingEmoji(emoji, senderName = '') {
+  const layer = $('partyReactionLayer');
+  if (!layer || !emoji) return;
+  const el = document.createElement('div');
+  el.className = 'party-float-emoji';
+  const dx = Math.round((Math.random() - 0.5) * 44);
+  el.style.setProperty('--dx', `${dx}px`);
+  el.innerHTML = `${escapeHtml(emoji)}${senderName ? `<span>${escapeHtml(senderName)}</span>` : ''}`;
+  layer.appendChild(el);
+  setTimeout(() => el.remove(), 2700);
 }
 
 function appendPartyMessages(messages) {
@@ -4495,7 +4622,7 @@ function appendPartyMessages(messages) {
     div.className = 'party-msg';
     div.innerHTML = `
       <div class="party-msg-author">
-        <span>${escapeHtml(m.senderName || 'Guest')}</span>
+        <span>${escapeHtml(m.senderName || 'Khách')}</span>
         ${m.isHost ? '<span class="party-host-tag">HOST</span>' : ''}
       </div>
       <div>${escapeHtml(m.text)}</div>
@@ -4505,210 +4632,721 @@ function appendPartyMessages(messages) {
   list.scrollTop = list.scrollHeight;
 }
 
+function renderPartyRoomTab() {
+  const p = state.party;
+  if (!p.roomCode) return;
+  if ($('partyCodeDisplay')) $('partyCodeDisplay').textContent = p.roomCode;
+  const shareUrl = `${window.location.origin}/?party=${p.roomCode}`;
+  const qrEl = $('partyQrImg');
+  if (qrEl) {
+    const qrSrc = `https://api.qrserver.com/v1/create-qr-code/?size=160x160&margin=6&data=${encodeURIComponent(shareUrl)}`;
+    if (qrEl.dataset.code !== p.roomCode) {
+      qrEl.dataset.code = p.roomCode;
+      qrEl.src = qrSrc;
+    }
+  }
+  const hostBox = $('partyHostControlsBox');
+  if (hostBox) {
+    hostBox.style.display = p.isHost ? 'flex' : 'none';
+  }
+  if ($('partyToggleControlModeBtn')) {
+    $('partyToggleControlModeBtn').textContent = p.controlMode === 'EVERYONE'
+      ? '🤝 Ai cũng điều khiển'
+      : '👑 Chỉ Chủ phòng';
+    $('partyToggleControlModeBtn').classList.toggle('active', p.controlMode === 'EVERYONE');
+  }
+  if ($('partyToggleVisibilityBtn')) {
+    $('partyToggleVisibilityBtn').textContent = p.visibility === 'PUBLIC'
+      ? '🌐 Đang Công khai'
+      : '🔒 Đang Riêng tư';
+    $('partyToggleVisibilityBtn').classList.toggle('active', p.visibility === 'PUBLIC');
+  }
+  if ($('partyClaimHostBtn')) {
+    $('partyClaimHostBtn').style.display = (!p.isHost && p.hostInactive) ? 'block' : 'none';
+  }
+  if ($('partyCountdownBtn')) {
+    $('partyCountdownBtn').style.display = canControlParty() ? 'inline-flex' : 'none';
+  }
+
+  const members = Array.isArray(p.members) ? p.members : [];
+  if ($('partyMembersHeading')) {
+    $('partyMembersHeading').textContent = `👥 Thành viên đang xem (${Math.max(1, members.length)})`;
+  }
+  const listEl = $('partyMembersList');
+  if (listEl) {
+    listEl.innerHTML = members.length
+      ? members.map((m) => {
+          const stIcon = m.status === 'buffering' ? '⏳ Đang tải' : (m.status === 'paused' ? '⏸️ Dừng' : '🟢 Xem');
+          const posStr = m.posSec > 0 ? ` • ${formatTime(m.posSec)}` : '';
+          return `
+            <div class="party-member-row">
+              <div style="min-width:0;display:flex;align-items:center;gap:5px;">
+                <span style="font-weight:800;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(m.name)}</span>
+                ${m.isHost ? '<span class="party-host-tag">HOST</span>' : ''}
+                ${m.id === p.memberId ? '<span style="font-size:10px;color:#86efac;">(Bạn)</span>' : ''}
+              </div>
+              <span style="font-size:10.5px;color:#cbd5e1;white-space:nowrap;">${stIcon}${posStr}</span>
+            </div>
+          `;
+        }).join('')
+      : '<div class="party-empty-hint">Đang cập nhật thành viên...</div>';
+  }
+}
+
+function renderPartyQueue() {
+  const p = state.party;
+  const listEl = $('partyQueueList');
+  if (!listEl) return;
+  const queue = Array.isArray(p.queue) ? p.queue : [];
+  if (!queue.length) {
+    listEl.innerHTML = '<div class="party-empty-hint">Chưa có phim nào trong hàng chờ.<br>Tìm phim bên trên để xếp lịch xem nối tiếp hoặc đổi phim ngay trong phòng!</div>';
+    return;
+  }
+  const allowPlay = canControlParty();
+  listEl.innerHTML = '';
+  queue.forEach((item) => {
+    const votes = Array.isArray(item.votes) ? item.votes : [];
+    const voted = Boolean(p.memberId && votes.includes(p.memberId));
+    const canDel = allowPlay || (p.memberId && item.addedById === p.memberId);
+    const row = document.createElement('div');
+    row.className = 'party-queue-item';
+    row.innerHTML = `
+      <img src="${escapeHtml(item.movie?.poster || './assets/icon-192.png?v=2')}" alt="" onerror="this.src='./assets/icon-192.png?v=2'" />
+      <div style="min-width:0;flex:1;">
+        <div style="font-size:12px;font-weight:800;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(item.movie?.name || 'Phim')}</div>
+        <div style="font-size:10.5px;color:#9ca3af;margin-top:2px;">${escapeHtml(item.episode?.name || 'Full')} • bởi ${escapeHtml(item.addedBy || 'Khách')}</div>
+        <div style="display:flex;gap:5px;margin-top:5px;align-items:center;flex-wrap:wrap;">
+          <button class="party-vote-btn ${voted ? 'voted' : ''}" type="button" data-q-vote="${escapeHtml(item.id)}">👍 ${votes.length}</button>
+          ${allowPlay ? `<button class="btn-grad" type="button" data-q-play="${escapeHtml(item.id)}" style="padding:3px 8px;font-size:10.5px;">▶ Phát ngay</button>` : ''}
+          ${canDel ? `<button class="btn-glass" type="button" data-q-del="${escapeHtml(item.id)}" style="padding:3px 7px;font-size:10.5px;color:#fca5a5;">✕</button>` : ''}
+        </div>
+      </div>
+    `;
+    row.querySelector('[data-q-vote]')?.addEventListener('click', async () => {
+      try {
+        const res = await partyQueueVote({ roomCode: p.roomCode, itemId: item.id, memberId: p.memberId });
+        if (Array.isArray(res?.queue)) {
+          state.party.queue = res.queue;
+          renderPartyQueue();
+          renderPartyHeaderAndButton();
+        }
+      } catch { /* ignore */ }
+    });
+    row.querySelector('[data-q-play]')?.addEventListener('click', () => playPartyQueueItem(item.id));
+    row.querySelector('[data-q-del]')?.addEventListener('click', async () => {
+      try {
+        const res = await partyQueueRemove({ roomCode: p.roomCode, itemId: item.id, memberId: p.memberId, hostToken: p.hostToken });
+        if (Array.isArray(res?.queue)) {
+          state.party.queue = res.queue;
+          renderPartyQueue();
+          renderPartyHeaderAndButton();
+        }
+      } catch { /* ignore */ }
+    });
+    listEl.appendChild(row);
+  });
+}
+
+async function resolveFirstEpisodeForPartyMovie(movie) {
+  if (Array.isArray(movie?.servers) && movie.servers[0]?.episodes?.[0]) {
+    return { movie, episode: movie.servers[0].episodes[0] };
+  }
+  const detail = await fetchCatalogDetail({
+    source: movie.source || 'phimapi',
+    slug: movie.slug,
+    sourceId: movie.sourceId || '',
+  });
+  const firstEp = detail?.servers?.[0]?.episodes?.[0];
+  if (!detail || !firstEp) throw new Error('Không tìm thấy luồng phát cho phim này');
+  setCachedMovieDetail(movie.source || 'phimapi', movie.slug, movie.sourceId || '', detail);
+  return { movie: detail, episode: firstEp };
+}
+
+async function searchMoviesForPartyQueue() {
+  const input = $('partyQueueSearchInput');
+  const box = $('partyQueueSearchResults');
+  const q = (input?.value || '').trim();
+  if (!box || q.length < 2) {
+    if (box) box.style.display = 'none';
+    return;
+  }
+  box.style.display = 'flex';
+  box.innerHTML = '<div style="font-size:11px;color:#9ca3af;padding:6px;">⏳ Đang tìm phim...</div>';
+  try {
+    const data = await fetchCatalogBrowse({ q, limit: 6, fast: 1 });
+    const items = Array.isArray(data?.items) ? data.items : [];
+    if (!items.length) {
+      box.innerHTML = '<div style="font-size:11px;color:#9ca3af;padding:6px;">Không thấy phim phù hợp.</div>';
+      return;
+    }
+    box.innerHTML = '';
+    const allowSwitch = canControlParty();
+    items.slice(0, 5).forEach((m) => {
+      const r = document.createElement('div');
+      r.className = 'party-qsearch-row';
+      r.innerHTML = `
+        <img src="${escapeHtml(m.poster || './assets/icon-192.png?v=2')}" alt="" onerror="this.src='./assets/icon-192.png?v=2'" />
+        <div style="min-width:0;flex:1;">
+          <div style="font-size:11.5px;font-weight:800;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(getDisplayTitle(m))}</div>
+          <div style="font-size:10px;color:#9ca3af;">${escapeHtml(m.year || '')} • ${escapeHtml(m.episode_current || m.quality || 'HD')}</div>
+        </div>
+        <button class="btn-glass" type="button" data-act="add" style="padding:4px 7px;font-size:10.5px;">+ Chờ</button>
+        ${allowSwitch ? '<button class="btn-grad" type="button" data-act="play" style="padding:4px 7px;font-size:10.5px;">▶ Đổi</button>' : ''}
+      `;
+      r.querySelector('[data-act="add"]')?.addEventListener('click', async (ev) => {
+        const btn = ev.currentTarget;
+        btn.disabled = true;
+        btn.textContent = '...';
+        try {
+          const { movie, episode } = await resolveFirstEpisodeForPartyMovie(m);
+          const res = await partyQueueAdd({
+            roomCode: state.party.roomCode,
+            movie: {
+              slug: movie.slug, source: movie.source || 'phimapi', sourceId: movie.sourceId || '',
+              name: getDisplayTitle(movie), poster: movie.poster || '', year: movie.year || '',
+            },
+            episode: { name: episode.name || 'Full', slug: episode.slug || 'full', link_m3u8: episode.link_m3u8 },
+            nickname: state.party.nickname,
+            memberId: state.party.memberId,
+          });
+          if (Array.isArray(res?.queue)) state.party.queue = res.queue;
+          box.style.display = 'none';
+          if (input) input.value = '';
+          renderPartyQueue();
+          renderPartyHeaderAndButton();
+          showToast(`🎬 Đã thêm "${getDisplayTitle(movie)}" vào hàng chờ!`);
+        } catch (err) {
+          showToast(err?.message || 'Không thêm được phim');
+          btn.disabled = false;
+          btn.textContent = '+ Chờ';
+        }
+      });
+      r.querySelector('[data-act="play"]')?.addEventListener('click', async (ev) => {
+        const btn = ev.currentTarget;
+        btn.disabled = true;
+        btn.textContent = '...';
+        try {
+          const { movie, episode } = await resolveFirstEpisodeForPartyMovie(m);
+          box.style.display = 'none';
+          if (input) input.value = '';
+          state.party.lastMovieSlug = movie.slug;
+          state.party.lastEpisodeUrl = episode.link_m3u8;
+          openPlayer(movie, episode, 0, { preserveParty: true });
+          pushHostPartyState({
+            movie: {
+              slug: movie.slug, source: movie.source || 'phimapi', sourceId: movie.sourceId || '',
+              name: getDisplayTitle(movie), poster: movie.poster || '', year: movie.year || '',
+            },
+            episode: { name: episode.name || 'Full', slug: episode.slug || 'full', link_m3u8: episode.link_m3u8 },
+            positionSec: 0,
+            isPlaying: true,
+            actionNote: `🎬 ${state.party.nickname} đổi phim → ${getDisplayTitle(movie)}`,
+          });
+          showToast(`🎬 Đã đổi cả phòng sang "${getDisplayTitle(movie)}"!`);
+        } catch (err) {
+          showToast(err?.message || 'Không đổi được phim');
+          btn.disabled = false;
+          btn.textContent = '▶ Đổi';
+        }
+      });
+      box.appendChild(r);
+    });
+  } catch {
+    box.innerHTML = '<div style="font-size:11px;color:#fca5a5;padding:6px;">Lỗi tìm kiếm.</div>';
+  }
+}
+
+async function playPartyQueueItem(itemId = '') {
+  const p = state.party;
+  if (!p.roomCode || !canControlParty()) return;
+  try {
+    const res = await partyQueuePlay({
+      roomCode: p.roomCode,
+      itemId,
+      nickname: p.nickname,
+      hostToken: p.hostToken,
+    });
+    if (res?.movie && res?.episode) {
+      if (Array.isArray(res.queue)) state.party.queue = res.queue;
+      await transitionPartyToMovieEpisode(res.movie, res.episode, 0);
+      renderPartyQueue();
+      renderPartyHeaderAndButton();
+    }
+  } catch (err) {
+    showToast(err?.message || 'Không thể phát phim trong hàng chờ');
+  }
+}
+
+async function transitionPartyToMovieEpisode(partyMovieMeta, partyEp, startSec = 0) {
+  state.party.lastMovieSlug = partyMovieMeta?.slug || '';
+  state.party.lastEpisodeUrl = partyEp?.link_m3u8 || '';
+  // Try hydrating full movie detail so Episodes Drawer has all episodes of the new movie!
+  let fullMovie = null;
+  if (partyMovieMeta?.slug) {
+    fullMovie = getCachedMovieDetail(partyMovieMeta.source || 'phimapi', partyMovieMeta.slug, partyMovieMeta.sourceId || '');
+    if (!fullMovie) {
+      fullMovie = await fetchCatalogDetail({
+        source: partyMovieMeta.source || 'phimapi',
+        slug: partyMovieMeta.slug,
+        sourceId: partyMovieMeta.sourceId || '',
+      }).catch(() => null);
+      if (fullMovie) setCachedMovieDetail(partyMovieMeta.source || 'phimapi', partyMovieMeta.slug, partyMovieMeta.sourceId || '', fullMovie);
+    }
+  }
+  const movieToPlay = fullMovie || {
+    ...partyMovieMeta,
+    type: 'single',
+    servers: [{ server_name: 'Watch Party Sync', episodes: [partyEp] }],
+  };
+  openPlayer(movieToPlay, partyEp, startSec, { preserveParty: true });
+}
+
+function runPartyCountdownOverlay(targetStartMs, positionSec) {
+  const overlay = $('partyCountdownOverlay');
+  const numEl = $('partyCountdownNum');
+  const video = $('videoEl');
+  if (!overlay || !numEl) return;
+  clearInterval(state.party.countdownTimer);
+  if (video) {
+    state.party.applyingRemoteSync = true;
+    video.pause();
+    if (isFinite(video.duration) && video.duration > 3) {
+      video.currentTime = Math.min(video.duration - 1, Math.max(0, positionSec));
+    }
+  }
+  overlay.style.display = 'flex';
+  const update = () => {
+    const remainMs = targetStartMs - Date.now();
+    if (remainMs <= 80) {
+      clearInterval(state.party.countdownTimer);
+      state.party.countdownTimer = null;
+      numEl.textContent = '▶';
+      setTimeout(() => { overlay.style.display = 'none'; }, 420);
+      if (video) {
+        video.playbackRate = state.speed || 1;
+        video.play().catch(() => {});
+        setTimeout(() => { state.party.applyingRemoteSync = false; }, 350);
+      }
+      return;
+    }
+    numEl.textContent = String(Math.max(1, Math.ceil(remainMs / 1000)));
+  };
+  update();
+  state.party.countdownTimer = setInterval(update, 120);
+}
+
 function pushHostPartyState(extra = {}) {
   const p = state.party;
-  if (!p.roomCode || !p.isHost || !p.hostToken || p.applyingRemoteSync) return;
+  if (!p.roomCode || !canControlParty() || p.applyingRemoteSync) return;
   const video = $('videoEl');
+  const isPlaying = typeof extra.isPlaying === 'boolean' ? extra.isPlaying : !video?.paused;
+  const positionSec = typeof extra.positionSec === 'number' ? extra.positionSec : Number(video?.currentTime || 0);
   partyControl({
     roomCode: p.roomCode,
     hostToken: p.hostToken,
-    isPlaying: typeof extra.isPlaying === 'boolean' ? extra.isPlaying : !video?.paused,
-    positionSec: typeof extra.positionSec === 'number' ? extra.positionSec : Number(video?.currentTime || 0),
-    playbackRate: Number(video?.playbackRate || 1),
+    nickname: p.nickname,
+    isPlaying,
+    positionSec,
+    playbackRate: Number(video?.playbackRate || state.speed || 1),
+    movie: extra.movie || null,
     episode: extra.episode || null,
+    countdown: Boolean(extra.countdown),
+    actionNote: extra.actionNote || '',
+  }).then((res) => {
+    if (res?.stateUpdatedAt) {
+      state.party.lastStateUpdatedAt = res.stateUpdatedAt;
+      if (extra.countdown) {
+        const localTarget = Date.now() + Math.max(0, res.stateUpdatedAt - (res.serverTime || Date.now()));
+        runPartyCountdownOverlay(localTarget, positionSec);
+      }
+    }
   }).catch(() => {});
 }
 
+function applySyncedPlaybackState(snap, rttMs = 0, { forceHardSync = false } = {}) {
+  const p = state.party;
+  const video = $('videoEl');
+  if (!video || !$('playerModal')?.classList.contains('open')) return;
+
+  // Check if room switched to a different Movie or Episode!
+  const remoteEpUrl = snap.episode?.link_m3u8 || '';
+  if (remoteEpUrl && p.lastEpisodeUrl && remoteEpUrl !== p.lastEpisodeUrl) {
+    transitionPartyToMovieEpisode(snap.movie, snap.episode, snap.positionSec || 0);
+    return;
+  }
+
+  // Only sync playback when stateUpdatedAt changed OR guest is following
+  const serverNowAdj = (snap.serverTime || Date.now()) + rttMs * 0.5;
+
+  // Check for active 3-2-1 Synchronized Countdown!
+  if (snap.stateUpdatedAt > serverNowAdj + 350) {
+    const localTargetMs = Date.now() + (snap.stateUpdatedAt - serverNowAdj);
+    if (!p.countdownTimer) {
+      runPartyCountdownOverlay(localTargetMs, snap.positionSec || 0);
+    }
+    return;
+  }
+
+  // If this client is Host & last update was from Host itself, just display synced status
+  const remoteUpdateNewer = snap.stateUpdatedAt > (p.lastStateUpdatedAt || 0);
+  if (p.isHost && !remoteUpdateNewer && !forceHardSync) {
+    setPartySyncIndicator('👑 Đang phát', 'ok');
+    return;
+  }
+  if (remoteUpdateNewer) {
+    p.lastStateUpdatedAt = snap.stateUpdatedAt;
+  }
+
+  const baseRate = Math.max(0.5, Math.min(2.0, Number(snap.playbackRate || 1)));
+  const elapsedSec = snap.isPlaying
+    ? Math.max(0, (serverNowAdj - snap.stateUpdatedAt) / 1000) * baseRate
+    : 0;
+  const expectedPos = Math.max(0, (snap.positionSec || 0) + elapsedSec);
+  const drift = expectedPos - (video.currentTime || 0);
+  const absDrift = Math.abs(drift);
+
+  p.applyingRemoteSync = true;
+  try {
+    if (snap.isPlaying && video.paused) {
+      video.play().catch(() => {});
+    } else if (!snap.isPlaying && !video.paused) {
+      video.pause();
+    }
+
+    if (isFinite(video.duration) && video.duration > 5) {
+      if (forceHardSync || absDrift > 2.2 || (!snap.isPlaying && absDrift > 0.7)) {
+        video.currentTime = Math.min(video.duration - 1, expectedPos);
+        video.playbackRate = baseRate;
+        p.softSyncActive = false;
+        setPartySyncIndicator('⚡ Đã khớp', 'ok');
+      } else if (snap.isPlaying && absDrift >= 0.45) {
+        // 3-Tier Smooth Soft-Sync: nudge speed +/-5% instead of jarring seek stutter!
+        const adjRate = drift > 0 ? Math.min(2.0, baseRate * 1.05) : Math.max(0.5, baseRate * 0.95);
+        video.playbackRate = adjRate;
+        p.softSyncActive = true;
+        setPartySyncIndicator(`🟡 Bù ${drift > 0 ? '+' : '-'}${absDrift.toFixed(1)}s`, 'adjusting');
+      } else {
+        if (p.softSyncActive || Math.abs((video.playbackRate || 1) - baseRate) > 0.04) {
+          video.playbackRate = baseRate;
+          p.softSyncActive = false;
+        }
+        setPartySyncIndicator(`🟢 Khớp ${absDrift.toFixed(1)}s`, 'ok');
+      }
+    }
+  } finally {
+    setTimeout(() => { p.applyingRemoteSync = false; }, 220);
+  }
+}
+
 function startPartyPolling() {
-  clearInterval(state.party.pollTimer);
+  clearTimeout(state.party.pollTimer);
+  const scheduleNext = () => {
+    if (!state.party.roomCode) return;
+    const delayMs = document.visibilityState === 'hidden' ? 4000 : 1400;
+    state.party.pollTimer = setTimeout(tick, delayMs);
+  };
+
   const tick = async () => {
     const p = state.party;
     if (!p.roomCode) return;
+    const video = $('videoEl');
+    const curStatus = !video ? 'paused' : (video.readyState < 3 && !video.paused ? 'buffering' : (video.paused ? 'paused' : 'playing'));
+    const t0 = performance.now();
     try {
       const data = await partyPoll({
         roomCode: p.roomCode,
         sinceMsgId: p.lastMsgId,
+        sinceReactionTs: p.lastReactionTs,
         memberId: p.memberId,
         nickname: p.nickname,
         hostToken: p.hostToken,
+        status: curStatus,
+        pos: video?.currentTime || 0,
       });
+      const rttMs = Math.min(2000, Math.max(0, performance.now() - t0));
       const snap = data?.party;
-      if (!snap) return;
+      if (!snap) {
+        scheduleNext();
+        return;
+      }
+
+      p.roomTitle = snap.roomTitle || '';
+      p.visibility = snap.visibility || 'PRIVATE';
+      p.controlMode = snap.controlMode || 'HOST_ONLY';
+      p.hasPasscode = Boolean(snap.hasPasscode);
+      p.hostName = snap.hostName || '';
+      p.hostInactive = Boolean(snap.hostInactive);
+      p.members = Array.isArray(snap.members) ? snap.members : [];
+      p.queue = Array.isArray(snap.queue) ? snap.queue : [];
 
       if ($('partyRoomBadge')) {
-        $('partyRoomBadge').textContent = `🍿 ${snap.roomCode} • ${snap.viewerCount} watching`;
+        $('partyRoomBadge').textContent = `🍿 ${snap.roomCode} • ${snap.viewerCount}`;
       }
       if ($('partyRoleSub')) {
-        $('partyRoleSub').textContent = p.isHost
-          ? `You are HOST (${snap.hostName}) • Controls synced`
-          : `Hosted by ${snap.hostName} • Auto-synced`;
+        const modeTxt = snap.controlMode === 'EVERYONE' ? '🤝 Ai cũng điều khiển' : `👑 ${snap.hostName}`;
+        $('partyRoleSub').textContent = `${snap.roomTitle || snap.movie?.name || 'Xem chung'} • ${modeTxt}`;
       }
+      renderPartyHeaderAndButton();
+      if (p.activeSideTab === 'queue') renderPartyQueue();
+      if (p.activeSideTab === 'room') renderPartyRoomTab();
+
       appendPartyMessages(snap.messages || []);
 
-      // Guest playback synchronization (follow Host Play/Pause/Seek & Episode changes!)
-      if (!p.isHost && $('playerModal')?.classList.contains('open')) {
-        const video = $('videoEl');
-        if (snap.episode?.link_m3u8 && p.lastEpisodeUrl && snap.episode.link_m3u8 !== p.lastEpisodeUrl) {
-          p.lastEpisodeUrl = snap.episode.link_m3u8;
-          openPlayer(state.currentMovie || snap.movie, snap.episode, snap.positionSec || 0, { preserveParty: true });
-          return;
-        }
-        if (video) {
-          const elapsedSec = snap.isPlaying
-            ? Math.max(0, (snap.serverTime - snap.stateUpdatedAt) / 1000) * (snap.playbackRate || 1)
-            : 0;
-          const expectedPos = Math.max(0, (snap.positionSec || 0) + elapsedSec);
-          p.applyingRemoteSync = true;
-          try {
-            if (Math.abs((video.playbackRate || 1) - (snap.playbackRate || 1)) > 0.05) {
-              video.playbackRate = snap.playbackRate || 1;
+      // Render new floating emoji reactions
+      if (Array.isArray(snap.reactions) && snap.reactions.length) {
+        for (const r of snap.reactions) {
+          if (r.createdAt > p.lastReactionTs) {
+            p.lastReactionTs = r.createdAt;
+            if (r.senderName !== p.nickname || Date.now() - r.createdAt > 1200) {
+              spawnFloatingEmoji(r.emoji, r.senderName);
             }
-            if (isFinite(video.duration) && video.duration > 5 && Math.abs((video.currentTime || 0) - expectedPos) > 1.8) {
-              video.currentTime = Math.min(video.duration - 1, expectedPos);
-            }
-            if (snap.isPlaying && video.paused) {
-              video.play().catch(() => {});
-            } else if (!snap.isPlaying && !video.paused) {
-              video.pause();
-            }
-          } finally {
-            setTimeout(() => { p.applyingRemoteSync = false; }, 250);
           }
         }
       }
+
+      // Show live activity pill when someone seeks/switches/counts down
+      if (snap.lastActionText && snap.lastActionAt > (p.lastActionAt || 0)) {
+        p.lastActionAt = snap.lastActionAt;
+        showPartyActionPill(snap.lastActionText);
+      }
+
+      applySyncedPlaybackState(snap, rttMs);
     } catch (err) {
       if (err?.status === 404) {
-        showToast('Watch Party room ended or expired');
+        showToast('Phòng xem chung đã kết thúc hoặc hết hạn');
         leaveWatchParty(true);
+        return;
       }
+      setPartySyncIndicator('⚠️ Mạng chậm', 'lag');
     }
+    scheduleNext();
   };
-  state.party.pollTimer = setInterval(tick, 2200);
+  scheduleNext();
+}
+
+async function sendPartyReaction(emoji) {
+  const p = state.party;
+  if (!p.roomCode || !emoji) return;
+  spawnFloatingEmoji(emoji, p.nickname);
+  try {
+    const res = await partyReact({ roomCode: p.roomCode, emoji, nickname: p.nickname });
+    if (res?.reaction?.createdAt) {
+      p.lastReactionTs = Math.max(p.lastReactionTs, res.reaction.createdAt);
+    }
+  } catch { /* ignore */ }
+}
+
+async function sharePartyInvite() {
+  const p = state.party;
+  if (!p.roomCode) return;
+  const shareUrl = `${window.location.origin}/?party=${p.roomCode}`;
+  const title = `🍿 Xem chung "${p.roomTitle || state.currentMovie?.name || 'ChillFilm'}"`;
+  const text = `Vào phòng Xem Chung mã ${p.roomCode} trên ChillFilm NKI cùng ${p.nickname}!`;
+  if (navigator.share) {
+    try {
+      await navigator.share({ title, text, url: shareUrl });
+      return;
+    } catch { /* fallback to clipboard */ }
+  }
+  navigator.clipboard?.writeText(shareUrl).catch(() => {});
+  showToast(`📋 Đã copy link mời phòng ${p.roomCode}!`);
+}
+
+function hydratePartyFromCreateOrJoin(res, { isHost = false, hostToken = '', nickname = '' } = {}) {
+  const snap = res.party;
+  state.party = {
+    ...state.party,
+    roomCode: snap.roomCode,
+    roomTitle: snap.roomTitle || '',
+    visibility: snap.visibility || 'PRIVATE',
+    controlMode: snap.controlMode || 'HOST_ONLY',
+    hasPasscode: Boolean(snap.hasPasscode),
+    hostToken: hostToken || '',
+    hostName: snap.hostName || nickname,
+    hostInactive: false,
+    memberId: res.memberId,
+    nickname,
+    isHost,
+    pollTimer: null,
+    lastMsgId: 0,
+    lastReactionTs: Date.now(),
+    lastActionAt: snap.lastActionAt || Date.now(),
+    lastStateUpdatedAt: snap.stateUpdatedAt || Date.now(),
+    chatVisible: true,
+    activeSideTab: 'chat',
+    applyingRemoteSync: false,
+    softSyncActive: false,
+    lastMovieSlug: snap.movie?.slug || '',
+    lastEpisodeUrl: snap.episode?.link_m3u8 || '',
+    queue: Array.isArray(snap.queue) ? snap.queue : [],
+    members: Array.isArray(snap.members) ? snap.members : [],
+  };
+  savePartySessionStorage();
+  if ($('partyMessagesList')) $('partyMessagesList').innerHTML = '';
+  appendPartyMessages(snap.messages || []);
+  if ($('partyRoomBadge')) $('partyRoomBadge').textContent = `🍿 ${snap.roomCode} • ${snap.viewerCount || 1}`;
+  if ($('partyRoleSub')) {
+    const modeTxt = snap.controlMode === 'EVERYONE' ? '🤝 Ai cũng điều khiển' : `👑 ${snap.hostName}`;
+    $('partyRoleSub').textContent = `${snap.roomTitle || snap.movie?.name || 'Xem chung'} • ${modeTxt}`;
+  }
+  setPartySideTab('chat');
+  renderPartyHeaderAndButton();
+  renderPartyRoomTab();
+  renderPartyQueue();
+  startPartyPolling();
+}
+
+async function createWatchPartyFromHub() {
+  const movie = state.party.createPickedMovie || state.currentMovie;
+  const episode = state.party.createPickedEpisode || state.currentEpisode;
+  if (!movie || !episode?.link_m3u8) {
+    showToast('Hãy tìm và chọn 1 bộ phim bên trên trước khi tạo phòng!');
+    return;
+  }
+  const nickname = ($('partyNickInput')?.value || getDefaultPartyNick()).trim() || 'Host';
+  try { localStorage.setItem('chillfilm_nki_party_nick_v1', nickname); } catch { /* ignore */ }
+  const roomTitle = ($('partyCreateTitleInput')?.value || '').trim();
+  const visibility = $('partyCreateVisSelect')?.value || 'PRIVATE';
+  const controlMode = $('partyCreateControlSelect')?.value || 'EVERYONE';
+  const passcode = ($('partyCreatePassInput')?.value || '').trim();
+  const isAlreadyPlayingThis = $('playerModal')?.classList.contains('open') && state.currentEpisode?.link_m3u8 === episode.link_m3u8;
+  const video = $('videoEl');
+  const startPos = isAlreadyPlayingThis ? Number(video?.currentTime || 0) : 0;
+
+  const btn = $('partyCreateSubmitBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Đang mở phòng...'; }
+  try {
+    const res = await partyCreate({
+      movie: {
+        slug: movie.slug,
+        source: movie.source || 'phimapi',
+        sourceId: movie.sourceId || '',
+        name: getDisplayTitle(movie),
+        poster: movie.poster || '',
+        year: movie.year || '',
+      },
+      episode: {
+        name: episode.name || 'Full',
+        slug: episode.slug || 'full',
+        link_m3u8: episode.link_m3u8,
+      },
+      nickname,
+      roomTitle,
+      visibility,
+      controlMode,
+      passcode,
+      positionSec: startPos,
+      isPlaying: isAlreadyPlayingThis ? !video?.paused : true,
+    });
+    $('partyModal')?.classList.remove('open');
+    if ($('partyCreatePassInput')) $('partyCreatePassInput').value = '';
+    if (!isAlreadyPlayingThis) {
+      openPlayer(movie, episode, 0, { preserveParty: true });
+    }
+    hydratePartyFromCreateOrJoin(res, { isHost: true, hostToken: res.hostToken, nickname });
+    const shareUrl = `${window.location.origin}/?party=${res.roomCode}`;
+    navigator.clipboard?.writeText(shareUrl).catch(() => {});
+    showToast(`🍿 Đã mở phòng ${res.roomCode} & copy link mời!`);
+  } catch (err) {
+    showToast(`Không tạo được phòng: ${err?.message || 'error'}`);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '✨ Tạo Phòng & Mời Bạn Bè'; }
+  }
 }
 
 async function createWatchPartyForCurrent() {
   if (!state.currentMovie || !state.currentEpisode) {
-    showToast('Open a movie first to host a Watch Party!');
+    openPartyHubModal('create');
     return;
   }
-  const nickname = getDefaultPartyNick();
-  const video = $('videoEl');
+  openPartyHubModal('create', { movie: state.currentMovie, episode: state.currentEpisode });
+}
+
+async function joinWatchPartyByCode(rawCode, rawNick = '', { passcode = '', hostToken = '', memberId = '', silentRejoin = false } = {}) {
+  const roomCode = String(rawCode || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (roomCode.length < 4) return showToast('Vui lòng nhập mã phòng 6 ký tự hợp lệ');
+  const nickname = String(rawNick || getDefaultPartyNick()).trim() || 'Khách';
+  try { localStorage.setItem('chillfilm_nki_party_nick_v1', nickname); } catch { /* ignore */ }
+
   try {
-    showToast('🍿 Creating Watch Party room...');
-    const res = await partyCreate({
-      movie: {
-        slug: state.currentMovie.slug,
-        source: state.currentMovie.source || 'phimapi',
-        sourceId: state.currentMovie.sourceId || '',
-        name: getDisplayTitle(state.currentMovie),
-        poster: state.currentMovie.poster || '',
-        year: state.currentMovie.year || '',
-      },
-      episode: {
-        name: state.currentEpisode.name || 'Full',
-        slug: state.currentEpisode.slug || 'full',
-        link_m3u8: state.currentEpisode.link_m3u8,
-      },
+    if (!silentRejoin) showToast(`🍿 Đang vào phòng ${roomCode}...`);
+    const res = await partyJoin({ roomCode, nickname, memberId, passcode, hostToken, silentRejoin });
+    const snap = res.party;
+    if (!snap?.movie?.slug || !snap?.episode?.link_m3u8) {
+      throw new Error('Phòng chưa có luồng phim');
+    }
+    $('partyModal')?.classList.remove('open');
+    if ($('partyJoinPassInput')) $('partyJoinPassInput').value = '';
+
+    const elapsedSec = snap.isPlaying ? Math.max(0, (snap.serverTime - snap.stateUpdatedAt) / 1000) * (snap.playbackRate || 1) : 0;
+    const startSec = Math.max(0, (snap.positionSec || 0) + elapsedSec);
+    await transitionPartyToMovieEpisode(snap.movie, snap.episode, startSec);
+    hydratePartyFromCreateOrJoin(res, {
+      isHost: Boolean(res.isHost),
+      hostToken: res.isHost ? hostToken : '',
       nickname,
-      positionSec: Number(video?.currentTime || 0),
-      isPlaying: !video?.paused,
     });
-    state.party = {
-      roomCode: res.roomCode,
-      hostToken: res.hostToken,
-      memberId: res.memberId,
-      nickname,
-      isHost: true,
-      pollTimer: null,
-      lastMsgId: 0,
-      chatVisible: true,
-      applyingRemoteSync: false,
-      lastEpisodeUrl: state.currentEpisode.link_m3u8,
-    };
-    if ($('partyMessagesList')) $('partyMessagesList').innerHTML = '';
-    appendPartyMessages(res.party?.messages || []);
-    if ($('partyRoomBadge')) $('partyRoomBadge').textContent = `🍿 ${res.roomCode} • 1 watching`;
-    if ($('partyRoleSub')) $('partyRoleSub').textContent = `You are HOST (${nickname}) • Controls synced`;
-    renderPartyHeaderAndButton();
-    startPartyPolling();
-    const shareUrl = `${window.location.origin}/?party=${res.roomCode}`;
-    navigator.clipboard?.writeText(shareUrl).catch(() => {});
-    showToast(`🍿 Room ${res.roomCode} created & invite link copied!`);
+    if (!silentRejoin) showToast(`🍿 Đã vào phòng của ${snap.hostName}!`);
+    return true;
   } catch (err) {
-    showToast(`Watch Party failed: ${err?.message || 'error'}`);
+    if (err?.data?.needPasscode) {
+      openPartyHubModal('join', { prefillCode: roomCode });
+      $('partyJoinPassInput')?.focus();
+      showToast('🔒 Phòng này yêu cầu mật khẩu — hãy nhập mật khẩu để vào!');
+      return false;
+    }
+    if (!silentRejoin) showToast(err?.message || 'Không thể vào phòng Xem chung');
+    else clearPartySessionOnError();
+    return false;
   }
 }
 
-async function joinWatchPartyByCode(rawCode, rawNick = '') {
-  const roomCode = String(rawCode || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-  if (roomCode.length < 4) return showToast('Enter a valid 6-character room code');
-  const nickname = String(rawNick || getDefaultPartyNick()).trim() || 'Guest';
-  try {
-    localStorage.setItem('chillfilm_nki_party_nick_v1', nickname);
-  } catch { /* ignore */ }
-
-  try {
-    showToast(`🍿 Joining Watch Party ${roomCode}...`);
-    const res = await partyJoin({ roomCode, nickname });
-    const snap = res.party;
-    if (!snap?.movie?.slug || !snap?.episode?.link_m3u8) {
-      throw new Error('Room has no active video');
-    }
-    $('partyModal')?.classList.remove('open');
-
-    state.party = {
-      roomCode: snap.roomCode,
-      hostToken: '',
-      memberId: res.memberId,
-      nickname,
-      isHost: false,
-      pollTimer: null,
-      lastMsgId: 0,
-      chatVisible: true,
-      applyingRemoteSync: false,
-      lastEpisodeUrl: snap.episode.link_m3u8,
-    };
-    if ($('partyMessagesList')) $('partyMessagesList').innerHTML = '';
-    appendPartyMessages(snap.messages || []);
-    if ($('partyRoomBadge')) $('partyRoomBadge').textContent = `🍿 ${snap.roomCode} • ${snap.viewerCount} watching`;
-    if ($('partyRoleSub')) $('partyRoleSub').textContent = `Hosted by ${snap.hostName} • Auto-synced`;
-
-    const elapsedSec = snap.isPlaying ? Math.max(0, (snap.serverTime - snap.stateUpdatedAt) / 1000) : 0;
-    const startSec = Math.max(0, (snap.positionSec || 0) + elapsedSec);
-    const partyMovie = {
-      ...snap.movie,
-      type: 'single',
-      servers: [{ server_name: 'Watch Party Sync', episodes: [snap.episode] }],
-    };
-    openPlayer(partyMovie, snap.episode, startSec, { preserveParty: true });
-    renderPartyHeaderAndButton();
-    startPartyPolling();
-    showToast(`🍿 Joined ${snap.hostName}'s Watch Party!`);
-  } catch (err) {
-    showToast(err?.message || 'Could not join Watch Party');
-  }
+function clearPartySessionOnError() {
+  try { sessionStorage.removeItem(PARTY_SESSION_KEY); } catch { /* ignore */ }
 }
 
 function leaveWatchParty(silent = false) {
   const p = state.party;
-  clearInterval(p.pollTimer);
+  clearTimeout(p.pollTimer);
+  clearInterval(p.countdownTimer);
+  if ($('partyCountdownOverlay')) $('partyCountdownOverlay').style.display = 'none';
+  if (p.softSyncActive) {
+    const v = $('videoEl');
+    if (v) v.playbackRate = state.prefs.playbackRate || 1;
+  }
   if (p.roomCode && p.memberId) {
     partyLeave({ roomCode: p.roomCode, memberId: p.memberId }).catch(() => {});
   }
   state.party = {
+    ...state.party,
     roomCode: '',
+    roomTitle: '',
+    visibility: 'PRIVATE',
+    controlMode: 'HOST_ONLY',
+    hasPasscode: false,
     hostToken: '',
+    hostName: '',
+    hostInactive: false,
     memberId: '',
     nickname: '',
     isHost: false,
     pollTimer: null,
     lastMsgId: 0,
+    lastReactionTs: 0,
+    lastActionAt: 0,
+    lastStateUpdatedAt: 0,
     chatVisible: false,
     applyingRemoteSync: false,
+    softSyncActive: false,
+    lastMovieSlug: '',
     lastEpisodeUrl: '',
+    queue: [],
+    members: [],
+    countdownTimer: null,
   };
+  savePartySessionStorage();
   renderPartyHeaderAndButton();
-  if (!silent) showToast('Left Watch Party');
+  if (!silent) showToast('🚪 Đã rời phòng Xem chung');
 }
 
 async function sendPartyChatMsg() {
@@ -4726,14 +5364,163 @@ async function sendPartyChatMsg() {
     });
     if (res?.message) appendPartyMessages([res.message]);
   } catch (err) {
-    showToast(err?.message || 'Failed to send message');
+    showToast(err?.message || 'Gửi tin nhắn thất bại');
   }
 }
 
-function openPartyJoinModal(prefillCode = '') {
+function renderPartyCreatePickedMovie() {
+  const box = $('partyCreatePickedMovie');
+  if (!box) return;
+  const m = state.party.createPickedMovie;
+  const ep = state.party.createPickedEpisode;
+  if (!m) {
+    box.innerHTML = '<span style="font-size:12px;color:#9ca3af;">Chưa chọn phim — tìm nhanh bên dưới hoặc mở sẵn 1 bộ phim</span>';
+    return;
+  }
+  box.innerHTML = `
+    <img src="${escapeHtml(m.poster || './assets/icon-192.png?v=2')}" alt="" onerror="this.src='./assets/icon-192.png?v=2'" />
+    <div style="min-width:0;flex:1;">
+      <div style="font-size:13px;font-weight:800;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(getDisplayTitle(m))}</div>
+      <div style="font-size:11px;color:#86efac;">${escapeHtml(ep?.name || 'Full')} • ${escapeHtml(m.year || 'HD')}</div>
+    </div>
+  `;
+}
+
+async function loadPartyLobby() {
+  const listEl = $('partyLobbyList');
+  if (!listEl) return;
+  listEl.innerHTML = '<div class="party-empty-hint">⏳ Đang tải Sảnh Xem Chung công khai...</div>';
+  try {
+    const res = await partyListLobby();
+    const rooms = Array.isArray(res?.rooms) ? res.rooms : [];
+    if (!rooms.length) {
+      listEl.innerHTML = `
+        <div class="party-empty-hint">
+          Hiện chưa có phòng công khai nào đang mở.<br>
+          Bấm tab <strong>✨ Tạo Phòng Mới</strong> rồi chọn chế độ <strong>🌐 Công khai</strong> để rủ mọi người cùng xem!
+        </div>
+      `;
+      return;
+    }
+    listEl.innerHTML = '';
+    rooms.forEach((rm) => {
+      const card = document.createElement('div');
+      card.className = 'party-lobby-card';
+      card.innerHTML = `
+        <img src="${escapeHtml(rm.movie?.poster || './assets/icon-192.png?v=2')}" alt="" onerror="this.src='./assets/icon-192.png?v=2'" />
+        <div style="min-width:0;flex:1;">
+          <div style="font-size:13px;font-weight:800;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(rm.roomTitle || rm.movie?.name || rm.roomCode)}</div>
+          <div style="font-size:11px;color:#cbd5e1;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">🎬 ${escapeHtml(rm.movie?.name || '')} • ${escapeHtml(rm.episodeName || 'Full')}</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;font-size:10.5px;color:#86efac;font-weight:700;">
+            <span>👁️ ${rm.viewerCount} đang xem</span>
+            <span>• 👑 ${escapeHtml(rm.hostName)}</span>
+            ${rm.controlMode === 'EVERYONE' ? '<span>• 🤝 Chung quyền</span>' : ''}
+            ${rm.hasPasscode ? '<span style="color:#fde68a;">• 🔒 Có mật khẩu</span>' : ''}
+          </div>
+        </div>
+        <button class="btn-grad" type="button" style="padding:7px 11px;font-size:11.5px;white-space:nowrap;">▶ Vào</button>
+      `;
+      card.querySelector('button').onclick = () => {
+        const nick = $('partyNickInput')?.value || getDefaultPartyNick();
+        if (rm.hasPasscode) {
+          openPartyHubModal('join', { prefillCode: rm.roomCode });
+          $('partyJoinPassInput')?.focus();
+          showToast('🔒 Nhập mật khẩu để vào phòng này');
+        } else {
+          joinWatchPartyByCode(rm.roomCode, nick);
+        }
+      };
+      listEl.appendChild(card);
+    });
+  } catch {
+    listEl.innerHTML = '<div class="party-empty-hint">Không tải được Sảnh công khai — hãy thử làm mới!</div>';
+  }
+}
+
+async function searchMoviesForCreateParty() {
+  const input = $('partyCreateSearchInput');
+  const box = $('partyCreateSearchResults');
+  const q = (input?.value || '').trim();
+  if (!box || q.length < 2) {
+    if (box) box.style.display = 'none';
+    return;
+  }
+  box.style.display = 'flex';
+  box.innerHTML = '<div style="font-size:11px;color:#9ca3af;padding:6px;">⏳ Đang tìm...</div>';
+  try {
+    const data = await fetchCatalogBrowse({ q, limit: 6, fast: 1 });
+    const items = Array.isArray(data?.items) ? data.items : [];
+    if (!items.length) {
+      box.innerHTML = '<div style="font-size:11px;color:#9ca3af;padding:6px;">Không tìm thấy phim phù hợp.</div>';
+      return;
+    }
+    box.innerHTML = '';
+    items.slice(0, 5).forEach((m) => {
+      const r = document.createElement('div');
+      r.className = 'party-qsearch-row';
+      r.innerHTML = `
+        <img src="${escapeHtml(m.poster || './assets/icon-192.png?v=2')}" alt="" onerror="this.src='./assets/icon-192.png?v=2'" />
+        <div style="min-width:0;flex:1;">
+          <div style="font-size:12px;font-weight:800;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(getDisplayTitle(m))}</div>
+          <div style="font-size:10.5px;color:#9ca3af;">${escapeHtml(m.year || '')} • ${escapeHtml(m.episode_current || m.quality || 'HD')}</div>
+        </div>
+        <button class="btn-grad" type="button" style="padding:4px 9px;font-size:11px;">Chọn</button>
+      `;
+      r.querySelector('button').onclick = async (ev) => {
+        const b = ev.currentTarget;
+        b.disabled = true;
+        b.textContent = '...';
+        try {
+          const { movie, episode } = await resolveFirstEpisodeForPartyMovie(m);
+          state.party.createPickedMovie = movie;
+          state.party.createPickedEpisode = episode;
+          renderPartyCreatePickedMovie();
+          if ($('partyCreateTitleInput') && !$('partyCreateTitleInput').value.trim()) {
+            $('partyCreateTitleInput').value = getDisplayTitle(movie);
+          }
+          box.style.display = 'none';
+        } catch (err) {
+          showToast(err?.message || 'Không lấy được luồng phát phim này');
+          b.disabled = false;
+          b.textContent = 'Chọn';
+        }
+      };
+      box.appendChild(r);
+    });
+  } catch {
+    box.innerHTML = '<div style="font-size:11px;color:#fca5a5;padding:6px;">Lỗi tìm kiếm.</div>';
+  }
+}
+
+function switchPartyHubTab(tabName) {
+  const clean = ['lobby', 'join', 'create'].includes(tabName) ? tabName : 'lobby';
+  document.querySelectorAll('#partyHubTabs [data-hub-tab]').forEach((b) => {
+    b.classList.toggle('active', b.dataset.hubTab === clean);
+  });
+  $('partyHubLobby')?.classList.toggle('active', clean === 'lobby');
+  $('partyHubJoin')?.classList.toggle('active', clean === 'join');
+  $('partyHubCreate')?.classList.toggle('active', clean === 'create');
+  if (clean === 'lobby') loadPartyLobby();
+  if (clean === 'create') renderPartyCreatePickedMovie();
+}
+
+function openPartyHubModal(tab = 'lobby', { prefillCode = '', movie = null, episode = null } = {}) {
   if ($('partyNickInput')) $('partyNickInput').value = getDefaultPartyNick();
-  if ($('partyCodeInput')) $('partyCodeInput').value = String(prefillCode || '').toUpperCase();
+  if (prefillCode && $('partyCodeInput')) $('partyCodeInput').value = String(prefillCode).toUpperCase();
+  if (movie && episode) {
+    state.party.createPickedMovie = movie;
+    state.party.createPickedEpisode = episode;
+    if ($('partyCreateTitleInput')) $('partyCreateTitleInput').value = getDisplayTitle(movie);
+  } else if (!state.party.createPickedMovie && state.currentMovie && state.currentEpisode) {
+    state.party.createPickedMovie = state.currentMovie;
+    state.party.createPickedEpisode = state.currentEpisode;
+  }
+  switchPartyHubTab(prefillCode ? 'join' : tab);
   $('partyModal')?.classList.add('open');
+}
+
+function openPartyJoinModal(prefillCode = '') {
+  openPartyHubModal(prefillCode ? 'join' : 'lobby', { prefillCode });
 }
 
 function openPlayer(movie, episode, startSec = 0, { preserveFailover = false, preserveParty = false } = {}) {
@@ -4771,9 +5558,26 @@ function openPlayer(movie, episode, startSec = 0, { preserveFailover = false, pr
   }
   renderPlayerDrawer();
   updateMediaSession(movie, episode);
-  if (state.party.roomCode && state.party.isHost && !preserveParty) {
+  if (state.party.roomCode && canControlParty() && !preserveParty) {
+    state.party.lastMovieSlug = movie.slug;
     state.party.lastEpisodeUrl = episode.link_m3u8;
-    pushHostPartyState({ positionSec: startSec, isPlaying: true, episode });
+    pushHostPartyState({
+      positionSec: startSec,
+      isPlaying: true,
+      movie: {
+        slug: movie.slug,
+        source: movie.source || 'phimapi',
+        sourceId: movie.sourceId || '',
+        name: getDisplayTitle(movie),
+        poster: movie.poster || '',
+        year: movie.year || '',
+      },
+      episode: {
+        name: episode.name || 'Full',
+        slug: episode.slug || 'full',
+        link_m3u8: episode.link_m3u8,
+      },
+    });
   }
   renderPartyHeaderAndButton();
 
@@ -4943,6 +5747,7 @@ function minimizePlayer(e) {
   document.documentElement.style.overflow = '';
   document.body.style.overflow = '';
   syncPlayIcons($('videoEl').paused);
+  renderPartyHeaderAndButton();
   if ($('detailView')?.classList.contains('active') && state.currentMovie) {
     syncBrowserUrl({ movie: state.currentMovie, playing: false }, { push: false });
   } else {
@@ -4961,6 +5766,7 @@ function restorePlayer(e) {
   modal.classList.remove('minimized');
   document.documentElement.style.overflow = 'hidden';
   document.body.style.overflow = 'hidden';
+  renderPartyHeaderAndButton();
   setControlsVisible(true);
 }
 
@@ -6616,7 +7422,7 @@ function init() {
   });
 
   $('openCloudBtn')?.addEventListener('click', openSettingsModal);
-  $('openPartyBtn')?.addEventListener('click', () => openPartyJoinModal(''));
+  $('openPartyBtn')?.addEventListener('click', () => openPartyHubModal('lobby'));
   $('hudPartyBtn')?.addEventListener('click', () => {
     if (state.party.roomCode) {
       state.party.chatVisible = !state.party.chatVisible;
@@ -6625,17 +7431,121 @@ function init() {
       createWatchPartyForCurrent();
     }
   });
+  document.querySelectorAll('#partyHubTabs [data-hub-tab]').forEach((btn) => {
+    btn.addEventListener('click', () => switchPartyHubTab(btn.dataset.hubTab));
+  });
+  document.querySelectorAll('#partySideTabs [data-ptab]').forEach((btn) => {
+    btn.addEventListener('click', () => setPartySideTab(btn.dataset.ptab));
+  });
+  $('partyRefreshLobbyBtn')?.addEventListener('click', loadPartyLobby);
+  $('partyCreateSearchBtn')?.addEventListener('click', searchMoviesForCreateParty);
+  $('partyCreateSearchInput')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') searchMoviesForCreateParty();
+  });
+  $('partyCreateSubmitBtn')?.addEventListener('click', createWatchPartyFromHub);
   $('partyJoinSubmitBtn')?.addEventListener('click', () => {
-    joinWatchPartyByCode($('partyCodeInput')?.value, $('partyNickInput')?.value);
+    joinWatchPartyByCode($('partyCodeInput')?.value, $('partyNickInput')?.value, {
+      passcode: $('partyJoinPassInput')?.value || '',
+    });
   });
   $('partyCodeInput')?.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') joinWatchPartyByCode($('partyCodeInput')?.value, $('partyNickInput')?.value);
+    if (e.key === 'Enter') {
+      joinWatchPartyByCode($('partyCodeInput')?.value, $('partyNickInput')?.value, {
+        passcode: $('partyJoinPassInput')?.value || '',
+      });
+    }
   });
-  $('partyCopyLinkBtn')?.addEventListener('click', () => {
-    if (!state.party.roomCode) return;
-    const shareUrl = `${window.location.origin}/?party=${state.party.roomCode}`;
-    navigator.clipboard?.writeText(shareUrl).catch(() => {});
-    showToast(`📋 Copied Watch Party link (${state.party.roomCode})!`);
+  $('partyJoinPassInput')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      joinWatchPartyByCode($('partyCodeInput')?.value, $('partyNickInput')?.value, {
+        passcode: $('partyJoinPassInput')?.value || '',
+      });
+    }
+  });
+  $('partyCopyLinkBtn')?.addEventListener('click', sharePartyInvite);
+  $('partyShareInviteBtn')?.addEventListener('click', sharePartyInvite);
+  $('partySplitToggleBtn')?.addEventListener('click', () => {
+    state.party.splitMode = !state.party.splitMode;
+    applyPartySplitLayout();
+    showToast(state.party.splitMode ? '🖥️ Chế độ Rạp chia đôi' : '🪟 Chế độ Khung nổi');
+  });
+  $('partyResyncBtn')?.addEventListener('click', async () => {
+    const p = state.party;
+    if (!p.roomCode) return;
+    setPartySyncIndicator('🔄 Đang khớp...', 'adjusting');
+    const t0 = performance.now();
+    try {
+      const data = await partyPoll({
+        roomCode: p.roomCode,
+        sinceMsgId: p.lastMsgId,
+        sinceReactionTs: p.lastReactionTs,
+        memberId: p.memberId,
+        nickname: p.nickname,
+        hostToken: p.hostToken,
+      });
+      if (data?.party) applySyncedPlaybackState(data.party, performance.now() - t0, { forceHardSync: true });
+      showToast('⚡ Đã đồng bộ chính xác với phòng!');
+    } catch { /* ignore */ }
+  });
+  $('partyCountdownBtn')?.addEventListener('click', () => {
+    if (!canControlParty()) return showToast('Chỉ Chủ phòng mới có quyền đếm ngược');
+    const video = $('videoEl');
+    pushHostPartyState({
+      countdown: true,
+      isPlaying: true,
+      positionSec: Number(video?.currentTime || 0),
+    });
+  });
+  $('partyToggleControlModeBtn')?.addEventListener('click', async () => {
+    const p = state.party;
+    if (!p.isHost || !p.hostToken) return;
+    const next = p.controlMode === 'EVERYONE' ? 'HOST_ONLY' : 'EVERYONE';
+    try {
+      await partyUpdateSettings({ roomCode: p.roomCode, hostToken: p.hostToken, controlMode: next });
+      p.controlMode = next;
+      renderPartyRoomTab();
+      showToast(next === 'EVERYONE' ? '🤝 Mọi người trong phòng đều điều khiển được!' : '👑 Chỉ Chủ phòng điều khiển');
+    } catch (err) {
+      showToast(err?.message || 'Lỗi cập nhật quyền');
+    }
+  });
+  $('partyToggleVisibilityBtn')?.addEventListener('click', async () => {
+    const p = state.party;
+    if (!p.isHost || !p.hostToken) return;
+    const next = p.visibility === 'PUBLIC' ? 'PRIVATE' : 'PUBLIC';
+    try {
+      await partyUpdateSettings({ roomCode: p.roomCode, hostToken: p.hostToken, visibility: next });
+      p.visibility = next;
+      renderPartyRoomTab();
+      showToast(next === 'PUBLIC' ? '🌐 Phòng đã hiện trên Sảnh Công Khai!' : '🔒 Phòng đã chuyển sang Riêng tư');
+    } catch (err) {
+      showToast(err?.message || 'Lỗi cập nhật chế độ phòng');
+    }
+  });
+  $('partyClaimHostBtn')?.addEventListener('click', async () => {
+    const p = state.party;
+    if (!p.roomCode) return;
+    try {
+      const res = await partyClaimHost({ roomCode: p.roomCode, memberId: p.memberId, nickname: p.nickname });
+      if (res?.hostToken) {
+        p.isHost = true;
+        p.hostToken = res.hostToken;
+        p.hostInactive = false;
+        p.hostName = p.nickname;
+        savePartySessionStorage();
+        renderPartyRoomTab();
+        showToast('👑 Bạn đã tiếp quản quyền Chủ phòng!');
+      }
+    } catch (err) {
+      showToast(err?.message || 'Không thể tiếp quản lúc này');
+    }
+  });
+  $('partyQueueSearchBtn')?.addEventListener('click', searchMoviesForPartyQueue);
+  $('partyQueueSearchInput')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') searchMoviesForPartyQueue();
+  });
+  document.querySelectorAll('#partyReactBar [data-react]').forEach((btn) => {
+    btn.addEventListener('click', () => sendPartyReaction(btn.dataset.react));
   });
   $('partyHideChatBtn')?.addEventListener('click', () => {
     state.party.chatVisible = false;
@@ -6974,7 +7884,7 @@ function init() {
     syncPlayIcons(false);
     clearStallWatchdog();
     setControlsVisible(true, 1600);
-    pushHostPartyState({ isPlaying: true });
+    pushHostPartyState({ isPlaying: true, actionNote: `▶ ${state.party.nickname} tiếp tục phát` });
     if (state.prefs.ambientGlow) startAmbientGlowLoop();
   });
   video.addEventListener('playing', () => {
@@ -6994,6 +7904,11 @@ function init() {
     if (state.currentMovie && state.currentEpisode) {
       markEpisodeWatched(state.currentMovie.slug, state.currentEpisode);
     }
+    // If inside a Watch Party with queued Up Next movies, automatically advance the room to the top-voted queued movie!
+    if (state.party.roomCode && canControlParty() && state.party.queue?.length > 0) {
+      playPartyQueueItem(state.party.queue[0].id);
+      return;
+    }
     const nextEp = getNextEpisode();
     if (nextEp && !state.autoNextCancelled) {
       startAutoNextCountdown(nextEp, 5);
@@ -7002,7 +7917,7 @@ function init() {
   video.addEventListener('seeked', () => {
     const pos = video.currentTime || 0;
     stopTtsSpeech();
-    pushHostPartyState({ positionSec: pos });
+    pushHostPartyState({ positionSec: pos, actionNote: `⏩ ${state.party.nickname} tua tới ${formatTime(pos)}` });
     maybeRefillHlsLookahead(pos, { forceJump: true });
     if (state.audioSubActive && state.audioSubRecorder?.state === 'recording') {
       // Restart rolling 8s live audio fallback cleanly at the new seeked timestamp
@@ -7015,7 +7930,7 @@ function init() {
     stopTtsSpeech();
     persistCurrentPlaybackProgress({ immediate: true });
     setControlsVisible(true);
-    pushHostPartyState({ isPlaying: false });
+    pushHostPartyState({ isPlaying: false, actionNote: `⏸️ ${state.party.nickname} tạm dừng ở ${formatTime(video.currentTime || 0)}` });
   });
   video.addEventListener('timeupdate', () => {
     const cur = video.currentTime || 0;
@@ -7708,17 +8623,9 @@ function init() {
       savePrefs();
       showToast(`📲 Đã ghép đôi QR với Smart TV (${state.prefs.tvIp}) thành công!`);
     }
-    const inviteRoom = params.get('party');
-    if (inviteRoom && inviteRoom.trim().length >= 4) {
-      const code = inviteRoom.trim().toUpperCase();
-      if (isCloudSignedIn()) {
-        joinWatchPartyByCode(code, getDefaultPartyNick());
-      } else {
-        openPartyJoinModal(code);
-      }
-    }
     const movieParam = (params.get('movie') || '').trim();
-    if (movieParam) {
+    const openDeepLinkMovie = () => {
+      if (!movieParam) return;
       const colonIdx = movieParam.indexOf(':');
       const source = colonIdx > 0 ? movieParam.slice(0, colonIdx) : 'phimapi';
       const slug = colonIdx > 0 ? movieParam.slice(colonIdx + 1) : movieParam;
@@ -7727,6 +8634,29 @@ function init() {
       const epParam = (params.get('ep') || '').trim();
       if (slug) {
         openMovieDetail({ source, slug, sourceId, epName: epParam }, wantPlay);
+      }
+    };
+    const inviteRoom = params.get('party');
+    if (inviteRoom && inviteRoom.trim().length >= 4) {
+      const code = inviteRoom.trim().toUpperCase();
+      if (isCloudSignedIn()) {
+        joinWatchPartyByCode(code, getDefaultPartyNick());
+      } else {
+        openPartyHubModal('join', { prefillCode: code });
+      }
+    } else {
+      // Auto-rejoin active Watch Party smoothly after accidental F5 refresh (preserves Host token!)
+      const savedParty = loadPartySessionStorage();
+      if (savedParty?.roomCode) {
+        joinWatchPartyByCode(savedParty.roomCode, savedParty.nickname || getDefaultPartyNick(), {
+          hostToken: savedParty.hostToken || '',
+          memberId: savedParty.memberId || '',
+          silentRejoin: true,
+        }).then((ok) => {
+          if (!ok && movieParam) openDeepLinkMovie();
+        });
+      } else if (movieParam) {
+        openDeepLinkMovie();
       }
     }
   } catch { /* ignore */ }
