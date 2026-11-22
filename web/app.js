@@ -623,12 +623,16 @@ function saveHistoryItem(movie, ep, currentTime, duration, { immediateCloudFlush
     // Ignore storage quota
   }
 
-  // 2. Update "Continue Watching" movie history strip
+  // 2. Update "Continue Watching" movie history strip (preserve source & sourceId for MacCMS / Archive!)
   if (dur >= 10) {
     const list = loadHistory().filter((h) => normalizeMovieSlug(h.slug) !== canonicalSlug);
     list.unshift({
-      slug: canonicalSlug,
+      slug: movie.slug || canonicalSlug,
+      source: movie.source || 'phimapi',
+      sourceId: movie.sourceId || '',
       name: movie.name,
+      nameEn: movie.nameEn || '',
+      nameVi: movie.nameVi || '',
       origin_name: movie.origin_name || '',
       poster: movie.poster,
       year: movie.year || '',
@@ -713,8 +717,12 @@ async function pullCloudStateAndMerge({ silent = true, force = false } = {}) {
         if (!existingHist || remoteTs > (existingHist.ts || 0)) {
           if (dur >= 10 || pos >= 2) {
             histBySlug.set(slug, {
-              slug,
+              slug: existingHist?.slug || slug,
+              source: existingHist?.source || 'phimapi',
+              sourceId: existingHist?.sourceId || '',
               name: item.title || existingHist?.name || slug,
+              nameEn: existingHist?.nameEn || '',
+              nameVi: existingHist?.nameVi || '',
               origin_name: existingHist?.origin_name || '',
               poster: item.posterUrl || existingHist?.poster || '',
               year: existingHist?.year || '',
@@ -1264,13 +1272,17 @@ function renderHistorySection() {
   history.slice(0, 12).forEach((item) => {
     const card = createMovieCardElement({
       slug: item.slug,
+      source: item.source || 'phimapi',
+      sourceId: item.sourceId || '',
       name: item.name,
+      nameEn: item.nameEn || '',
+      nameVi: item.nameVi || '',
       year: `${item.epName} • ${formatTime(item.position)}`,
       quality: formatTime(item.position),
       poster: item.poster,
       progress: item.progress,
     });
-    card.onclick = () => openMovieDetail(item.slug, true, item.position, item.epUrl);
+    card.onclick = () => openMovieDetail(item, true, item.position, item.epUrl);
     grid.appendChild(card);
   });
 }
@@ -1357,32 +1369,91 @@ async function openMovieDetail(movieOrSlug, autoPlayFirst = false, resumeSec = 0
         return;
       }
       if (source !== 'phimapi') throw apiErr;
-      // Offline fallback for phimapi
+      // Offline fallback for phimapi (strictly verify movie exists & has streams so MacCMS IDs don't render ghost pages!)
       const res = await fetch(`${PHIM_API}/phim/${encodeURIComponent(slug)}`);
       const json = await res.json();
-      const m = json.movie || {};
-      const servers = (json.episodes || []).map((s) => ({
+      const m = json?.movie;
+      const servers = (json?.episodes || []).map((s) => ({
         server_name: s.server_name || 'Server',
         episodes: (s.server_data || []).filter((e) => e.link_m3u8),
       })).filter((s) => s.episodes.length);
-      detail = {
-        slug: m.slug || slug,
-        source: 'phimapi',
-        name: m.name || slug,
-        origin_name: m.origin_name || '',
-        year: m.year ? String(m.year) : '',
-        quality: m.quality || 'FHD',
-        time: m.time || '',
-        content: (m.content || '').replace(/<[^>]+>/g, '').trim(),
-        imdbId: m.imdb?.id || '',
-        type: m.type || 'single',
-        poster: normalizeImage(m.poster_url || m.thumb_url),
-        backdrop: normalizeImage(m.thumb_url || m.poster_url),
-        servers,
-      };
+      if (m && typeof m === 'object' && (m.name || m.slug) && servers.length) {
+        detail = {
+          slug: m.slug || slug,
+          source: 'phimapi',
+          name: m.name || slug,
+          origin_name: m.origin_name || '',
+          year: m.year ? String(m.year) : '',
+          quality: m.quality || 'FHD',
+          time: m.time || '',
+          content: (m.content || '').replace(/<[^>]+>/g, '').trim(),
+          imdbId: m.imdb?.id || '',
+          type: m.type || 'single',
+          poster: normalizeImage(m.poster_url || m.thumb_url),
+          backdrop: normalizeImage(m.thumb_url || m.poster_url),
+          servers,
+        };
+      } else if (resumeUrl || movieObj?.epUrl) {
+        // Recover directly from saved watch history stream URL so user never loses an in-progress film!
+        const savedUrl = resumeUrl || movieObj.epUrl;
+        detail = {
+          slug,
+          source: movieObj?.source || 'direct',
+          sourceId: movieObj?.sourceId || '',
+          name: movieObj?.name || slug,
+          origin_name: movieObj?.origin_name || '',
+          year: movieObj?.year || '',
+          quality: 'HD',
+          time: '',
+          content: '',
+          imdbId: '',
+          type: 'single',
+          poster: movieObj?.poster || '',
+          backdrop: movieObj?.poster || '',
+          servers: [{ server_name: 'Saved Stream', episodes: [{ name: movieObj?.epName || 'Full', slug: 'full', link_m3u8: savedUrl }] }],
+        };
+      } else {
+        throw apiErr;
+      }
     }
 
     if (!detail) throw new Error('Not found');
+
+    // Self-heal older History / My List items if server auto-resolved true source/sourceId/metadata!
+    if (detail.source && detail.slug && detail.name && detail.name !== detail.slug) {
+      try {
+        const hist = loadHistory();
+        let histUpdated = false;
+        for (const h of hist) {
+          if (normalizeMovieSlug(h.slug) === normalizeMovieSlug(detail.slug) && (h.source !== detail.source || h.sourceId !== (detail.sourceId || ''))) {
+            h.source = detail.source;
+            h.sourceId = detail.sourceId || '';
+            if (!h.name || h.name === h.slug) h.name = detail.name;
+            if (!h.poster && detail.poster) h.poster = detail.poster;
+            histUpdated = true;
+          }
+        }
+        if (histUpdated) localStorage.setItem('chillfilm_nki_history_v1', JSON.stringify(hist));
+
+        const myList = loadMyList();
+        let myUpdated = false;
+        for (const it of myList) {
+          if (normalizeMovieSlug(it.slug) === normalizeMovieSlug(detail.slug) && (!it.sourceId || it.source !== detail.source || it.name === it.slug)) {
+            it.source = detail.source;
+            it.sourceId = detail.sourceId || '';
+            it.itemKey = makeMyListKey(detail);
+            it.name = getDisplayTitle(detail);
+            if (detail.poster) it.poster = detail.poster;
+            if (detail.year) it.year = detail.year;
+            myUpdated = true;
+          }
+        }
+        if (myUpdated) {
+          saveMyList(myList);
+          renderMyListSection();
+        }
+      } catch { /* non-fatal */ }
+    }
     state.currentMovie = detail;
     state.episodesFlat = detail.servers?.[0]?.episodes || [];
 

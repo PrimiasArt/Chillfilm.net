@@ -459,6 +459,88 @@ export async function handleCatalogBrowse(request) {
   }
 }
 
+async function resolveMacCmsDetailEnriched(target, slug, blockedTerms) {
+  const detail = await resolveMacCmsDetail(target, slug, blockedTerms);
+  if (!detail) return null;
+  if (detail.blocked) return { blocked: true };
+  let cachedMeta = null;
+  try {
+    await ensureSchema();
+    const sql = getSql();
+    const key = `maccms::${target.id}::${slug}`;
+    const rows = await sql`SELECT name_en, name_vi, content_en, content_vi, genres_json, countries_json FROM nki_catalog_items WHERE item_key = ${key} LIMIT 1`;
+    cachedMeta = rows?.[0] || null;
+  } catch { /* non-fatal */ }
+  const similar = await findSimilarMovies({
+    slug,
+    genres: Array.isArray(cachedMeta?.genres_json) ? cachedMeta.genres_json : [],
+    countries: Array.isArray(cachedMeta?.countries_json) ? cachedMeta.countries_json : [],
+    limit: 10,
+    blockedTerms,
+  });
+  return {
+    ...detail,
+    nameEn: cachedMeta?.name_en || '',
+    nameVi: cachedMeta?.name_vi || '',
+    contentEn: cachedMeta?.content_en || '',
+    contentVi: cachedMeta?.content_vi || '',
+    similar,
+  };
+}
+
+/**
+ * Self-healing multi-source resolver: recovers MacCMS / Archive / Custom movies even when
+ * an older Continue Watching or My List bookmark only stored `slug` (e.g. numeric vod_id `174008`)
+ * without `source` / `sourceId`.
+ */
+async function autoResolveBySlugFallback(slug, blockedTerms) {
+  await seedVerifiedBuiltinSources();
+  const sources = await listDynamicSources({ onlyEnabled: false });
+
+  // 1. Instant lookup in Neon Postgres catalog index (<20ms)
+  try {
+    await ensureSchema();
+    const sql = getSql();
+    const rows = await sql`
+      SELECT source, source_id
+      FROM nki_catalog_items
+      WHERE slug = ${slug}
+      ORDER BY updated_at DESC
+      LIMIT 3
+    `;
+    for (const r of rows || []) {
+      if (r.source === 'maccms' && r.source_id) {
+        const target = sources.find((s) => s.id === r.source_id);
+        if (target) {
+          const det = await resolveMacCmsDetailEnriched(target, slug, blockedTerms);
+          if (det) return det;
+        }
+      } else if (r.source === 'archive') {
+        const det = await resolveArchiveDetail(slug, blockedTerms);
+        if (det) return det;
+      }
+    }
+  } catch { /* non-fatal */ }
+
+  // 2. Numeric vod_id (e.g. `174008`) -> probe verified MacCMS sources in parallel!
+  if (/^\d{2,10}$/.test(slug)) {
+    const macSources = sources.filter((s) => s.sourceType === 'MACCMS_V10');
+    const results = await Promise.all(
+      macSources.map(async (src) => {
+        try {
+          const det = await resolveMacCmsDetailEnriched(src, slug, blockedTerms);
+          return det && !det.blocked && det.servers?.length ? det : null;
+        } catch {
+          return null;
+        }
+      })
+    );
+    const hit = results.find(Boolean);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 export async function handleCatalogDetail(request) {
   try {
     const url = new URL(request.url);
@@ -491,45 +573,25 @@ export async function handleCatalogDetail(request) {
       await seedVerifiedBuiltinSources();
       const sources = await listDynamicSources({ onlyEnabled: false });
       const target = sources.find((s) => s.id === sourceId);
-      if (!target) return jsonResponse({ error: 'Custom source not found' }, 404);
 
       if (source === 'maccms') {
-        const detail = await resolveMacCmsDetail(target, slug, blockedTerms);
-        if (!detail) return jsonResponse({ error: 'Movie not found in MacCMS source' }, 404);
-        if (detail.blocked) return jsonResponse({ error: 'Content blocked by VN-Safe anti-porn policy' }, 403);
-        // Hydrate cached bilingual translation + similar movies from Neon Postgres
-        let cachedMeta = null;
-        try {
-          await ensureSchema();
-          const sql = getSql();
-          const key = `maccms::${target.id}::${slug}`;
-          const rows = await sql`SELECT name_en, name_vi, content_en, content_vi, genres_json, countries_json FROM nki_catalog_items WHERE item_key = ${key} LIMIT 1`;
-          cachedMeta = rows?.[0] || null;
-        } catch { /* non-fatal */ }
-        const similar = await findSimilarMovies({
-          slug,
-          genres: Array.isArray(cachedMeta?.genres_json) ? cachedMeta.genres_json : [],
-          countries: Array.isArray(cachedMeta?.countries_json) ? cachedMeta.countries_json : [],
-          limit: 10,
-          blockedTerms,
-        });
-        return jsonResponse({
-          ok: true,
-          detail: {
-            ...detail,
-            nameEn: cachedMeta?.name_en || '',
-            nameVi: cachedMeta?.name_vi || '',
-            contentEn: cachedMeta?.content_en || '',
-            contentVi: cachedMeta?.content_vi || '',
-            similar,
-          },
-        });
+        if (target) {
+          const enriched = await resolveMacCmsDetailEnriched(target, slug, blockedTerms);
+          if (enriched?.blocked) return jsonResponse({ error: 'Content blocked by VN-Safe anti-porn policy' }, 403);
+          if (enriched) return jsonResponse({ ok: true, detail: enriched });
+        }
+        // Fallback: recover if sourceId was empty or stale
+        const recovered = await autoResolveBySlugFallback(slug, blockedTerms);
+        if (recovered?.blocked) return jsonResponse({ error: 'Content blocked by VN-Safe anti-porn policy' }, 403);
+        if (recovered) return jsonResponse({ ok: true, detail: recovered });
+        return jsonResponse({ error: 'Movie not found in MacCMS source' }, 404);
       }
 
+      if (!target) return jsonResponse({ error: 'Custom source not found' }, 404);
       const base = target.baseUrl.replace(/\/+$/, '');
       const json = await fetchJsonSafe(`${base}/phim/${encodeURIComponent(slug)}`, 8500);
       const m = json?.movie;
-      if (!m) return jsonResponse({ error: 'Movie not found' }, 404);
+      if (!m || (!m.name && !m.slug)) return jsonResponse({ error: 'Movie not found' }, 404);
       if (isBlockedContent(m, blockedTerms)) {
         return jsonResponse({ error: 'Content blocked by VN-Safe anti-porn policy' }, 403);
       }
@@ -560,9 +622,22 @@ export async function handleCatalogDetail(request) {
       });
     }
 
+    // If a numeric MacCMS vod_id (e.g. `174008`) arrives with default `source=phimapi`, recover it first!
+    if (/^\d{2,10}$/.test(slug)) {
+      const recovered = await autoResolveBySlugFallback(slug, blockedTerms);
+      if (recovered?.blocked) return jsonResponse({ error: 'Content blocked by VN-Safe anti-porn policy' }, 403);
+      if (recovered) return jsonResponse({ ok: true, detail: recovered });
+    }
+
     const json = await fetchJsonSafe(`${PHIM_API}/phim/${encodeURIComponent(slug)}`, 8500);
     const m = json?.movie;
-    if (!m) return jsonResponse({ error: 'Movie not found' }, 404);
+    if (!m || typeof m !== 'object' || (!m.name && !m.slug)) {
+      // Fallback: check Neon catalog index (Archive / MacCMS) before returning 404!
+      const recovered = await autoResolveBySlugFallback(slug, blockedTerms);
+      if (recovered?.blocked) return jsonResponse({ error: 'Content blocked by VN-Safe anti-porn policy' }, 403);
+      if (recovered) return jsonResponse({ ok: true, detail: recovered });
+      return jsonResponse({ error: 'Movie not found' }, 404);
+    }
     if (isBlockedContent(m, blockedTerms)) {
       return jsonResponse({ error: 'Content blocked by VN-Safe anti-porn policy' }, 403);
     }
