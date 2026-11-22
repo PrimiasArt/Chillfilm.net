@@ -108,6 +108,8 @@ data class CloudMyListItem(
     val poster: String = "",
     val year: String = "",
     val quality: String = "HD",
+    val latestEpisode: String = "",
+    val hasNewEpisode: Boolean = false,
     val addedAt: Long = System.currentTimeMillis()
 )
 
@@ -148,10 +150,13 @@ object CloudSyncClient {
     var serverAiReady: Boolean = false
 
     @Volatile
-    var defaultModel: String = "gemini-3-flash-preview"
+    var defaultModel: String = "gemini-2.5-flash"
 
     @Volatile
     var activeLangCode: String = "en"
+
+    @Volatile
+    var activeMovieSlug: String = ""
 
     fun applySession(session: CloudSession?) {
         if (session == null || session.token.isBlank()) {
@@ -636,6 +641,7 @@ object CloudSyncClient {
                     contentType = contentType,
                     providerId = providerId,
                     providerName = srcName,
+                    hasCloudSub = m.optBoolean("hasCloudSub", false),
                     imdbId = m.optString("imdbId").trim(),
                     servers = directServers,
                     detailLookupId = lookup
@@ -643,6 +649,27 @@ object CloudSyncClient {
             )
         }
         return list
+    }
+
+    /**
+     * #9 Natural-language AI Vibe & Mood Search powered by /api/catalog/ai-search.
+     */
+    suspend fun searchAiVibe(query: String): Pair<String, List<MovieItem>> = withContext(Dispatchers.IO) {
+        val clean = query.trim()
+        if (clean.length < 2) return@withContext "" to emptyList()
+        runCatching<Pair<String, List<MovieItem>>> {
+            val req = Request.Builder()
+                .url("$baseUrl/api/catalog/ai-search?q=${enc(clean)}")
+                .get()
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@use "" to emptyList()
+                val obj = JSONObject(resp.body?.string().orEmpty().ifBlank { "{}" })
+                val summary = obj.optString("vibeSummary", "")
+                val items = parseCloudMovieArray(obj.optJSONArray("items"))
+                summary to items
+            }
+        }.getOrDefault("" to emptyList())
     }
 
     suspend fun pullState(sinceMs: Long = 0L): Result<CloudSyncPullResult> = withContext(Dispatchers.IO) {
@@ -690,6 +717,8 @@ object CloudSyncClient {
                         poster = r.optString("poster", ""),
                         year = r.optString("year", ""),
                         quality = r.optString("quality", "HD"),
+                        latestEpisode = r.optString("latestEpisode", ""),
+                        hasNewEpisode = r.optBoolean("hasNewEpisode", false),
                         addedAt = r.optLong("addedAt", System.currentTimeMillis())
                     )
                 )
@@ -863,6 +892,10 @@ object CloudSyncClient {
                 .put("texts", arr)
                 .put("targetLang", targetLang)
                 .put("model", modelId.ifBlank { defaultModel })
+            val slugCtx = activeMovieSlug.trim()
+            if (slugCtx.isNotEmpty()) {
+                payload.put("movieContext", JSONObject().put("slug", slugCtx))
+            }
             val res = postJson("/api/ai/translate", payload, requireAuth = true)
             val outArr = res.optJSONArray("translated") ?: return@runCatching null
             if (outArr.length() != texts.size) return@runCatching null
@@ -893,6 +926,10 @@ object CloudSyncClient {
                 .put("targetLang", targetLang)
                 .put("model", modelId.ifBlank { defaultModel })
                 .put("preferTurboFlash", preferTurboFlash)
+            val slugCtx = activeMovieSlug.trim()
+            if (slugCtx.isNotEmpty()) {
+                payload.put("movieContext", JSONObject().put("slug", slugCtx))
+            }
             val res = postJson("/api/ai/audio-sub", payload, requireAuth = true)
             val cuesArr = res.optJSONArray("cues") ?: return@runCatching emptyList()
             decodeCues(cuesArr)

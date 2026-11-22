@@ -233,6 +233,43 @@ fun MovieCard(
                     }
                 }
 
+                // #4 Cloud Sub Ready / #10 New Episode indicator pill (Bottom-Right)
+                if (movie.hasNewEpisode) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(horizontal = 6.dp, vertical = if (progressFraction > 0.01f) 8.dp else 6.dp)
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(LiveRed)
+                            .padding(horizontal = 5.dp, vertical = 1.dp)
+                    ) {
+                        Text(
+                            text = "NEW EP",
+                            color = Color.White,
+                            fontSize = 7.5.sp,
+                            fontWeight = FontWeight.Black,
+                            maxLines = 1
+                        )
+                    }
+                } else if (movie.hasCloudSub) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(horizontal = 6.dp, vertical = if (progressFraction > 0.01f) 8.dp else 6.dp)
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(EmeraldPrimary)
+                            .padding(horizontal = 5.dp, vertical = 1.dp)
+                    ) {
+                        Text(
+                            text = "SUB AI",
+                            color = Color(0xFF04150A),
+                            fontSize = 7.5.sp,
+                            fontWeight = FontWeight.Black,
+                            maxLines = 1
+                        )
+                    }
+                }
+
                 // Authentic Netflix-style Watch Progress Bar (Signature Green!)
                 if (progressFraction > 0.01f) {
                     Box(

@@ -481,3 +481,39 @@ export async function partyLeave({ roomCode, memberId }) {
     body: { action: 'leave', roomCode, memberId },
   });
 }
+
+/* ==================== #2 AI GLOSSARY & #9 AI VIBE SEARCH CLIENT ==================== */
+export async function fetchMovieGlossary({ slug, title = '', originTitle = '', synopsis = '', genres = [], lang = 'vi', generate = false, force = false } = {}) {
+  if (!slug) return { terms: [], tone: '' };
+  const qs = new URLSearchParams({ slug: String(slug) });
+  if (title) qs.set('title', title.slice(0, 120));
+  if (originTitle) qs.set('originTitle', originTitle.slice(0, 120));
+  if (synopsis) qs.set('synopsis', synopsis.slice(0, 400));
+  if (Array.isArray(genres) && genres.length) qs.set('genres', genres.slice(0, 4).join(','));
+  if (lang) qs.set('lang', lang);
+  if (generate) qs.set('generate', '1');
+  if (force) qs.set('force', '1');
+  try {
+    const res = await fetch(`${getCloudApiBase()}/api/catalog/glossary?${qs.toString()}`);
+    if (!res.ok) return { terms: [], tone: '' };
+    const data = await res.json().catch(() => ({}));
+    return data.glossary || { terms: [], tone: '' };
+  } catch {
+    return { terms: [], tone: '' };
+  }
+}
+
+export async function saveMovieGlossary({ slug, terms = [], tone = '' }) {
+  return apiFetch('/api/catalog/glossary', {
+    method: 'POST',
+    auth: false,
+    body: { slug, terms, tone },
+  });
+}
+
+export async function fetchAiVibeSearch(query) {
+  const res = await fetch(`${getCloudApiBase()}/api/catalog/ai-search?q=${encodeURIComponent(String(query || '').trim())}`);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `AI Search HTTP ${res.status}`);
+  return data;
+}

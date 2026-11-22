@@ -527,6 +527,13 @@ export async function resolveMacCmsDetail(source, vodId, blockedTerms = []) {
     }
   }
 
+  const parsePeople = (raw) =>
+    String(raw || '')
+      .split(/[,，、/|]+/)
+      .map((x) => x.trim())
+      .filter((x) => x && x.length <= 60 && !/^unknown|n\/a|đang cập nhật$/i.test(x))
+      .slice(0, 12);
+
   return {
     slug: String(v.vod_id || vodId),
     source: 'maccms',
@@ -535,9 +542,16 @@ export async function resolveMacCmsDetail(source, vodId, blockedTerms = []) {
     origin_name: checkObj.origin_name,
     year: String(v.vod_year || ''),
     quality: String(v.vod_remarks || 'HD'),
+    episode_current: String(v.vod_remarks || (servers[0]?.episodes?.length ? `Tập ${servers[0].episodes.length}` : 'HD')),
     time: String(v.vod_duration || ''),
     content: checkObj.content,
     imdbId: '',
+    tmdbScore: Number(v.vod_douban_score || v.vod_score || 0) || 0,
+    genres: checkObj.genres.slice(0, 5),
+    countries: String(v.vod_area || '').split(/[,，/]+/).map((s) => s.trim()).filter(Boolean).slice(0, 3),
+    actors: parsePeople(v.vod_actor),
+    directors: parsePeople(v.vod_director),
+    trailerUrl: '',
     type: servers[0]?.episodes?.length > 1 ? 'series' : 'single',
     poster: normalizeImage(v.vod_pic || '', source.baseUrl),
     backdrop: normalizeImage(v.vod_pic_slide || v.vod_pic || '', source.baseUrl),

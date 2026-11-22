@@ -1,7 +1,8 @@
 import { metric, waitUntil } from '@vercel/functions';
-import { ensureSchema, getSql, normalizeMovieSlug } from './db.js';
-import { CORS_HEADERS, jsonResponse } from './auth.js';
+import { ensureSchema, getServerGeminiConfig, getSql, normalizeMovieSlug } from './db.js';
+import { CORS_HEADERS, jsonResponse, readJsonBody } from './auth.js';
 import { filterSafeMovies, isBlockedCategoryTag, isBlockedContent } from './safety.js';
+import { generateMovieGlossaryServerSide, parseAiVibeSearchQuery } from './gemini.js';
 import {
   findSimilarMovies,
   getCrawledFeedData,
@@ -249,7 +250,31 @@ export async function handleCatalogFeed(request) {
       { id: 'archive', customTitle: '🏛 World Public Cinema (Internet Archive)', isTopTen: false, movies: archiveGlobal.slice(0, 18) },
     ].filter((r) => r.movies.length > 0);
 
-    metric('catalog.feed', 1, { outcome: rows.length ? 'success' : 'empty' });
+    // Stamp `hasCloudSub: true` (#4) on movies already translated in NKI Cloud Subtitle Pool
+    let cloudSubSet = new Set();
+    const latestEpisodeMap = {};
+    try {
+      await ensureSchema();
+      const sql = getSql();
+      const [subRows, epRows] = await Promise.all([
+        sql`SELECT DISTINCT movie_slug FROM nki_subtitle_pool WHERE cue_count >= 3 LIMIT 400`,
+        sql`SELECT slug, episode_current FROM nki_catalog_items WHERE episode_current <> '' ORDER BY updated_at DESC LIMIT 300`,
+      ]);
+      cloudSubSet = new Set((subRows || []).map((r) => normalizeMovieSlug(r.movie_slug)));
+      for (const er of epRows || []) {
+        if (er.slug && er.episode_current && !latestEpisodeMap[er.slug]) {
+          latestEpisodeMap[er.slug] = String(er.episode_current);
+        }
+      }
+    } catch { /* non-fatal */ }
+
+    const stampCloudSub = (list) =>
+      (list || []).map((m) => (m && cloudSubSet.has(normalizeMovieSlug(m.slug)) ? { ...m, hasCloudSub: true } : m));
+
+    const stampedHeroes = stampCloudSub(heroMovies);
+    const stampedRows = rows.map((r) => ({ ...r, movies: stampCloudSub(r.movies) }));
+
+    metric('catalog.feed', 1, { outcome: stampedRows.length ? 'success' : 'empty' });
     return new Response(
       JSON.stringify({
         ok: true,
@@ -268,9 +293,11 @@ export async function handleCatalogFeed(request) {
           totalSources: allEnabledSources.length,
           lastRun: crawled.lastRun,
         },
+        cloudSubSlugs: [...cloudSubSet],
+        latestEpisodeMap,
         countries: GLOBAL_COUNTRIES,
-        heroMovies,
-        rows,
+        heroMovies: stampedHeroes,
+        rows: stampedRows,
       }),
       {
         status: 200,
@@ -464,12 +491,17 @@ async function resolveMacCmsDetailEnriched(target, slug, blockedTerms) {
   if (!detail) return null;
   if (detail.blocked) return { blocked: true };
   let cachedMeta = null;
+  let glossary = null;
   try {
     await ensureSchema();
     const sql = getSql();
     const key = `maccms::${target.id}::${slug}`;
-    const rows = await sql`SELECT name_en, name_vi, content_en, content_vi, genres_json, countries_json FROM nki_catalog_items WHERE item_key = ${key} LIMIT 1`;
+    const [rows, gRows] = await Promise.all([
+      sql`SELECT name_en, name_vi, content_en, content_vi, genres_json, countries_json FROM nki_catalog_items WHERE item_key = ${key} LIMIT 1`,
+      sql`SELECT glossary_json FROM nki_movie_glossaries WHERE movie_slug = ${normalizeMovieSlug(slug)} LIMIT 1`,
+    ]);
     cachedMeta = rows?.[0] || null;
+    glossary = gRows?.[0]?.glossary_json || null;
   } catch { /* non-fatal */ }
   const similar = await findSimilarMovies({
     slug,
@@ -484,6 +516,7 @@ async function resolveMacCmsDetailEnriched(target, slug, blockedTerms) {
     nameVi: cachedMeta?.name_vi || '',
     contentEn: cachedMeta?.content_en || '',
     contentVi: cachedMeta?.content_vi || '',
+    glossary,
     similar,
   };
 }
@@ -650,6 +683,25 @@ export async function handleCatalogDetail(request) {
 
     const genres = Array.isArray(m.category) ? m.category.map((c) => c?.name).filter(Boolean) : [];
     const countries = Array.isArray(m.country) ? m.country.map((c) => c?.name).filter(Boolean) : [];
+    const actors = (Array.isArray(m.actor) ? m.actor : String(m.actor || '').split(','))
+      .map((a) => String(a || '').trim())
+      .filter((a) => a && a.length <= 60 && !/^đang cập nhật|unknown|n\/a$/i.test(a))
+      .slice(0, 14);
+    const directors = (Array.isArray(m.director) ? m.director : String(m.director || '').split(','))
+      .map((d) => String(d || '').trim())
+      .filter((d) => d && d.length <= 60 && !/^đang cập nhật|unknown|n\/a$/i.test(d))
+      .slice(0, 6);
+    const trailerUrl = String(m.trailer_url || '').trim();
+    const voteAvg = Number(m.tmdb?.vote_average || 0);
+
+    let glossary = null;
+    try {
+      await ensureSchema();
+      const sql = getSql();
+      const gRows = await sql`SELECT glossary_json FROM nki_movie_glossaries WHERE movie_slug = ${normalizeMovieSlug(m.slug || slug)} LIMIT 1`;
+      glossary = gRows?.[0]?.glossary_json || null;
+    } catch { /* non-fatal */ }
+
     const similar = await findSimilarMovies({
       slug: m.slug || slug,
       genres,
@@ -668,12 +720,18 @@ export async function handleCatalogDetail(request) {
           origin_name: m.origin_name || '',
           year: m.year ? String(m.year) : '',
           quality: m.quality || 'FHD',
+          episode_current: String(m.episode_current || (servers[0]?.episodes?.length ? `Tập ${servers[0].episodes.length}` : 'Full')),
           time: m.time || '',
           content: stripHtml(m.content || ''),
           imdbId: String(m.imdb?.id || '').startsWith('tt') ? m.imdb.id : '',
+          tmdbScore: Number.isFinite(voteAvg) && voteAvg > 0 ? Math.round(voteAvg * 10) / 10 : 0,
           type: m.type || 'single',
           genres,
           countries,
+          actors,
+          directors,
+          trailerUrl,
+          glossary,
           poster: normalizeImage(m.poster_url || m.thumb_url),
           backdrop: normalizeImage(m.thumb_url || m.poster_url),
           servers,
@@ -950,5 +1008,182 @@ export async function handleCatalogSubProxy(request) {
   } catch (err) {
     console.error('[catalog/subproxy] error:', err);
     return jsonResponse({ error: err?.message || 'Subtitle proxy failed' }, 502);
+  }
+}
+
+/* ==================== #2 AI CHARACTER & TERMINOLOGY GLOSSARY (NEON PERSISTENT) ==================== */
+export async function handleCatalogGlossary(request) {
+  const startedAt = performance.now();
+  try {
+    await ensureSchema();
+    const sql = getSql();
+
+    if (request.method === 'POST') {
+      const body = await readJsonBody(request);
+      if (!body || !body.slug) return jsonResponse({ error: 'slug is required' }, 400);
+      const slugKey = normalizeMovieSlug(body.slug);
+      const terms = Array.isArray(body.terms)
+        ? body.terms
+            .filter((t) => t && t.src && t.dst)
+            .slice(0, 30)
+            .map((t) => ({
+              src: String(t.src).trim().slice(0, 60),
+              dst: String(t.dst).trim().slice(0, 80),
+            }))
+        : [];
+      const tone = String(body.tone || '').trim().slice(0, 220);
+      const payload = { terms, tone };
+      const now = Date.now();
+      await sql`
+        INSERT INTO nki_movie_glossaries (movie_slug, glossary_json, updated_at)
+        VALUES (${slugKey}, ${JSON.stringify(payload)}::jsonb, ${now})
+        ON CONFLICT (movie_slug) DO UPDATE SET
+          glossary_json = EXCLUDED.glossary_json,
+          updated_at = EXCLUDED.updated_at
+      `;
+      metric('catalog.glossary', 1, { outcome: 'saved' });
+      return jsonResponse({ ok: true, slug: slugKey, glossary: payload });
+    }
+
+    const url = new URL(request.url);
+    const rawSlug = String(url.searchParams.get('slug') || '').trim();
+    if (!rawSlug) return jsonResponse({ error: 'slug is required' }, 400);
+    const slugKey = normalizeMovieSlug(rawSlug);
+    const shouldGenerate = url.searchParams.get('generate') === '1';
+    const forceRegen = url.searchParams.get('force') === '1';
+
+    if (!forceRegen) {
+      const rows = await sql`SELECT glossary_json, updated_at FROM nki_movie_glossaries WHERE movie_slug = ${slugKey} LIMIT 1`;
+      if (rows?.[0]?.glossary_json && ((rows[0].glossary_json.terms || []).length > 0 || rows[0].glossary_json.tone)) {
+        metric('catalog.glossary', 1, { outcome: 'cache_hit' });
+        return jsonResponse({ ok: true, slug: slugKey, cached: true, glossary: rows[0].glossary_json });
+      }
+    }
+
+    if (!shouldGenerate) {
+      return jsonResponse({ ok: true, slug: slugKey, cached: false, glossary: { terms: [], tone: '' } });
+    }
+
+    const aiCfg = await getServerGeminiConfig();
+    if (!aiCfg?.apiKey) {
+      metric('catalog.glossary', 1, { outcome: 'no_key' });
+      return jsonResponse({ ok: true, slug: slugKey, cached: false, glossary: { terms: [], tone: '' } });
+    }
+
+    const title = String(url.searchParams.get('title') || rawSlug).trim();
+    const originTitle = String(url.searchParams.get('originTitle') || '').trim();
+    const synopsis = String(url.searchParams.get('synopsis') || '').trim();
+    const genres = String(url.searchParams.get('genres') || '').split(',').map((s) => s.trim()).filter(Boolean);
+    const targetLang = String(url.searchParams.get('lang') || 'vi').trim();
+
+    const glossary = await generateMovieGlossaryServerSide({
+      title,
+      originTitle,
+      synopsis,
+      genres,
+      targetLang,
+      apiKey: aiCfg.apiKey,
+      preferredModel: aiCfg.defaultModel || 'gemini-2.5-flash',
+    });
+
+    if (glossary.terms.length > 0 || glossary.tone) {
+      await sql`
+        INSERT INTO nki_movie_glossaries (movie_slug, glossary_json, updated_at)
+        VALUES (${slugKey}, ${JSON.stringify(glossary)}::jsonb, ${Date.now()})
+        ON CONFLICT (movie_slug) DO UPDATE SET
+          glossary_json = EXCLUDED.glossary_json,
+          updated_at = EXCLUDED.updated_at
+      `;
+    }
+
+    metric('catalog.glossary', 1, { outcome: glossary.terms.length ? 'generated' : 'empty' });
+    return jsonResponse({ ok: true, slug: slugKey, cached: false, glossary });
+  } catch (err) {
+    console.error('[catalog/glossary] error:', err);
+    metric('catalog.glossary', 1, { outcome: 'error' });
+    return jsonResponse({ ok: false, error: err?.message || 'Glossary error' }, 500);
+  } finally {
+    metric('catalog.glossary.duration_ms', performance.now() - startedAt);
+  }
+}
+
+/* ==================== #9 AI VIBE & MOOD NATURAL-LANGUAGE SEARCH ==================== */
+export async function handleCatalogAiSearch(request) {
+  const startedAt = performance.now();
+  try {
+    const url = new URL(request.url);
+    const query = String(url.searchParams.get('q') || '').trim();
+    if (!query || query.length < 2) {
+      return jsonResponse({ ok: true, vibeSummary: '', items: [] });
+    }
+
+    const blockedTerms = await getCustomBlockedTerms();
+    if (isBlockedContent({ name: query, slug: query }, blockedTerms)) {
+      return jsonResponse({ ok: true, blocked: true, vibeSummary: 'Nội dung bị chặn theo chính sách VN-Safe.', items: [] });
+    }
+
+    const aiCfg = await getServerGeminiConfig();
+    const parsed = aiCfg?.apiKey
+      ? await parseAiVibeSearchQuery({ query, apiKey: aiCfg.apiKey, preferredModel: aiCfg.defaultModel || 'gemini-2.5-flash' })
+      : { keywords: [query], genre: '', country: '', minYear: 0, vibeSummary: `Đang tìm kiếm "${query}"...` };
+
+    const gMap = parsed.genre ? GENRE_MAP_PHIMAPI[parsed.genre] : null;
+    const kwList = (parsed.keywords || [query]).slice(0, 3);
+
+    const searches = [
+      ...kwList.map((kw) => fetchPhimApiList(`${PHIM_API}/v1/api/tim-kiem?keyword=${encodeURIComponent(kw)}&limit=16`, blockedTerms)),
+      ...kwList.slice(0, 2).map((kw) => searchCrawledCatalog({ query: kw, limit: 16, blockedTerms })),
+    ];
+    if (gMap?.slug) {
+      searches.push(fetchPhimApiList(`${PHIM_API}/v1/api/the-loai/${encodeURIComponent(gMap.slug)}?page=1&sort_field=modified.time&sort_type=desc&limit=18`, blockedTerms));
+    }
+    if (parsed.country) {
+      searches.push(fetchPhimApiList(`${PHIM_API}/v1/api/quoc-gia/${encodeURIComponent(parsed.country)}?page=1&sort_field=modified.time&sort_type=desc&limit=18`, blockedTerms));
+    }
+
+    const batches = await Promise.all(searches.map((p) => p.catch(() => [])));
+    const seen = new Set();
+    let merged = [];
+    for (const batch of batches) {
+      for (const item of batch || []) {
+        if (!item || !item.slug) continue;
+        const k = `${item.source || 'phimapi'}::${item.slug}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        merged.push(item);
+      }
+    }
+
+    if (parsed.minYear > 1950) {
+      const yearMatched = merged.filter((m) => Number(m.year || 0) >= parsed.minYear);
+      if (yearMatched.length >= 4) merged = yearMatched;
+    }
+
+    // Also stamp Cloud Sub badges!
+    let cloudSubSet = new Set();
+    try {
+      await ensureSchema();
+      const sql = getSql();
+      const subRows = await sql`SELECT DISTINCT movie_slug FROM nki_subtitle_pool WHERE cue_count >= 3 LIMIT 400`;
+      cloudSubSet = new Set((subRows || []).map((r) => normalizeMovieSlug(r.movie_slug)));
+    } catch { /* non-fatal */ }
+
+    const finalItems = filterSafeMovies(merged, blockedTerms)
+      .slice(0, 36)
+      .map((m) => (cloudSubSet.has(normalizeMovieSlug(m.slug)) ? { ...m, hasCloudSub: true } : m));
+
+    metric('catalog.ai_search', 1, { outcome: finalItems.length ? 'hit' : 'miss' });
+    return jsonResponse({
+      ok: true,
+      vibeSummary: parsed.vibeSummary || `✨ AI đã lọc ${finalItems.length} phim hợp gu "${query}"`,
+      parsed,
+      items: finalItems,
+    });
+  } catch (err) {
+    console.error('[catalog/ai-search] error:', err);
+    metric('catalog.ai_search', 1, { outcome: 'error' });
+    return jsonResponse({ ok: false, items: [], error: err?.message || 'AI search failed' }, 500);
+  } finally {
+    metric('catalog.ai_search.duration_ms', performance.now() - startedAt);
   }
 }

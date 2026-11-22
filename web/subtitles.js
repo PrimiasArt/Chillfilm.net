@@ -848,3 +848,42 @@ export async function extractHlsWindowAdtsBase64(win, keyCache = new Map(), sign
     byteLength: totalBytes,
   };
 }
+
+/* ==================== #4 EXPORT TRANSLATED CUES TO STANDARD .SRT ==================== */
+function formatSrtTimestamp(ms) {
+  const safe = Math.max(0, Math.round(Number(ms) || 0));
+  const hrs = Math.floor(safe / 3600000);
+  const mins = Math.floor((safe % 3600000) / 60000);
+  const secs = Math.floor((safe % 60000) / 1000);
+  const rem = safe % 1000;
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const pad3 = (n) => String(n).padStart(3, '0');
+  return `${pad2(hrs)}:${pad2(mins)}:${pad2(secs)},${pad3(rem)}`;
+}
+
+export function exportCuesToSrt(cues) {
+  if (!Array.isArray(cues) || !cues.length) return '';
+  return cues
+    .filter((c) => c && c.text)
+    .map((c, idx) => {
+      const s = formatSrtTimestamp(c.startMs);
+      const e = formatSrtTimestamp(Math.max(c.endMs || c.startMs + 2200, c.startMs + 450));
+      return `${idx + 1}\r\n${s} --> ${e}\r\n${String(c.text).trim()}`;
+    })
+    .join('\r\n\r\n') + '\r\n';
+}
+
+export function downloadSrtFile(cues, filename = 'chillfilm-sub.srt') {
+  const srtText = exportCuesToSrt(cues);
+  if (!srtText) return false;
+  const blob = new Blob(['\uFEFF' + srtText], { type: 'application/x-subrip;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename.endsWith('.srt') ? filename : `${filename}.srt`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+  return true;
+}

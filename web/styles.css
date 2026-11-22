@@ -2895,3 +2895,321 @@ button > svg {
     flex: 1;
   }
 }
+
+/* ==================== V14 SUPER-UPGRADE PACK (#1-#11) ==================== */
+
+/* #1 Hardsub Blur / Mask Overlay (cleanly sits behind .sub-layer, over video hardsubs) */
+.hardsub-mask {
+  position: absolute;
+  left: 6%;
+  right: 6%;
+  bottom: 3%;
+  height: 58px;
+  z-index: 12;
+  border-radius: 10px;
+  pointer-events: none;
+  background: rgba(8, 10, 14, 0.42);
+  backdrop-filter: blur(18px) saturate(110%);
+  -webkit-backdrop-filter: blur(18px) saturate(110%);
+  box-shadow: 0 0 22px rgba(0, 0, 0, 0.35);
+  transition: height 0.14s ease, bottom 0.14s ease, background 0.14s ease;
+}
+
+.hardsub-mask.mode-solid {
+  background: rgba(5, 7, 11, 0.94);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.player-modal.minimized .hardsub-mask {
+  display: none !important;
+}
+
+/* #6 Ambient Cinema Glow Layer behind <video> */
+.ambient-glow-canvas {
+  position: absolute;
+  inset: -12%;
+  width: 124%;
+  height: 124%;
+  object-fit: cover;
+  filter: blur(74px) saturate(175%) brightness(0.75);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 0;
+  transition: opacity 0.6s ease;
+}
+
+.ambient-glow-canvas.active {
+  opacity: 0.52;
+}
+
+.player-stage > video#videoEl {
+  position: relative;
+  z-index: 2;
+}
+
+.player-modal.minimized .ambient-glow-canvas {
+  display: none !important;
+}
+
+/* #5 Seekbar Thumbnail Preview inside #seekTooltip */
+.seek-tooltip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 7px;
+}
+
+.scrub-thumb-canvas {
+  width: 144px;
+  height: 81px;
+  border-radius: 5px;
+  background: #0a0c10;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.65);
+  object-fit: cover;
+}
+
+/* #4 Cloud Sub Ready Badge on Movie Poster Cards */
+.card-cloud-sub-badge {
+  position: absolute;
+  bottom: 8px;
+  left: 7px;
+  z-index: 4;
+  background: rgba(0, 200, 83, 0.92);
+  color: #031509;
+  font-size: 9.5px;
+  font-weight: 900;
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.3px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+}
+
+/* #9 AI Vibe Search Button & Summary Banner */
+.btn-ai-vibe-sm {
+  height: 28px;
+  padding: 0 9px;
+  border-radius: 5px;
+  background: linear-gradient(135deg, rgba(0, 230, 118, 0.25), rgba(16, 185, 129, 0.32));
+  border: 1px solid rgba(0, 230, 118, 0.55);
+  color: #86efac;
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  transition: background 0.15s ease, transform 0.12s ease;
+}
+
+.btn-ai-vibe-sm:hover {
+  background: var(--emerald);
+  color: #04150a;
+}
+
+.ai-vibe-banner {
+  margin-bottom: 14px;
+  padding: 11px 14px;
+  border-radius: 9px;
+  background: linear-gradient(135deg, rgba(0, 200, 83, 0.15) 0%, rgba(16, 185, 129, 0.08) 100%);
+  border: 1px solid rgba(0, 230, 118, 0.42);
+  color: #d9fbe5;
+  font-size: 13px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+/* #10 Notification Bell & Episode Tracker Dropdown */
+.notif-wrap {
+  position: relative;
+}
+
+.notif-dot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 99px;
+  background: #ef4444;
+  color: #ffffff;
+  font-size: 9.5px;
+  font-weight: 900;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px solid #141414;
+  line-height: 1;
+}
+
+.notif-menu {
+  position: absolute;
+  top: calc(100% + 9px);
+  right: 0;
+  width: min(330px, 88vw);
+  background: #181a1f;
+  border: 1px solid rgba(0, 230, 118, 0.38);
+  border-radius: 10px;
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.8);
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+  z-index: 90;
+}
+
+.notif-menu.open {
+  display: flex;
+}
+
+.notif-menu-head {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 800;
+  color: #86efac;
+}
+
+.notif-list {
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.notif-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  text-align: left;
+  width: 100%;
+  transition: background 0.14s ease;
+}
+
+.notif-item:hover {
+  background: rgba(0, 230, 118, 0.12);
+}
+
+.notif-item img {
+  width: 34px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.notif-empty {
+  padding: 18px 14px;
+  font-size: 12px;
+  color: var(--muted);
+  text-align: center;
+}
+
+/* #2 AI Glossary Collapsible Box inside Detail Card */
+.detail-glossary-details {
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
+  padding-top: 9px;
+}
+
+.detail-glossary-details > summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+  color: #a7f3d0;
+  user-select: none;
+}
+
+.glossary-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.glossary-chip {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #e5e7eb;
+}
+
+.glossary-chip strong {
+  color: #86efac;
+}
+
+/* #11 Cast / Director Clickable Chips & Trailer Embed */
+.detail-people-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+.person-chip {
+  padding: 3px 9px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #e5e7eb;
+  font-size: 11.5px;
+  font-weight: 700;
+  transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease;
+}
+
+.person-chip:hover {
+  background: rgba(0, 200, 83, 0.2);
+  border-color: var(--emerald-neon);
+  color: #86efac;
+}
+
+.trailer-embed-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.trailer-embed-wrap iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+/* #8 QR TV Pairing Card */
+.tv-qr-card {
+  background: rgba(0, 200, 83, 0.07);
+  border: 1px solid rgba(0, 230, 118, 0.25);
+  border-radius: 9px;
+  padding: 11px 12px;
+}
+
+.tv-qr-img {
+  width: 108px;
+  height: 108px;
+  border-radius: 6px;
+  background: #ffffff;
+  padding: 4px;
+  flex-shrink: 0;
+}

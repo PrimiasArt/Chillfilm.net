@@ -1,5 +1,5 @@
 import { metric } from '@vercel/functions';
-import { getServerGeminiConfig } from '../_lib/db.js';
+import { ensureSchema, getServerGeminiConfig, getSql, normalizeMovieSlug } from '../_lib/db.js';
 import {
   checkAndIncrementAiQuota,
   jsonResponse,
@@ -51,13 +51,26 @@ export async function POST(request) {
       );
     }
 
-    const preferredModel = String(body.model || aiCfg.defaultModel || 'gemini-3-flash-preview').trim();
+    // Hydrate saved Movie Glossary from Neon Postgres so all episodes keep consistent character names & xưng hô!
+    let movieContext = body.movieContext || null;
+    if (movieContext && movieContext.slug && !movieContext.glossary) {
+      try {
+        await ensureSchema();
+        const sql = getSql();
+        const gRows = await sql`SELECT glossary_json FROM nki_movie_glossaries WHERE movie_slug = ${normalizeMovieSlug(movieContext.slug)} LIMIT 1`;
+        if (gRows?.[0]?.glossary_json) {
+          movieContext = { ...movieContext, glossary: gRows[0].glossary_json };
+        }
+      } catch { /* non-fatal */ }
+    }
+
+    const preferredModel = String(body.model || aiCfg.defaultModel || 'gemini-2.5-flash').trim();
     const { translated, modelUsed } = await translateTextsServerSide({
       texts: rawTexts,
       targetLang,
       apiKey: aiCfg.apiKey,
       preferredModel,
-      movieContext: body.movieContext || null,
+      movieContext,
     });
 
     metric('ai.translate', 1, { outcome: 'success', model: modelUsed });

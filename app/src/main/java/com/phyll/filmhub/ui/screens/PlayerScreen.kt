@@ -5,7 +5,11 @@ import android.app.PictureInPictureParams
 import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.os.Build
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.util.Rational
+import com.phyll.filmhub.cloud.CloudSyncClient
+import java.util.Locale
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
@@ -256,6 +260,25 @@ fun PlayerScreen(
     var seekOffsetSecs by remember { mutableIntStateOf(0) }
     var doubleTapSide by remember { mutableIntStateOf(0) }
     var isLandscapeRotated by remember { mutableStateOf(false) }
+
+    // #2 Sync active movie slug so Android/TV inherits shared Neon AI Character Glossary automatically
+    LaunchedEffect(movie.id) {
+        CloudSyncClient.activeMovieSlug = CloudSyncClient.normalizeMovieSlug(movie.id)
+    }
+
+    // #3 Native Android TextToSpeech AI Voice Dubbing + ExoPlayer Auto-Ducking
+    var ttsDubEnabled by remember { mutableStateOf(false) }
+    var ttsReady by remember { mutableStateOf(false) }
+    var lastSpokenSubText by remember { mutableStateOf("") }
+    val ttsEngine = remember {
+        var instance: TextToSpeech? = null
+        instance = TextToSpeech(context.applicationContext) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                ttsReady = true
+            }
+        }
+        instance
+    }
 
     val surfaceFocusRequester = remember { FocusRequester() }
     val playPauseFocusRequester = remember { FocusRequester() }
@@ -511,6 +534,56 @@ fun PlayerScreen(
             activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             chillAudioEffects.releaseEffects()
             subtitleManager.release()
+            runCatching {
+                ttsEngine?.stop()
+                ttsEngine?.shutdown()
+            }
+        }
+    }
+
+    // #3 Wire TTS Auto-Ducking to active subtitle text + playback state
+    DisposableEffect(ttsEngine, exoPlayer) {
+        ttsEngine?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {
+                activity?.runOnUiThread { runCatching { exoPlayer.volume = 0.30f } }
+            }
+            override fun onDone(utteranceId: String?) {
+                activity?.runOnUiThread { runCatching { exoPlayer.volume = 1.0f } }
+            }
+            @Deprecated("Deprecated in Java")
+            override fun onError(utteranceId: String?) {
+                activity?.runOnUiThread { runCatching { exoPlayer.volume = 1.0f } }
+            }
+        })
+        onDispose {
+            runCatching { exoPlayer.volume = 1.0f }
+        }
+    }
+
+    LaunchedEffect(ttsDubEnabled, ttsReady, renderState.primaryThaiText, isPlaying, isMinimized) {
+        if (!ttsDubEnabled || !ttsReady || !isPlaying || isMinimized) {
+            runCatching { ttsEngine?.stop() }
+            runCatching { exoPlayer.volume = 1.0f }
+            if (!ttsDubEnabled) lastSpokenSubText = ""
+            return@LaunchedEffect
+        }
+        val line = renderState.primaryThaiText?.trim().orEmpty()
+        if (line.isNotBlank() && line != lastSpokenSubText) {
+            lastSpokenSubText = line
+            val langCode = subtitleConfig.resolvedPrimaryLanguage().code.lowercase()
+            val loc = when (langCode) {
+                "vi" -> Locale("vi", "VN")
+                "th" -> Locale("th", "TH")
+                "zh" -> Locale.SIMPLIFIED_CHINESE
+                "ko" -> Locale.KOREAN
+                "ja" -> Locale.JAPANESE
+                else -> Locale.US
+            }
+            runCatching {
+                ttsEngine?.language = loc
+                ttsEngine?.setSpeechRate(1.15f)
+                ttsEngine?.speak(line, TextToSpeech.QUEUE_FLUSH, null, "nki_dub_${System.currentTimeMillis()}")
+            }
         }
     }
 
@@ -1676,6 +1749,56 @@ fun PlayerScreen(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        // #3 1-Tap AI Voice Dubbing (Auto-Ducking) Pill
+                        Row(
+                            modifier = Modifier
+                                .tvFocusableClickable(
+                                    shape = RoundedCornerShape(99.dp),
+                                    focusedBorderColor = EmeraldNeon,
+                                    unfocusedBorderColor = if (ttsDubEnabled) EmeraldNeon else CinemaGlassBorder,
+                                    onClick = {
+                                        lastUserInteractionTick = System.currentTimeMillis()
+                                        ttsDubEnabled = !ttsDubEnabled
+                                    }
+                                )
+                                .background(if (ttsDubEnabled) EmeraldPrimary.copy(alpha = 0.28f) else CinemaGlass)
+                                .padding(horizontal = 8.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = if (ttsDubEnabled) "DUB ON" else "DUB",
+                                color = if (ttsDubEnabled) EmeraldNeon else TextPrimary,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                maxLines = 1
+                            )
+                        }
+
+                        // #1 1-Tap Hardsub Cover Mask Pill
+                        Row(
+                            modifier = Modifier
+                                .tvFocusableClickable(
+                                    shape = RoundedCornerShape(99.dp),
+                                    focusedBorderColor = EmeraldNeon,
+                                    unfocusedBorderColor = if (subtitleConfig.hardsubMaskEnabled) EmeraldNeon else CinemaGlassBorder,
+                                    onClick = {
+                                        lastUserInteractionTick = System.currentTimeMillis()
+                                        onUpdateSubtitleConfig { it.copy(hardsubMaskEnabled = !it.hardsubMaskEnabled) }
+                                    }
+                                )
+                                .background(if (subtitleConfig.hardsubMaskEnabled) EmeraldPrimary.copy(alpha = 0.28f) else CinemaGlass)
+                                .padding(horizontal = 8.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = if (subtitleConfig.hardsubMaskEnabled) "MASK ON" else "MASK",
+                                color = if (subtitleConfig.hardsubMaskEnabled) EmeraldNeon else TextPrimary,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                maxLines = 1
+                            )
+                        }
+
                         // Primary Universal AI Subtitle Pill
                         Row(
                             modifier = Modifier

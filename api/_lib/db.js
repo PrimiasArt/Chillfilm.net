@@ -187,8 +187,17 @@ export async function ensureSchema() {
         poster TEXT NOT NULL DEFAULT '',
         year TEXT NOT NULL DEFAULT '',
         quality TEXT NOT NULL DEFAULT 'HD',
+        last_known_episode TEXT NOT NULL DEFAULT '',
         added_at BIGINT NOT NULL,
         PRIMARY KEY (user_id, item_key)
+      )
+    `;
+    await sql`ALTER TABLE nki_my_list ADD COLUMN IF NOT EXISTS last_known_episode TEXT NOT NULL DEFAULT ''`;
+    await sql`
+      CREATE TABLE IF NOT EXISTS nki_movie_glossaries (
+        movie_slug TEXT PRIMARY KEY,
+        glossary_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at BIGINT NOT NULL
       )
     `;
     await sql`

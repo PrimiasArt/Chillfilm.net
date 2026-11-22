@@ -1,5 +1,5 @@
 import { metric } from '@vercel/functions';
-import { getServerGeminiConfig } from '../_lib/db.js';
+import { ensureSchema, getServerGeminiConfig, getSql, normalizeMovieSlug } from '../_lib/db.js';
 import {
   checkAndIncrementAiQuota,
   jsonResponse,
@@ -46,7 +46,20 @@ export async function POST(request) {
       );
     }
 
-    const preferredModel = String(body.model || aiCfg.defaultModel || 'gemini-3-flash-preview').trim();
+    // Hydrate saved Movie Glossary from Neon Postgres so multi-chunk audio transcription keeps consistent character names!
+    let movieContext = body.movieContext || null;
+    if (movieContext && movieContext.slug && !movieContext.glossary) {
+      try {
+        await ensureSchema();
+        const sql = getSql();
+        const gRows = await sql`SELECT glossary_json FROM nki_movie_glossaries WHERE movie_slug = ${normalizeMovieSlug(movieContext.slug)} LIMIT 1`;
+        if (gRows?.[0]?.glossary_json) {
+          movieContext = { ...movieContext, glossary: gRows[0].glossary_json };
+        }
+      } catch { /* non-fatal */ }
+    }
+
+    const preferredModel = String(body.model || aiCfg.defaultModel || 'gemini-2.5-flash').trim();
     const { cues, modelUsed } = await transcribeAudioChunkServerSide({
       audioBase64,
       mimeType: String(body.mimeType || 'audio/aac'),
@@ -56,7 +69,7 @@ export async function POST(request) {
       apiKey: aiCfg.apiKey,
       preferredModel,
       preferTurboFlash: Boolean(body.preferTurboFlash),
-      movieContext: body.movieContext || null,
+      movieContext,
     });
 
     metric('ai.audio_sub', 1, { outcome: 'success', model: modelUsed });

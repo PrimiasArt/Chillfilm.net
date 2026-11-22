@@ -93,6 +93,26 @@ class PreferencesManager(context: Context) {
         prefs.edit().putInt(KEY_SKIP_INTRO_SEC, clamped).apply()
     }
 
+    /** #7 Per-movie Skip Intro memory (falls back to global default 85s). */
+    fun getSkipIntroForMovie(movieId: String): Int {
+        val slug = CloudSyncClient.normalizeMovieSlug(movieId)
+        val saved = prefs.getInt("${KEY_MOVIE_INTRO_PREFIX}$slug", -1)
+        return if (saved in 10..300) saved else _skipIntroSec.value
+    }
+
+    fun saveSkipIntroForMovie(movieId: String, seconds: Int) {
+        val slug = CloudSyncClient.normalizeMovieSlug(movieId)
+        prefs.edit().putInt("${KEY_MOVIE_INTRO_PREFIX}$slug", seconds.coerceIn(10, 300)).apply()
+    }
+
+    private val _ttsDubbingEnabled = MutableStateFlow(prefs.getBoolean(KEY_TTS_DUBBING, false))
+    val ttsDubbingEnabled: StateFlow<Boolean> = _ttsDubbingEnabled.asStateFlow()
+
+    fun setTtsDubbingEnabled(enabled: Boolean) {
+        _ttsDubbingEnabled.value = enabled
+        prefs.edit().putBoolean(KEY_TTS_DUBBING, enabled).apply()
+    }
+
     private val _cloudSession = MutableStateFlow(loadCloudSession().also { CloudSyncClient.applySession(it) })
     val cloudSession: StateFlow<CloudSession?> = _cloudSession.asStateFlow()
 
@@ -559,6 +579,8 @@ class PreferencesManager(context: Context) {
                 backdropUrl = r.poster,
                 providerId = providerId,
                 providerName = "My List",
+                hasNewEpisode = r.hasNewEpisode,
+                latestEpisode = r.latestEpisode,
                 detailLookupId = lookup
             )
             favs.add(id)
@@ -826,6 +848,8 @@ class PreferencesManager(context: Context) {
         private const val KEY_FAVORITES = "favorite_movie_ids"
         private const val KEY_MY_LIST_V1 = "my_list_movies_v1"
         private const val KEY_SKIP_INTRO_SEC = "skip_intro_sec_v1"
+        private const val KEY_MOVIE_INTRO_PREFIX = "skip_intro_movie_"
+        private const val KEY_TTS_DUBBING = "tts_dubbing_enabled_v1"
         private const val KEY_CUSTOM_PROVIDERS = "custom_vod_providers_v1"
         private const val KEY_SERIES_SYNC_PROFILES = "series_subtitle_profiles_v1"
     }

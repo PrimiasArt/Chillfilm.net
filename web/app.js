@@ -12,7 +12,8 @@ import {
   parseHlsMediaSegments,
   buildHlsAudioWindows,
   extractHlsWindowAdtsBase64,
-} from './subtitles.js?v=12';
+  downloadSrtFile,
+} from './subtitles.js?v=14';
 import { UI_LANGUAGES, resolveUiLang, t } from './i18n.js?v=3';
 import {
   normalizeMovieSlug,
@@ -44,7 +45,10 @@ import {
   partyControl,
   partySendChat,
   partyLeave,
-} from './sync.js?v=12';
+  fetchMovieGlossary,
+  saveMovieGlossary,
+  fetchAiVibeSearch,
+} from './sync.js?v=14';
 
 const PHIM_API = 'https://phimapi.com';
 const PHIM_CDN = 'https://phimimg.com';
@@ -99,8 +103,15 @@ const DEFAULT_PREFS = {
   boxOpacity: 0.78,
   syncOffsetMs: 0,
   skipIntroSec: 85,
+  hardsubMask: false,
+  hardsubMaskMode: 'blur',
+  hardsubMaskHeight: 58,
+  hardsubMaskBottom: 3,
+  ttsDubbing: false,
+  ttsRate: 1.15,
+  ambientGlow: true,
   geminiApiKey: '',
-  geminiModel: 'gemini-3-flash-preview',
+  geminiModel: 'gemini-2.5-flash',
   tvIp: '',
 };
 
@@ -225,7 +236,35 @@ const state = {
   adminGlobalModel: '',
   globalCountries: [],
   crawlerStatus: null,
+  // V14 Super-Upgrade Pack (#1-#11)
+  cloudSubSlugs: new Set(),
+  latestEpisodeMap: {},
+  movieIntroMap: loadMovieIntroMap(),
+  ttsLastSpokenText: '',
+  ttsDucked: false,
+  ambientTimer: null,
+  scrubHls: null,
+  scrubLoadedUrl: '',
+  scrubLastHoverTs: 0,
 };
+
+const MOVIE_INTRO_STORAGE_KEY = 'chillfilm_nki_movie_intro_v1';
+function loadMovieIntroMap() {
+  try {
+    const obj = JSON.parse(localStorage.getItem(MOVIE_INTRO_STORAGE_KEY) || '{}');
+    return obj && typeof obj === 'object' ? obj : {};
+  } catch {
+    return {};
+  }
+}
+function saveMovieIntroSec(movieSlug, sec) {
+  if (!movieSlug) return;
+  const k = normalizeMovieSlug(movieSlug);
+  state.movieIntroMap[k] = Math.max(10, Math.min(300, Math.round(Number(sec) || 85)));
+  try {
+    localStorage.setItem(MOVIE_INTRO_STORAGE_KEY, JSON.stringify(state.movieIntroMap));
+  } catch { /* ignore */ }
+}
 
 function loadCachedLiveModels() {
   try {
@@ -322,6 +361,7 @@ function toggleMyList(movie) {
       poster: movie.poster || '',
       year: movie.year || '',
       quality: movie.quality || 'HD',
+      lastKnownEpisode: movie.episode_current || movie.quality || '',
       addedAt: Date.now(),
     };
     list.unshift(entry);
@@ -333,7 +373,100 @@ function toggleMyList(movie) {
     showToast(`❤️ Saved "${entry.name}" to My List!`);
   }
   renderMyListSection();
+  refreshEpisodeReleaseNotifications();
   return added;
+}
+
+/* ==================== #10 EPISODE RELEASE TRACKER (MY LIST BELL NOTIFICATIONS) ==================== */
+function extractEpNumber(str) {
+  const m = String(str || '').match(/(?:tập|tap|ep|episode|第)?\s*(\d{1,4})/i);
+  return m ? Number(m[1]) : 0;
+}
+
+function refreshEpisodeReleaseNotifications() {
+  const dot = $('notifCountDot');
+  const listEl = $('notifList');
+  if (!dot || !listEl) return;
+
+  const myList = loadMyList();
+  const alerts = [];
+  for (const item of myList) {
+    const latestEp = item.latestEpisode || state.latestEpisodeMap[item.slug] || '';
+    const knownEp = item.lastKnownEpisode || item.quality || '';
+    const newNum = extractEpNumber(latestEp);
+    const oldNum = extractEpNumber(knownEp);
+    const isNew = Boolean(
+      item.hasNewEpisode ||
+      (latestEp && newNum > 0 && ((oldNum > 0 && newNum > oldNum) || (!oldNum && /tập|ep|第/i.test(latestEp) && latestEp !== knownEp)))
+    );
+    if (isNew) {
+      alerts.push({ item, knownEp, latestEp });
+    }
+  }
+
+  dot.style.display = alerts.length > 0 ? 'inline-flex' : 'none';
+  dot.textContent = alerts.length > 9 ? '9+' : String(alerts.length);
+
+  if (!alerts.length) {
+    listEl.innerHTML = `<div class="notif-empty">✅ Tất cả phim bộ trong ❤️ My List đều đã cập nhật mới nhất.<br><span style="opacity:.75;font-size:11px;">Auto-Crawler tự kiểm tra tập mới mỗi 3 tiếng.</span></div>`;
+    return;
+  }
+
+  listEl.innerHTML = '';
+  alerts.forEach(({ item, knownEp, latestEp }) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'notif-item';
+    btn.innerHTML = `
+      <img src="${escapeHtml(item.poster || './assets/icon-192.png?v=2')}" alt="" />
+      <div style="min-width:0;flex:1;">
+        <div style="font-size:12.5px;font-weight:800;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(getDisplayTitle(item))}</div>
+        <div style="font-size:11px;color:#86efac;font-weight:700;margin-top:2px;">🆕 ${escapeHtml(knownEp ? `${knownEp} → ` : '')}${escapeHtml(latestEp)}</div>
+      </div>
+    `;
+    btn.onclick = () => {
+      markMyListEpisodeSeen(item.slug, latestEp);
+      $('notifMenu')?.classList.remove('open');
+      openMovieDetail(item, false);
+    };
+    listEl.appendChild(btn);
+  });
+}
+
+function markMyListEpisodeSeen(slug, latestEp) {
+  const list = loadMyList();
+  let updated = null;
+  for (const it of list) {
+    if (normalizeMovieSlug(it.slug) === normalizeMovieSlug(slug)) {
+      it.lastKnownEpisode = latestEp || it.latestEpisode || it.lastKnownEpisode || '';
+      it.hasNewEpisode = false;
+      updated = it;
+    }
+  }
+  saveMyList(list);
+  if (updated && isCloudSignedIn()) {
+    cloudPushState({ myList: [updated] }).catch(() => {});
+  }
+  refreshEpisodeReleaseNotifications();
+}
+
+function markAllNotifsRead() {
+  const list = loadMyList();
+  const changed = [];
+  for (const it of list) {
+    const latestEp = it.latestEpisode || state.latestEpisodeMap[it.slug] || '';
+    if (latestEp) {
+      it.lastKnownEpisode = latestEp;
+      it.hasNewEpisode = false;
+      changed.push(it);
+    }
+  }
+  saveMyList(list);
+  if (changed.length && isCloudSignedIn()) {
+    cloudPushState({ myList: changed }).catch(() => {});
+  }
+  refreshEpisodeReleaseNotifications();
+  showToast('🔔 Đã đánh dấu đã xem tất cả thông báo tập mới');
 }
 
 function renderMyListSection() {
@@ -909,6 +1042,12 @@ async function loadCategory(catId, { forceRefresh = false, silent = false } = {}
       if (feed?.ok && Array.isArray(feed.rows) && feed.rows.length > 0) {
         state.catalogUpdatedAt = feed.updatedAt || Date.now();
         state.crawlerStatus = feed.crawlerStatus || null;
+        if (Array.isArray(feed.cloudSubSlugs)) {
+          feed.cloudSubSlugs.forEach((s) => state.cloudSubSlugs.add(normalizeMovieSlug(s)));
+        }
+        if (feed.latestEpisodeMap && typeof feed.latestEpisodeMap === 'object') {
+          state.latestEpisodeMap = { ...state.latestEpisodeMap, ...feed.latestEpisodeMap };
+        }
         if (Array.isArray(feed.countries) && feed.countries.length) {
           renderCountryPicker(feed.countries);
         }
@@ -920,6 +1059,7 @@ async function loadCategory(catId, { forceRefresh = false, silent = false } = {}
         setHeroSlides(heroList);
         renderHistorySection();
         renderMyListSection();
+        refreshEpisodeReleaseNotifications();
         renderHomeSwimlanes();
         if (forceRefresh && !silent) showToast('🔥 Updated latest multi-source movies!');
         return;
@@ -1093,6 +1233,7 @@ async function executeAdvancedFilter() {
 
 async function executeSearch(keyword) {
   const q = (keyword || '').trim();
+  if ($('aiVibeBanner')) $('aiVibeBanner').style.display = 'none';
   if (!q) {
     loadCategory(state.activeCategory);
     return;
@@ -1120,6 +1261,53 @@ async function executeSearch(keyword) {
     renderMovieGrid(list, tr('searchResultsTitle', { q, n: list.length }));
   } catch {
     showToast(tr('loadError'));
+  }
+}
+
+/* ==================== #9 AI VIBE & MOOD NATURAL-LANGUAGE SEARCH ==================== */
+async function executeAiVibeSearch(rawQuery) {
+  const q = String(rawQuery || '').trim();
+  if (!q) {
+    showToast('✨ Gõ mô tả phim bạn muốn xem (vd: "phim tiên hiệp đánh nhau cháy" hoặc "trinh thám Hàn sau 2022")!');
+    $('searchInputDesktop')?.focus();
+    return;
+  }
+  closeDetailView();
+  $('heroBox').style.display = 'none';
+  $('historySection').style.display = 'none';
+  $('homeSwimlanes').style.display = 'none';
+  $('catalogGridSection').style.display = 'block';
+  document.querySelector('.content-lift')?.classList.add('no-hero');
+  $('topbar')?.classList.add('solid');
+  const banner = $('aiVibeBanner');
+  if (banner) {
+    banner.style.display = 'flex';
+    banner.innerHTML = `<span>✨ Gemini AI đang phân tích gu phim: "${escapeHtml(q)}"...</span>`;
+  }
+  $('catalogTitle').textContent = `✨ AI Vibe Search: "${q}"`;
+  $('catalogGrid').innerHTML = renderSkeletonGridHtml(12);
+
+  try {
+    const res = await fetchAiVibeSearch(q);
+    const items = Array.isArray(res?.items) ? res.items : [];
+    if (banner) {
+      banner.style.display = 'flex';
+      banner.innerHTML = `
+        <span>✨ ${escapeHtml(res?.vibeSummary || `Đã lọc ${items.length} phim phù hợp với "${q}"`)}</span>
+        <button class="btn-glass" id="clearAiVibeBtn" type="button" style="padding:4px 10px;font-size:11px;flex-shrink:0;">✕ Đóng</button>
+      `;
+      if ($('clearAiVibeBtn')) {
+        $('clearAiVibeBtn').onclick = () => {
+          banner.style.display = 'none';
+          loadCategory('hot');
+        };
+      }
+    }
+    renderMovieGrid(items, `✨ AI Gợi Ý cho "${q}" (${items.length})`);
+  } catch (err) {
+    if (banner) banner.style.display = 'none';
+    showToast(`AI Search fallback: ${err?.message || 'error'}`);
+    executeSearch(q);
   }
 }
 
@@ -1313,6 +1501,7 @@ function createMovieCardElement(movie) {
   const metaLine = metaBits.length ? metaBits.join(' • ') : (movie.origin_name || 'HD • AI Sub');
   const posterSrc = movie.poster || './assets/icon-192.png?v=2';
 
+  const hasCloudSub = Boolean(movie.hasCloudSub || (movie.slug && state.cloudSubSlugs.has(normalizeMovieSlug(movie.slug))));
   el.className = 'movie-card';
   el.innerHTML = `
     <div class="poster-wrap">
@@ -1320,6 +1509,7 @@ function createMovieCardElement(movie) {
       <span class="card-nki-mark">NKI</span>
       <span class="card-badge">AI</span>
       <span class="card-quality">${escapeHtml((movie.episode_current || movie.quality || 'HD').slice(0, 12))}</span>
+      ${hasCloudSub ? '<span class="card-cloud-sub-badge" title="Đã dịch sẵn trên NKI Cloud — mở xem có Sub ngay">☁️ SUB AI</span>' : ''}
       <div class="card-hover-play"><span>${SVG_ICONS.playCard}</span></div>
       ${movie.progress ? `<div class="card-progress"><div class="card-progress-fill" style="width:${Math.round(movie.progress * 100)}%"></div></div>` : ''}
     </div>
@@ -1510,6 +1700,10 @@ function renderDetailView(detail) {
       }).join('')
     : '';
 
+  const actors = Array.isArray(detail.actors) ? detail.actors.filter(Boolean).slice(0, 10) : [];
+  const directors = Array.isArray(detail.directors) ? detail.directors.filter(Boolean).slice(0, 4) : [];
+  const hasScore = Number(detail.tmdbScore || 0) > 0;
+
   dv.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
       <button class="btn-glass" id="detailBackBtn">${escapeHtml(tr('backToCatalog'))}</button>
@@ -1519,16 +1713,19 @@ function renderDetailView(detail) {
       <img class="detail-poster" src="${escapeHtml(detail.poster || './assets/icon-192.png?v=2')}" alt="${escapeHtml(dispTitle)}" onerror="if(!this.dataset.fb){this.dataset.fb='1';this.src='./assets/icon-192.png?v=2';}" />
       <div style="display:flex;flex-direction:column;gap:10px;min-width:0;">
         <div class="hero-meta">
-          <span class="match-score">98% Match</span>
+          <span class="match-score">${hasScore ? `★ ${Number(detail.tmdbScore).toFixed(1)}` : '98% Match'}</span>
           <span class="badge-ai" id="detailHeroSubBadge">AI SUB (${lang.badge})</span>
           <span style="font-size:12px;color:#b3b3b3;font-weight:700;">${escapeHtml(detail.year)} • ${escapeHtml(detail.time || detail.quality)}</span>
         </div>
         <h2 style="font-size:clamp(20px,3.2vw,32px);font-weight:900;">${escapeHtml(dispTitle)}</h2>
         ${origSubtitle ? `<div style="font-size:13px;color:#b3b3b3;">${escapeHtml(origSubtitle)}</div>` : ''}
         <p style="font-size:13.5px;color:#e5e5e5;line-height:1.6;">${escapeHtml(dispDesc)}</p>
+        ${directors.length ? `<div class="detail-people-row"><span>Đạo diễn:</span>${directors.map((d) => `<button type="button" class="person-chip" data-person="${escapeHtml(d)}">${escapeHtml(d)}</button>`).join('')}</div>` : ''}
+        ${actors.length ? `<div class="detail-people-row"><span>Diễn viên:</span>${actors.map((a) => `<button type="button" class="person-chip" data-person="${escapeHtml(a)}">${escapeHtml(a)}</button>`).join('')}</div>` : ''}
         <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:6px;">
           ${resumeEp ? `<button class="btn-nf-play" id="detailPlayPrimary">${escapeHtml(primaryBtnLabel)}</button>` : `<span style="color:#fca5a5;font-size:13px;">${escapeHtml(tr('noStream'))}</span>`}
           <button class="btn-nf-mylist ${savedInMyList ? 'saved' : ''}" id="detailMyListBtn" type="button">${savedInMyList ? '✓ In My List' : '+ My List'}</button>
+          <button class="btn-glass" id="detailTrailerBtn" type="button" style="padding:10px 15px;font-size:13.5px;">🎬 Xem Trailer</button>
         </div>
       </div>
     </div>
@@ -1553,6 +1750,7 @@ function renderDetailView(detail) {
       <div class="detail-sub-actions">
         <button class="btn-ai-sub-primary" id="detailAutoSubBtn" type="button">✨ Tự dịch Sub AI ngay</button>
         <button class="btn-nf-play" id="detailSubWatchNowBtn" type="button" style="display:none;padding:9px 15px;font-size:13px;">▶ Xem ngay với Sub</button>
+        <button class="btn-glass" id="detailDownloadSrtBtn" type="button" style="padding:8px 13px;font-size:12.5px;">⬇️ Tải .SRT</button>
         <label class="btn-glass" style="cursor:pointer;padding:8px 13px;font-size:12.5px;">
           📂 Nạp .SRT &amp; Dịch
           <input type="file" id="detailLocalSubFile" accept=".srt,.vtt,.ass,.ssa,.txt" style="display:none;" />
@@ -1569,6 +1767,27 @@ function renderDetailView(detail) {
           <span class="detail-sub-pct" id="detailSubPercent">0%</span>
         </div>
       </div>
+
+      <!-- #2 AI Character & Terminology Glossary (Persistent across episodes) -->
+      <details class="detail-glossary-details" id="detailGlossaryDetails">
+        <summary id="detailGlossarySummary">🧠 Từ điển nhân vật &amp; Xưng hô AI Glossary (${(detail.glossary?.terms || []).length} thuật ngữ)</summary>
+        <div style="margin-top:8px;display:flex;flex-direction:column;gap:8px;">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+            <button class="btn-grad" id="detailGenGlossaryBtn" type="button" style="padding:6px 12px;font-size:11.5px;">✨ AI Tự tạo từ điển phim</button>
+            <span style="font-size:11px;color:#9ca3af;">Giữ đồng nhất tên nhân vật, chiêu thức &amp; xưng hô xuyên suốt mọi tập phim.</span>
+          </div>
+          <div class="glossary-chips" id="detailGlossaryChips"></div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <input class="field-input" id="glossarySrcInput" placeholder="Tên gốc (vd: 萧炎)" style="flex:1;min-width:110px;padding:6px 9px;font-size:12px;" />
+            <input class="field-input" id="glossaryDstInput" placeholder="Dịch cố định (vd: Tiêu Viêm)" style="flex:1;min-width:130px;padding:6px 9px;font-size:12px;" />
+            <button class="btn-glass" id="glossaryAddTermBtn" type="button" style="padding:6px 11px;font-size:12px;">+ Thêm</button>
+          </div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <input class="field-input" id="glossaryToneInput" value="${escapeHtml(detail.glossary?.tone || '')}" placeholder="Quy tắc xưng hô / văn phong (vd: cổ trang tiên hiệp: huynh/đệ, tiền bối/tại hạ)" style="flex:1;min-width:180px;padding:6px 9px;font-size:12px;" />
+            <button class="btn-glass" id="glossarySaveToneBtn" type="button" style="padding:6px 11px;font-size:12px;">💾 Lưu</button>
+          </div>
+        </div>
+      </details>
     </section>
     ` : ''}
 
@@ -1588,6 +1807,18 @@ function renderDetailView(detail) {
       $('detailMyListBtn').textContent = nowSaved ? '✓ In My List' : '+ My List';
     };
   }
+  if ($('detailTrailerBtn')) {
+    $('detailTrailerBtn').onclick = () => openTrailerModal(detail);
+  }
+  dv.querySelectorAll('[data-person]').forEach((chip) => {
+    chip.onclick = () => {
+      const name = chip.dataset.person || '';
+      if (name) {
+        if ($('searchInputDesktop')) $('searchInputDesktop').value = name;
+        executeSearch(name);
+      }
+    };
+  });
 
   // Bind Detail Page AI Subtitle Pre-Translator Card
   if (defaultSubEp) {
@@ -1680,6 +1911,113 @@ function renderDetailView(detail) {
           localCues: cues,
           localLabel: f.name,
         });
+      };
+    }
+
+    if ($('detailDownloadSrtBtn')) {
+      $('detailDownloadSrtBtn').onclick = async () => {
+        const ep = getPickedDetailEp();
+        const langCode = $('detailSubLangSelect')?.value || state.prefs.primaryLang || 'vi';
+        let cuesToSave = [];
+        if (isSubJobFor(detail, ep, langCode) && state.subJob.cues?.length >= 3) {
+          cuesToSave = state.subJob.cues;
+        } else {
+          const cached = await loadCachedEpisodeSub(buildSubCacheKey(detail.slug, ep, langCode));
+          if (cached?.primaryCues?.length >= 3) cuesToSave = cached.primaryCues;
+        }
+        if (!cuesToSave.length) {
+          showToast('Chưa có phụ đề đã dịch cho tập này — hãy bấm "✨ Tự dịch Sub AI ngay" trước!');
+          return;
+        }
+        const safeFile = `${normalizeMovieSlug(detail.slug)}-${normalizeEpisodeKey(ep.name || ep.slug)}-${langCode}.srt`;
+        downloadSrtFile(cuesToSave, safeFile);
+        showToast(`⬇️ Đã tải file ${safeFile} (${cuesToSave.length} câu)!`);
+      };
+    }
+
+    // #2 AI Glossary Editor & Generator inside Detail Card
+    const renderGlossaryBox = () => {
+      const gl = detail.glossary || { terms: [], tone: '' };
+      const terms = Array.isArray(gl.terms) ? gl.terms : [];
+      if ($('detailGlossarySummary')) {
+        $('detailGlossarySummary').textContent = `🧠 Từ điển nhân vật & Xưng hô AI Glossary (${terms.length} thuật ngữ)`;
+      }
+      const chipsWrap = $('detailGlossaryChips');
+      if (chipsWrap) {
+        chipsWrap.innerHTML = terms.length
+          ? terms.map((t, idx) => `<span class="glossary-chip">${escapeHtml(t.src)} → <strong>${escapeHtml(t.dst)}</strong> <button type="button" data-del-gl="${idx}" style="margin-left:4px;color:#fca5a5;font-size:10px;">✕</button></span>`).join('')
+          : '<span style="font-size:11.5px;color:#9ca3af;">Chưa có từ điển — bấm "✨ AI Tự tạo từ điển phim" để AI tự trích xuất tên nhân vật &amp; xưng hô!</span>';
+        chipsWrap.querySelectorAll('[data-del-gl]').forEach((delBtn) => {
+          delBtn.onclick = async () => {
+            const idx = Number(delBtn.dataset.delGl);
+            terms.splice(idx, 1);
+            detail.glossary = { terms, tone: $('glossaryToneInput')?.value.trim() || gl.tone || '' };
+            renderGlossaryBox();
+            saveMovieGlossary({ slug: detail.slug, ...detail.glossary }).catch(() => {});
+          };
+        });
+      }
+      if ($('glossaryToneInput') && gl.tone && !$('glossaryToneInput').value) {
+        $('glossaryToneInput').value = gl.tone;
+      }
+    };
+    renderGlossaryBox();
+
+    if ($('detailGenGlossaryBtn')) {
+      $('detailGenGlossaryBtn').onclick = async () => {
+        const btn = $('detailGenGlossaryBtn');
+        const oldTxt = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = '⏳ AI đang phân tích nhân vật...';
+        try {
+          const pickedLang = $('detailSubLangSelect')?.value || state.prefs.primaryLang || 'vi';
+          const gl = await fetchMovieGlossary({
+            slug: detail.slug,
+            title: getDisplayTitle(detail),
+            originTitle: detail.origin_name || detail.name || '',
+            synopsis: getDisplayDesc(detail),
+            genres: detail.genres || [],
+            lang: pickedLang,
+            generate: true,
+            force: true,
+          });
+          detail.glossary = gl;
+          if ($('glossaryToneInput')) $('glossaryToneInput').value = gl.tone || '';
+          renderGlossaryBox();
+          showToast(`🧠 Đã tạo AI Glossary (${(gl.terms || []).length} tên nhân vật / thuật ngữ)!`);
+        } catch (err) {
+          showToast(`Lỗi tạo từ điển: ${err?.message || 'error'}`);
+        } finally {
+          btn.disabled = false;
+          btn.textContent = oldTxt;
+        }
+      };
+    }
+
+    if ($('glossaryAddTermBtn')) {
+      $('glossaryAddTermBtn').onclick = async () => {
+        const src = ($('glossarySrcInput')?.value || '').trim();
+        const dst = ($('glossaryDstInput')?.value || '').trim();
+        if (!src || !dst) return showToast('Nhập cả tên gốc và tên dịch cố định!');
+        const gl = detail.glossary || { terms: [], tone: '' };
+        gl.terms = [...(gl.terms || []).filter((t) => t.src !== src), { src, dst }].slice(0, 30);
+        gl.tone = ($('glossaryToneInput')?.value || gl.tone || '').trim();
+        detail.glossary = gl;
+        $('glossarySrcInput').value = '';
+        $('glossaryDstInput').value = '';
+        renderGlossaryBox();
+        await saveMovieGlossary({ slug: detail.slug, ...gl }).catch(() => {});
+        showToast(`💾 Đã lưu thuật ngữ: ${src} → ${dst}`);
+      };
+    }
+
+    if ($('glossarySaveToneBtn')) {
+      $('glossarySaveToneBtn').onclick = async () => {
+        const gl = detail.glossary || { terms: [], tone: '' };
+        gl.tone = ($('glossaryToneInput')?.value || '').trim();
+        detail.glossary = gl;
+        await saveMovieGlossary({ slug: detail.slug, ...gl }).catch(() => {});
+        showToast('💾 Đã lưu quy tắc xưng hô cho toàn bộ phim!');
       };
     }
 
@@ -1908,7 +2246,11 @@ function getCurrentMovieContext() {
   };
 }
 
-function getSkipIntroSec() {
+function getSkipIntroSec(movie = state.currentMovie) {
+  if (movie?.slug) {
+    const perMovie = Number(state.movieIntroMap?.[normalizeMovieSlug(movie.slug)]);
+    if (Number.isFinite(perMovie) && perMovie >= 10) return Math.min(300, Math.round(perMovie));
+  }
   const n = Number(state.prefs.skipIntroSec);
   if (!Number.isFinite(n) || n < 10) return 85;
   return Math.min(300, Math.round(n));
@@ -2212,8 +2554,10 @@ function buildMovieContext(movie) {
   const m = movie || state.currentMovie;
   if (!m) return null;
   return {
+    slug: m.slug || '',
     title: m.nameEn || m.origin_name || m.name || '',
     genres: Array.isArray(m.genres) ? m.genres.slice(0, 4) : [],
+    glossary: m.glossary || null,
   };
 }
 
@@ -2555,6 +2899,7 @@ async function persistJobSubCache({ movie, episode, langCode, sourceLangCode, tr
 
   if (pushCloud && isCloudSignedIn()) {
     state.lastCloudSubPushBatch = Date.now();
+    state.cloudSubSlugs.add(normalizeMovieSlug(movie.slug));
     cloudSaveSubtitle({
       movieSlug: movie.slug,
       episodeNameOrSlug: episode.name || episode.slug,
@@ -3027,6 +3372,23 @@ async function startUnifiedAiSubJob({
   j.audioMode = false;
   j.notifiedReady = false;
   syncAllSubProgressUi();
+
+  // #2 Auto-prepare AI Character & Terminology Glossary in background (non-blocking) for consistent series translation!
+  if (movie.slug && (!movie.glossary || !(movie.glossary.terms || []).length) && isCloudSignedIn()) {
+    fetchMovieGlossary({
+      slug: movie.slug,
+      title: getDisplayTitle(movie),
+      originTitle: movie.origin_name || movie.name || '',
+      synopsis: getDisplayDesc(movie),
+      genres: movie.genres || [],
+      lang: targetLang.code,
+      generate: true,
+    }).then((gl) => {
+      if (gl && ((gl.terms || []).length > 0 || gl.tone)) {
+        movie.glossary = gl;
+      }
+    }).catch(() => {});
+  }
 
   try {
     // 0. Direct local .SRT file uploaded by user
@@ -3734,6 +4096,9 @@ function openPlayer(movie, episode, startSec = 0, { preserveFailover = false, pr
   if ($('miniTitle')) $('miniTitle').textContent = `${getDisplayTitle(movie)} • ${episode.name}`;
   updateSubStatusBadge(tr('checkingSavedSub'));
   applyVolumeBoost(state.volumeScale);
+  applyHardsubMaskUi();
+  syncTtsUi();
+  stopTtsSpeech();
   setControlsVisible(true);
 
   // Destroy previous HLS instance
@@ -3834,6 +4199,8 @@ function openPlayer(movie, episode, startSec = 0, { preserveFailover = false, pr
   }
 
   // Auto-discover (or seamlessly attach to Detail Page pre-translator / 10-min HLS lookahead!)
+  initScrubPreviewForStream(streamUrl);
+  if (state.prefs.ambientGlow) startAmbientGlowLoop();
   autoLoadSubtitlesForMovie(movie, episode, resolvedStartSec);
 }
 
@@ -3882,6 +4249,9 @@ function closePlayer(e) {
     e.stopPropagation();
   }
   stopActiveSubJob(true, true);
+  stopTtsSpeech();
+  stopAmbientGlowLoop();
+  destroyScrubPreview();
   cancelAutoNext(false);
   clearStallWatchdog();
   closePlayerDrawer();
@@ -4262,6 +4632,247 @@ function renderActiveSubtitle(currentMs) {
     html += `<div class="sub-secondary" style="font-size:${state.prefs.secondarySize}px;color:${state.prefs.secondaryColor}">${escapeHtml(sText).replace(/\n/g, '<br>')}</div>`;
   }
   pill.innerHTML = html;
+
+  // #3 AI Voice Dubbing / TTS Auto-Ducking synchronized to active cue
+  if (state.prefs.ttsDubbing && pText && !$('videoEl')?.paused && !state.isMinimized) {
+    speakSubtitleLineWithDucking(pText);
+  }
+}
+
+/* ==================== V14 CINEMA PRO ENGINES (#1 HARDSUB MASK, #3 AI TTS DUB, #5 SCRUB THUMB, #6 AMBIENT GLOW, #8 QR TV, #11 TRAILER) ==================== */
+
+// #1 Hardsub Blur / Mask Overlay
+function applyHardsubMaskUi() {
+  const mask = $('hardsubMask');
+  const subLayer = $('subLayer');
+  const on = Boolean(state.prefs.hardsubMask);
+  const mode = state.prefs.hardsubMaskMode === 'solid' ? 'solid' : 'blur';
+  const height = Math.max(24, Math.min(130, Number(state.prefs.hardsubMaskHeight) || 58));
+  const bottom = Math.max(0, Math.min(26, Number(state.prefs.hardsubMaskBottom) || 3));
+
+  if (mask) {
+    mask.style.display = on ? 'block' : 'none';
+    mask.classList.toggle('mode-solid', mode === 'solid');
+    mask.style.height = `${height}px`;
+    mask.style.bottom = `${bottom}%`;
+  }
+  if (subLayer) {
+    subLayer.style.zIndex = '15';
+  }
+  if ($('hudMaskBtn')) $('hudMaskBtn').classList.toggle('active', on);
+  if ($('hardsubMaskToggle')) $('hardsubMaskToggle').checked = on;
+  if ($('hardsubMaskMode')) $('hardsubMaskMode').value = mode;
+  if ($('hardsubHeightRange')) $('hardsubHeightRange').value = String(height);
+  if ($('hardsubHeightLabel')) $('hardsubHeightLabel').textContent = `${height}px`;
+  if ($('hardsubBottomRange')) $('hardsubBottomRange').value = String(bottom);
+  if ($('hardsubBottomLabel')) $('hardsubBottomLabel').textContent = `${bottom}%`;
+}
+
+// #3 AI Voice Dubbing / TTS with Web Audio Auto-Ducking
+function setTtsAudioDuck(ducked) {
+  if (state.ttsDucked === ducked) return;
+  state.ttsDucked = ducked;
+  const baseVol = state.volumeScale;
+  const targetVol = ducked ? baseVol * 0.32 : baseVol;
+  const video = $('videoEl');
+  if (state.gainNode && state.audioCtx) {
+    try {
+      state.gainNode.gain.setTargetAtTime(Math.max(0, targetVol), state.audioCtx.currentTime, 0.08);
+      return;
+    } catch { /* fallback below */ }
+  }
+  if (video) {
+    video.volume = Math.max(0, Math.min(1, targetVol));
+  }
+}
+
+function stopTtsSpeech() {
+  state.ttsLastSpokenText = '';
+  try { window.speechSynthesis?.cancel?.(); } catch { /* ignore */ }
+  setTtsAudioDuck(false);
+}
+
+function syncTtsUi() {
+  const on = Boolean(state.prefs.ttsDubbing);
+  const rate = Math.max(0.85, Math.min(1.5, Number(state.prefs.ttsRate) || 1.15));
+  if ($('hudTtsBtn')) $('hudTtsBtn').classList.toggle('active', on);
+  if ($('ttsDubToggle')) $('ttsDubToggle').checked = on;
+  if ($('ttsRateRange')) $('ttsRateRange').value = String(Math.round(rate * 100));
+  if ($('ttsRateLabel')) $('ttsRateLabel').textContent = `${rate.toFixed(2)}x`;
+}
+
+function speakSubtitleLineWithDucking(text) {
+  if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!clean || clean === state.ttsLastSpokenText) return;
+  state.ttsLastSpokenText = clean;
+
+  try {
+    window.speechSynthesis.cancel();
+    const utter = new SpeechSynthesisUtterance(clean);
+    const langCode = resolveLanguage(state.prefs.primaryLang).code;
+    const bcpMap = { vi: 'vi-VN', en: 'en-US', th: 'th-TH', zh: 'zh-CN', 'zh-TW': 'zh-TW', ko: 'ko-KR', ja: 'ja-JP', fr: 'fr-FR', es: 'es-ES', de: 'de-DE' };
+    const wantLang = bcpMap[langCode] || langCode || 'vi-VN';
+    utter.lang = wantLang;
+    utter.rate = Math.max(0.85, Math.min(1.5, Number(state.prefs.ttsRate) || 1.15));
+    const voices = window.speechSynthesis.getVoices?.() || [];
+    const matched = voices.find((v) => v.lang?.toLowerCase().startsWith(wantLang.slice(0, 2).toLowerCase()));
+    if (matched) utter.voice = matched;
+
+    utter.onstart = () => setTtsAudioDuck(true);
+    utter.onend = () => setTtsAudioDuck(false);
+    utter.onerror = () => setTtsAudioDuck(false);
+    window.speechSynthesis.speak(utter);
+  } catch {
+    setTtsAudioDuck(false);
+  }
+}
+
+// #6 Ambient Cinema Glow (4 FPS ultra-light 32x18 frame sampler behind video)
+function stopAmbientGlowLoop() {
+  clearInterval(state.ambientTimer);
+  state.ambientTimer = null;
+  $('ambientGlowCanvas')?.classList.remove('active');
+}
+
+function startAmbientGlowLoop() {
+  stopAmbientGlowLoop();
+  const canvas = $('ambientGlowCanvas');
+  const video = $('videoEl');
+  if (!canvas || !video || !state.prefs.ambientGlow) return;
+  const ctx = canvas.getContext('2d', { willReadFrequently: false });
+  if (!ctx) return;
+
+  state.ambientTimer = setInterval(() => {
+    if (!$('playerModal')?.classList.contains('open') || state.isMinimized || video.paused || video.readyState < 2) {
+      return;
+    }
+    try {
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      canvas.classList.add('active');
+    } catch {
+      // Cross-origin tainted frame -> stop silently with zero console spam
+      stopAmbientGlowLoop();
+    }
+  }, 250);
+}
+
+// #5 Seekbar Video Thumbnail Scrubbing
+function destroyScrubPreview() {
+  if (state.scrubHls) {
+    try { state.scrubHls.destroy(); } catch { /* ignore */ }
+    state.scrubHls = null;
+  }
+  const sv = $('scrubVideoEl');
+  if (sv) {
+    sv.removeAttribute('src');
+    try { sv.load(); } catch { /* ignore */ }
+  }
+  state.scrubLoadedUrl = '';
+  if ($('scrubCanvas')) $('scrubCanvas').style.display = 'none';
+}
+
+function initScrubPreviewForStream(streamUrl) {
+  destroyScrubPreview();
+  const sv = $('scrubVideoEl');
+  if (!sv || !streamUrl || state.isMinimized) return;
+  state.scrubLoadedUrl = streamUrl;
+  sv.crossOrigin = 'anonymous';
+  sv.muted = true;
+
+  if (streamUrl.includes('.m3u8') && window.Hls && window.Hls.isSupported()) {
+    try {
+      const h = new window.Hls({
+        enableWorker: true,
+        autoStartLoad: true,
+        maxBufferLength: 6,
+        maxMaxBufferLength: 10,
+        startLevel: 0, // Lowest quality variant for instant thumbnail scrubbing!
+        xhrSetup: (xhr) => { xhr.withCredentials = false; },
+      });
+      h.loadSource(streamUrl);
+      h.attachMedia(sv);
+      state.scrubHls = h;
+    } catch { /* ignore */ }
+  } else {
+    sv.src = streamUrl;
+  }
+
+  sv.onseeked = () => {
+    const c = $('scrubCanvas');
+    if (!c) return;
+    try {
+      const ctx = c.getContext('2d');
+      ctx.drawImage(sv, 0, 0, c.width, c.height);
+      c.style.display = 'block';
+    } catch {
+      c.style.display = 'none';
+    }
+  };
+}
+
+function renderScrubThumbAt(targetSec) {
+  const sv = $('scrubVideoEl');
+  if (!sv || !state.scrubLoadedUrl || !Number.isFinite(targetSec)) return;
+  const now = Date.now();
+  if (now - state.scrubLastHoverTs < 170) return;
+  state.scrubLastHoverTs = now;
+  if (sv.readyState >= 1) {
+    try { sv.currentTime = Math.max(0, targetSec); } catch { /* ignore */ }
+  }
+}
+
+// #8 QR Pairing for Smart TV
+function renderTvQrCode() {
+  const img = $('tvQrImg');
+  const hint = $('tvQrHint');
+  const ip = (state.prefs.tvIp || $('tvIpInput')?.value || '').trim();
+  if (!img || !hint) return;
+  if (!ip) {
+    img.style.display = 'none';
+    hint.textContent = 'Nhập IP Smart TV bên trên rồi bấm Lưu IP để tạo mã QR — quét bằng điện thoại để kết nối & điều khiển TV trong 1 giây!';
+    return;
+  }
+  const pairUrl = `${window.location.origin}/?tvip=${encodeURIComponent(ip)}`;
+  img.src = `https://api.qrserver.com/v1/create-qr-code/?size=180x180&margin=6&data=${encodeURIComponent(pairUrl)}`;
+  img.style.display = 'block';
+  hint.innerHTML = `Quét mã QR bằng điện thoại (cùng Wi-Fi) để ghép nối ngay với TV <strong>${escapeHtml(ip)}</strong> và tìm phim tiếng Việt bắn thẳng lên TV!`;
+}
+
+// #11 Trailer YouTube Popup Modal
+function extractYoutubeId(url) {
+  const s = String(url || '').trim();
+  if (!s) return '';
+  const m = s.match(/(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+  return m ? m[1] : '';
+}
+
+function openTrailerModal(detail) {
+  const modal = $('trailerModal');
+  const wrap = $('trailerEmbedWrap');
+  const titleEl = $('trailerModalTitle');
+  if (!modal || !wrap) return;
+  const dispTitle = getDisplayTitle(detail);
+  if (titleEl) titleEl.textContent = `🎬 Trailer — ${dispTitle}`;
+
+  const ytId = extractYoutubeId(detail.trailerUrl);
+  const searchQuery = encodeURIComponent(`${detail.origin_name || detail.name || dispTitle} ${detail.year || ''} official trailer`.trim());
+  if (ytId) {
+    wrap.innerHTML = `<iframe src="https://www.youtube.com/embed/${ytId}?autoplay=1&rel=0" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe>`;
+  } else {
+    wrap.innerHTML = `
+      <div style="text-align:center;padding:24px;display:flex;flex-direction:column;align-items:center;gap:14px;">
+        <div style="font-size:14px;color:#e5e7eb;font-weight:700;">Chưa có link YouTube gắn sẵn cho "${escapeHtml(dispTitle)}"</div>
+        <a class="btn-ai-sub-primary" href="https://www.youtube.com/results?search_query=${searchQuery}" target="_blank" rel="noopener" style="text-decoration:none;">▶ Mở Trailer trên YouTube ngay</a>
+      </div>
+    `;
+  }
+  modal.classList.add('open');
+}
+
+function closeTrailerModal() {
+  $('trailerModal')?.classList.remove('open');
+  if ($('trailerEmbedWrap')) $('trailerEmbedWrap').innerHTML = '';
 }
 
 /* ==================== OPTIONAL SECONDARY TV STREAM / CAST ==================== */
@@ -4347,6 +4958,8 @@ function openSubModal() {
   $('dualSubToggle').checked = state.prefs.dualSub;
   $('subEnableToggle').checked = state.prefs.subEnabled;
   $('syncValLabel').textContent = `${(state.prefs.syncOffsetMs / 1000).toFixed(1)}s`;
+  applyHardsubMaskUi();
+  syncTtsUi();
   syncAudioSubUi();
   $('subModal').classList.add('open');
 }
@@ -4399,6 +5012,7 @@ function openMoreModal() {
   applyVolumeBoost(state.volumeScale);
   applyEqPreset(state.eqPreset);
   syncSkipIntroSettingsUi();
+  if ($('ambientGlowToggle')) $('ambientGlowToggle').checked = Boolean(state.prefs.ambientGlow);
   $('moreModal').classList.add('open');
 }
 
@@ -4794,6 +5408,7 @@ function openSettingsModal() {
 function openTvCastModal() {
   $('tvIpInput').value = state.prefs.tvIp || '';
   $('apkDownloadBtn').href = APK_RELEASE_URL;
+  renderTvQrCode();
   $('tvModal').classList.add('open');
 }
 
@@ -5184,6 +5799,7 @@ function init() {
     clearStallWatchdog();
     setControlsVisible(true, 1600);
     pushHostPartyState({ isPlaying: true });
+    if (state.prefs.ambientGlow) startAmbientGlowLoop();
   });
   video.addEventListener('playing', () => {
     clearStallWatchdog();
@@ -5198,6 +5814,7 @@ function init() {
   });
   video.addEventListener('ended', () => {
     clearStallWatchdog();
+    stopTtsSpeech();
     const nextEp = getNextEpisode();
     if (nextEp && !state.autoNextCancelled) {
       startAutoNextCountdown(nextEp, 5);
@@ -5205,6 +5822,7 @@ function init() {
   });
   video.addEventListener('seeked', () => {
     const pos = video.currentTime || 0;
+    stopTtsSpeech();
     pushHostPartyState({ positionSec: pos });
     maybeRefillHlsLookahead(pos, { forceJump: true });
     if (state.audioSubActive && state.audioSubRecorder?.state === 'recording') {
@@ -5215,6 +5833,7 @@ function init() {
   video.addEventListener('pause', () => {
     syncPlayIcons(true);
     clearStallWatchdog();
+    stopTtsSpeech();
     persistCurrentPlaybackProgress({ immediate: true });
     setControlsVisible(true);
     pushHostPartyState({ isPlaying: false });
@@ -5242,9 +5861,10 @@ function init() {
     }
   });
 
-  // Hover Seekbar Time Tooltip
+  // Hover Seekbar Time + #5 Video Thumbnail Scrubbing Tooltip
   const seekWrap = $('seekRowWrap');
   const seekTip = $('seekTooltip');
+  const seekTipTime = $('seekTooltipTime');
   if (seekWrap && seekTip) {
     const updateTip = (clientX) => {
       const dur = video.duration || 0;
@@ -5254,9 +5874,12 @@ function init() {
       }
       const rect = seekWrap.getBoundingClientRect();
       const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
-      seekTip.textContent = formatTime(ratio * dur);
-      seekTip.style.left = `${Math.max(24, Math.min(rect.width - 24, clientX - rect.left))}px`;
+      const hoverSec = ratio * dur;
+      if (seekTipTime) seekTipTime.textContent = formatTime(hoverSec);
+      else seekTip.textContent = formatTime(hoverSec);
+      seekTip.style.left = `${Math.max(80, Math.min(rect.width - 80, clientX - rect.left))}px`;
       seekTip.classList.add('visible');
+      renderScrubThumbAt(hoverSec);
     };
     seekWrap.addEventListener('mousemove', (e) => updateTip(e.clientX));
     seekWrap.addEventListener('mouseleave', () => seekTip.classList.remove('visible'));
@@ -5599,27 +6222,168 @@ function init() {
     openPlayer({ slug: 'local', name: f.name, origin_name: '', poster: '', backdrop: '', type: 'single', servers: [] }, { name: 'Local', link_m3u8: blobUrl }, 0);
   };
 
-  // Secondary TV Cast Modal
+  // Secondary TV Cast Modal + #8 QR Pairing & Vietnamese Quick Search
   $('saveTvIpBtn').onclick = () => {
     state.prefs.tvIp = $('tvIpInput').value.trim();
     savePrefs();
+    renderTvQrCode();
     showToast(state.prefs.tvIp ? `📡 Đã lưu TV IP: ${state.prefs.tvIp}` : 'Đã xóa IP TV');
   };
+  if ($('tvQuickSearchBtn')) {
+    $('tvQuickSearchBtn').onclick = () => {
+      const q = ($('tvQuickSearchInput')?.value || '').trim();
+      if (!q) return;
+      $('tvModal')?.classList.remove('open');
+      if ($('searchInputDesktop')) $('searchInputDesktop').value = q;
+      executeSearch(q);
+      showToast(`🔍 Tìm "${q}" — mở phim rồi bấm Cast TV để phát thẳng lên TV!`);
+    };
+  }
   $('syncKeyToTvBtn').onclick = syncGeminiKeyToTv;
   document.querySelectorAll('[data-tvkey]').forEach((b) => {
     b.onclick = () => sendTvRemoteKey(b.dataset.tvkey);
   });
 
+  // V14 Super-Upgrade Pack Event Bindings (#1, #3, #4, #6, #7, #9, #10, #11)
+  if ($('aiVibeBtnDesktop')) {
+    $('aiVibeBtnDesktop').onclick = () => executeAiVibeSearch($('searchInputDesktop')?.value);
+  }
+  if ($('aiVibeBtnMobile')) {
+    $('aiVibeBtnMobile').onclick = () => executeAiVibeSearch($('searchInputMobile')?.value);
+  }
+  if ($('notifBellBtn')) {
+    $('notifBellBtn').onclick = (e) => {
+      e.stopPropagation();
+      refreshEpisodeReleaseNotifications();
+      $('notifMenu')?.classList.toggle('open');
+    };
+  }
+  if ($('notifMarkReadBtn')) {
+    $('notifMarkReadBtn').onclick = (e) => {
+      e.stopPropagation();
+      markAllNotifsRead();
+    };
+  }
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest?.('.notif-wrap')) $('notifMenu')?.classList.remove('open');
+  });
+
+  if ($('hudMaskBtn')) {
+    $('hudMaskBtn').onclick = () => {
+      state.prefs.hardsubMask = !state.prefs.hardsubMask;
+      savePrefs();
+      applyHardsubMaskUi();
+      showGestureToast(state.prefs.hardsubMask ? '🫥 Bật Che Sub Cứng' : 'Tắt Che Sub Cứng');
+    };
+  }
+  if ($('hardsubMaskToggle')) {
+    $('hardsubMaskToggle').onchange = (e) => {
+      state.prefs.hardsubMask = Boolean(e.target.checked);
+      savePrefs();
+      applyHardsubMaskUi();
+    };
+  }
+  if ($('hardsubMaskMode')) {
+    $('hardsubMaskMode').onchange = (e) => {
+      state.prefs.hardsubMaskMode = e.target.value;
+      savePrefs();
+      applyHardsubMaskUi();
+    };
+  }
+  if ($('hardsubHeightRange')) {
+    $('hardsubHeightRange').oninput = (e) => {
+      state.prefs.hardsubMaskHeight = Number(e.target.value);
+      savePrefs();
+      applyHardsubMaskUi();
+    };
+  }
+  if ($('hardsubBottomRange')) {
+    $('hardsubBottomRange').oninput = (e) => {
+      state.prefs.hardsubMaskBottom = Number(e.target.value);
+      savePrefs();
+      applyHardsubMaskUi();
+    };
+  }
+
+  if ($('hudTtsBtn')) {
+    $('hudTtsBtn').onclick = () => {
+      state.prefs.ttsDubbing = !state.prefs.ttsDubbing;
+      savePrefs();
+      syncTtsUi();
+      if (!state.prefs.ttsDubbing) stopTtsSpeech();
+      showGestureToast(state.prefs.ttsDubbing ? '🗣️ Bật AI Thuyết Minh' : '🔇 Tắt AI Thuyết Minh');
+    };
+  }
+  if ($('ttsDubToggle')) {
+    $('ttsDubToggle').onchange = (e) => {
+      state.prefs.ttsDubbing = Boolean(e.target.checked);
+      savePrefs();
+      syncTtsUi();
+      if (!state.prefs.ttsDubbing) stopTtsSpeech();
+    };
+  }
+  if ($('ttsRateRange')) {
+    $('ttsRateRange').oninput = (e) => {
+      state.prefs.ttsRate = Number(e.target.value) / 100;
+      savePrefs();
+      syncTtsUi();
+    };
+  }
+
+  if ($('downloadSubSrtBtn')) {
+    $('downloadSubSrtBtn').onclick = () => {
+      if (!state.primaryCues?.length) return showToast('Chưa có phụ đề nào đang tải để xuất .SRT!');
+      const langCode = resolveLanguage(state.prefs.primaryLang).code;
+      const safeFile = `${normalizeMovieSlug(state.currentMovie?.slug || 'chillfilm')}-${normalizeEpisodeKey(state.currentEpisode?.name || 'full')}-${langCode}.srt`;
+      downloadSrtFile(state.primaryCues, safeFile);
+      showToast(`⬇️ Đã tải file ${safeFile} (${state.primaryCues.length} câu)!`);
+    };
+  }
+
+  if ($('saveMovieSkipIntroBtn')) {
+    $('saveMovieSkipIntroBtn').onclick = () => {
+      if (!state.currentMovie?.slug) return showToast('Hãy mở một bộ phim trước!');
+      const sec = Math.max(10, Math.min(300, Math.round(Number($('customSkipIntroInput')?.value) || 85)));
+      saveMovieIntroSec(state.currentMovie.slug, sec);
+      syncSkipIntroSettingsUi();
+      showToast(`💾 Đã nhớ Skip Intro +${sec}s riêng cho "${getDisplayTitle(state.currentMovie)}"!`);
+    };
+  }
+
+  if ($('ambientGlowToggle')) {
+    $('ambientGlowToggle').onchange = (e) => {
+      state.prefs.ambientGlow = Boolean(e.target.checked);
+      savePrefs();
+      if (state.prefs.ambientGlow) startAmbientGlowLoop();
+      else stopAmbientGlowLoop();
+    };
+  }
+
+  if ($('closeTrailerModalBtn')) $('closeTrailerModalBtn').onclick = closeTrailerModal;
+  if ($('trailerModal')) {
+    $('trailerModal').addEventListener('click', (e) => {
+      if (e.target === $('trailerModal')) closeTrailerModal();
+    });
+  }
+
   updateCloudHeaderBadge();
+  refreshEpisodeReleaseNotifications();
   if (isCloudSignedIn()) {
     cloudRefreshMe().then(() => updateCloudHeaderBadge()).catch(() => {});
-    pullCloudStateAndMerge({ silent: true, force: true });
+    pullCloudStateAndMerge({ silent: true, force: true }).then(() => refreshEpisodeReleaseNotifications());
     loadLiveGeminiModels({ silent: true });
   }
 
-  // Auto-detect ?party=XXXXXX shareable Watch Party invite link on startup
+  // Auto-detect ?tvip=192.168.x.x QR Pairing deep-link & ?party=XXXXXX invite link on startup
   try {
-    const inviteRoom = new URLSearchParams(window.location.search).get('party');
+    const params = new URLSearchParams(window.location.search);
+    const pairIp = params.get('tvip');
+    if (pairIp && pairIp.trim().length >= 7) {
+      state.prefs.tvIp = pairIp.trim();
+      savePrefs();
+      showToast(`📲 Đã ghép đôi QR với Smart TV (${state.prefs.tvIp}) thành công!`);
+    }
+    const inviteRoom = params.get('party');
     if (inviteRoom && inviteRoom.trim().length >= 4) {
       const code = inviteRoom.trim().toUpperCase();
       if (isCloudSignedIn()) {

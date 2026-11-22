@@ -88,6 +88,9 @@ data class MovieItem(
     val providerId: String = "modern_vod",
     val providerName: String = "Phyll Cinema",
     val hasNativeThaiSub: Boolean = false,
+    val hasCloudSub: Boolean = false,
+    val hasNewEpisode: Boolean = false,
+    val latestEpisode: String = "",
     val imdbId: String = "",
     val servers: List<ServerGroup> = emptyList(),
     val detailLookupId: String? = null

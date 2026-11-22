@@ -12,7 +12,9 @@
     { "source": "/api/catalog/browse", "destination": "/api/catalog?op=browse" },
     { "source": "/api/catalog/detail", "destination": "/api/catalog?op=detail" },
     { "source": "/api/catalog/subtitles", "destination": "/api/catalog?op=subtitles" },
-    { "source": "/api/catalog/subproxy", "destination": "/api/catalog?op=subproxy" }
+    { "source": "/api/catalog/subproxy", "destination": "/api/catalog?op=subproxy" },
+    { "source": "/api/catalog/glossary", "destination": "/api/catalog?op=glossary" },
+    { "source": "/api/catalog/ai-search", "destination": "/api/catalog?op=aisearch" }
   ],
   "functions": {
     "api/schedules/crawl.js": {
@@ -68,7 +70,8 @@
       "source": "/api/catalog/(.*)",
       "headers": [
         { "key": "Access-Control-Allow-Origin", "value": "*" },
-        { "key": "Access-Control-Allow-Methods", "value": "GET, OPTIONS" }
+        { "key": "Access-Control-Allow-Methods", "value": "GET, POST, OPTIONS" },
+        { "key": "Access-Control-Allow-Headers", "value": "Content-Type, Authorization" }
       ]
     },
     {

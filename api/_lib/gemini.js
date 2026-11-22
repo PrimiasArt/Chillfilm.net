@@ -139,11 +139,27 @@ function buildMovieContextLine(movieContext) {
   const genres = Array.isArray(movieContext.genres)
     ? movieContext.genres.map((g) => String(g || '').trim()).filter(Boolean).slice(0, 4).join(', ')
     : String(movieContext.genres || '').trim().slice(0, 80);
-  if (!title && !genres) return '';
-  const parts = [];
-  if (title) parts.push(`"${title}"`);
-  if (genres) parts.push(`[${genres}]`);
-  return `Movie context: ${parts.join(' ')} — match tone, era, pronouns, and honorifics naturally to the genre.`;
+  const lines = [];
+  if (title || genres) {
+    const parts = [];
+    if (title) parts.push(`"${title}"`);
+    if (genres) parts.push(`[${genres}]`);
+    lines.push(`Movie context: ${parts.join(' ')} — match tone, era, pronouns, and honorifics naturally to the genre.`);
+  }
+  const gl = movieContext.glossary;
+  if (gl && typeof gl === 'object') {
+    const terms = Array.isArray(gl.terms)
+      ? gl.terms
+          .filter((t) => t && t.src && t.dst)
+          .slice(0, 22)
+          .map((t) => `${String(t.src).trim()}=${String(t.dst).trim()}`)
+          .join('; ')
+      : '';
+    const tone = String(gl.tone || '').trim().slice(0, 180);
+    if (terms) lines.push(`Strict character/term glossary (ALWAYS keep consistent): ${terms}`);
+    if (tone) lines.push(`Pronoun & style rule: ${tone}`);
+  }
+  return lines.join('\n');
 }
 
 /**
@@ -447,4 +463,111 @@ export async function fetchLiveGeminiModels(apiKey) {
   });
 
   return deduped;
+}
+
+/**
+ * Generates a consistent character/terminology & pronoun glossary for a movie/series
+ * so every translated batch & episode uses the exact same names and tone (e.g. wuxia/xianxia/K-drama).
+ */
+export async function generateMovieGlossaryServerSide({
+  title = '',
+  originTitle = '',
+  synopsis = '',
+  genres = [],
+  targetLang = 'vi',
+  apiKey,
+  preferredModel = 'gemini-2.5-flash',
+}) {
+  if (!apiKey) return { terms: [], tone: '' };
+  const langInstruction = resolveLangInstruction(targetLang);
+  const genreStr = Array.isArray(genres) ? genres.join(', ') : String(genres || '');
+  const prompt = [
+    `Cinema subtitle chief editor: create a concise translation glossary in ${langInstruction} for this movie/series so all episodes translate character names, realms, techniques, places, and pronouns consistently.`,
+    `Title: "${String(title || '').slice(0, 120)}"`,
+    originTitle ? `Original title: "${String(originTitle).slice(0, 120)}"` : '',
+    genreStr ? `Genres: ${genreStr.slice(0, 100)}` : '',
+    synopsis ? `Synopsis: ${String(synopsis).slice(0, 500)}` : '',
+    'Rules:',
+    '- Return ONLY JSON object: {"tone":"1 concise rule on pronouns/honorifics/style","terms":[{"src":"original name or term","dst":"consistent localized translation"}]}',
+    '- Include 6 to 18 most important character names, factions, places, or iconic terms (especially for xianxia/wuxia/anime/historical/sci-fi).',
+    '- If it is Vietnamese xianxia/wuxia (tiên hiệp/kiếm hiệp), use canonical Hán-Việt translations (e.g., 萧炎 -> Tiêu Viêm, 斗帝 -> Đấu Đế) and appropriate xưng hô (huynh/đệ, tiền bối/tại hạ).',
+  ].filter(Boolean).join('\n');
+
+  const { rawText } = await callGeminiWithFallback({
+    apiKey,
+    preferredModel,
+    preferTurboFlash: true,
+    perAttemptTimeoutMs: 14000,
+    maxOutputTokens: 1024,
+    contents: [{ parts: [{ text: prompt }] }],
+  });
+
+  const cleaned = rawText.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/, '').trim();
+  const s = cleaned.indexOf('{');
+  const e = cleaned.lastIndexOf('}');
+  if (s < 0 || e <= s) return { terms: [], tone: '' };
+  try {
+    const obj = JSON.parse(cleaned.slice(s, e + 1));
+    const terms = Array.isArray(obj.terms)
+      ? obj.terms
+          .filter((t) => t && t.src && t.dst)
+          .slice(0, 22)
+          .map((t) => ({
+            src: String(t.src).trim().slice(0, 60),
+            dst: String(t.dst).trim().slice(0, 80),
+          }))
+      : [];
+    const tone = String(obj.tone || '').trim().slice(0, 200);
+    return { terms, tone };
+  } catch {
+    return { terms: [], tone: '' };
+  }
+}
+
+/**
+ * Parses a natural-language movie mood/vibe query (Vietnamese or English) into structured
+ * search keywords, genre, country, and year filters for AI Vibe Search.
+ */
+export async function parseAiVibeSearchQuery({ query, apiKey, preferredModel = 'gemini-2.5-flash' }) {
+  const cleanQ = String(query || '').trim().slice(0, 220);
+  if (!cleanQ || !apiKey) {
+    return { keywords: cleanQ ? [cleanQ] : [], genre: '', country: '', minYear: 0, vibeSummary: '' };
+  }
+  const prompt = [
+    'Movie catalog search assistant: convert this user mood/vibe request into structured movie search parameters.',
+    `User request: "${cleanQ}"`,
+    'Allowed genres: action, romance, sci-fi, horror, comedy, drama, thriller, crime, historical, documentary, anime (or empty string "").',
+    'Allowed country slugs: han-quoc, trung-quoc, au-my, nhat-ban, thai-lan, viet-nam, hong-kong, dai-loan, an-do, phap, anh (or empty string "").',
+    'Return ONLY JSON object:',
+    '{"vibeSummary":"short 1-sentence friendly Vietnamese explanation of what we are finding","keywords":["2 to 5 strong Vietnamese/English/Chinese movie title or theme keywords to search"],"genre":"","country":"","minYear":0}',
+  ].join('\n');
+
+  const { rawText } = await callGeminiWithFallback({
+    apiKey,
+    preferredModel,
+    preferTurboFlash: true,
+    perAttemptTimeoutMs: 10000,
+    maxOutputTokens: 512,
+    contents: [{ parts: [{ text: prompt }] }],
+  });
+
+  const cleaned = rawText.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/, '').trim();
+  const s = cleaned.indexOf('{');
+  const e = cleaned.lastIndexOf('}');
+  if (s < 0 || e <= s) return { keywords: [cleanQ], genre: '', country: '', minYear: 0, vibeSummary: '' };
+  try {
+    const obj = JSON.parse(cleaned.slice(s, e + 1));
+    const keywords = Array.isArray(obj.keywords)
+      ? obj.keywords.map((k) => String(k || '').trim()).filter((k) => k.length >= 2).slice(0, 5)
+      : [cleanQ];
+    return {
+      vibeSummary: String(obj.vibeSummary || '').trim().slice(0, 200),
+      keywords: keywords.length ? keywords : [cleanQ],
+      genre: String(obj.genre || '').trim().toLowerCase(),
+      country: String(obj.country || '').trim().toLowerCase(),
+      minYear: Number(obj.minYear || 0) || 0,
+    };
+  } catch {
+    return { keywords: [cleanQ], genre: '', country: '', minYear: 0, vibeSummary: '' };
+  }
 }

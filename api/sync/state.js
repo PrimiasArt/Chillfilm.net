@@ -47,13 +47,36 @@ export async function GET(request) {
           `,
       sql`SELECT prefs_json, updated_at FROM nki_user_prefs WHERE user_id = ${user.id} LIMIT 1`,
       sql`
-        SELECT item_key, source, source_id, slug, name, origin_name, poster, year, quality, added_at
+        SELECT item_key, source, source_id, slug, name, origin_name, poster, year, quality, last_known_episode, added_at
         FROM nki_my_list
         WHERE user_id = ${user.id}
         ORDER BY added_at DESC
         LIMIT 200
       `,
     ]);
+
+    // Episode Release Tracker (#10): cross-check My List items against latest crawled episode counts!
+    const latestEpBySlug = new Map();
+    const mySlugs = myListRows.map((r) => r.slug).filter(Boolean);
+    if (mySlugs.length) {
+      try {
+        const catRows = await sql`
+          SELECT slug, episode_current
+          FROM nki_catalog_items
+          WHERE slug = ANY(${mySlugs}) AND episode_current <> ''
+          ORDER BY updated_at DESC
+        `;
+        for (const cr of catRows || []) {
+          if (cr.slug && cr.episode_current && !latestEpBySlug.has(cr.slug)) {
+            latestEpBySlug.set(cr.slug, String(cr.episode_current));
+          }
+        }
+      } catch { /* non-fatal */ }
+    }
+    const extractEpNum = (str) => {
+      const m = String(str || '').match(/(?:tập|tap|ep|episode|第)?\s*(\d{1,4})/i);
+      return m ? Number(m[1]) : 0;
+    };
 
     metric('sync.state', 1, { direction: 'pull', outcome: 'success' });
     return jsonResponse({
@@ -71,18 +94,28 @@ export async function GET(request) {
         durationMs: Number(r.duration_ms || 0),
         updatedAt: Number(r.updated_at || 0),
       })),
-      myList: myListRows.map((r) => ({
-        itemKey: r.item_key,
-        source: r.source,
-        sourceId: r.source_id,
-        slug: r.slug,
-        name: r.name,
-        origin_name: r.origin_name,
-        poster: r.poster,
-        year: r.year,
-        quality: r.quality,
-        addedAt: Number(r.added_at || 0),
-      })),
+      myList: myListRows.map((r) => {
+        const latestEpisode = latestEpBySlug.get(r.slug) || '';
+        const knownEp = String(r.last_known_episode || r.quality || '');
+        const newNum = extractEpNum(latestEpisode);
+        const oldNum = extractEpNum(knownEp);
+        const hasNewEpisode = Boolean(latestEpisode && newNum > 0 && ((oldNum > 0 && newNum > oldNum) || (!oldNum && /tập|ep|第/i.test(latestEpisode) && latestEpisode !== knownEp)));
+        return {
+          itemKey: r.item_key,
+          source: r.source,
+          sourceId: r.source_id,
+          slug: r.slug,
+          name: r.name,
+          origin_name: r.origin_name,
+          poster: r.poster,
+          year: r.year,
+          quality: r.quality,
+          lastKnownEpisode: knownEp,
+          latestEpisode,
+          hasNewEpisode,
+          addedAt: Number(r.added_at || 0),
+        };
+      }),
       prefs: prefsRows.length ? prefsRows[0].prefs_json : null,
       prefsUpdatedAt: prefsRows.length ? Number(prefsRows[0].updated_at || 0) : 0,
     });
@@ -173,13 +206,15 @@ export async function POST(request) {
         const poster = String(raw.poster || '').trim().slice(0, 500);
         const year = String(raw.year || '').trim().slice(0, 10);
         const quality = String(raw.quality || 'HD').trim().slice(0, 24);
+        const lastKnownEpisode = String(raw.lastKnownEpisode || raw.episode_current || raw.quality || '').trim().slice(0, 48);
         const addedAt = Math.min(now + 60_000, Math.max(1, Math.round(Number(raw.addedAt || now))));
         await sql`
-          INSERT INTO nki_my_list (user_id, item_key, source, source_id, slug, name, origin_name, poster, year, quality, added_at)
-          VALUES (${user.id}, ${itemKey}, ${source}, ${sourceId}, ${slug}, ${name}, ${originName}, ${poster}, ${year}, ${quality}, ${addedAt})
+          INSERT INTO nki_my_list (user_id, item_key, source, source_id, slug, name, origin_name, poster, year, quality, last_known_episode, added_at)
+          VALUES (${user.id}, ${itemKey}, ${source}, ${sourceId}, ${slug}, ${name}, ${originName}, ${poster}, ${year}, ${quality}, ${lastKnownEpisode}, ${addedAt})
           ON CONFLICT (user_id, item_key) DO UPDATE SET
             name = EXCLUDED.name,
             poster = CASE WHEN EXCLUDED.poster <> '' THEN EXCLUDED.poster ELSE nki_my_list.poster END,
+            last_known_episode = CASE WHEN EXCLUDED.last_known_episode <> '' THEN EXCLUDED.last_known_episode ELSE nki_my_list.last_known_episode END,
             added_at = GREATEST(nki_my_list.added_at, EXCLUDED.added_at)
         `;
       }
