@@ -9,7 +9,10 @@ import {
   buildSubCacheKey,
   loadCachedEpisodeSub,
   saveCachedEpisodeSub,
-} from './subtitles.js?v=9';
+  parseHlsMediaSegments,
+  buildHlsAudioWindows,
+  extractHlsWindowAdtsBase64,
+} from './subtitles.js?v=12';
 import { UI_LANGUAGES, resolveUiLang, t } from './i18n.js?v=3';
 import {
   normalizeMovieSlug,
@@ -33,13 +36,15 @@ import {
   fetchLiveCatalogFeed,
   fetchCatalogBrowse,
   fetchCatalogDetail,
+  fetchCatalogSubtitles,
+  fetchSubtitleTextSmart,
   partyCreate,
   partyJoin,
   partyPoll,
   partyControl,
   partySendChat,
   partyLeave,
-} from './sync.js?v=11';
+} from './sync.js?v=12';
 
 const PHIM_API = 'https://phimapi.com';
 const PHIM_CDN = 'https://phimimg.com';
@@ -163,6 +168,41 @@ const state = {
   lastSubTrackLabel: '',
   subTranslationRunId: 0,
   subStatusText: 'AI Sub ready',
+  liveAudioFallbackCue: null,
+  detailSelectedEp: null,
+  lastLookaheadCheckTs: 0,
+  subJob: {
+    id: 0,
+    active: false,
+    mode: '',
+    phase: 'idle',
+    movieSlug: '',
+    episodeKey: '',
+    episodeName: '',
+    langCode: '',
+    scope: 'lookahead10',
+    percent: 0,
+    doneCount: 0,
+    totalCount: 0,
+    coveredMs: 0,
+    targetMs: 0,
+    totalDurationMs: 0,
+    engineLabel: '',
+    message: '',
+    errorMsg: '',
+    startedAt: 0,
+    abortCtrl: null,
+    movie: null,
+    episode: null,
+    cues: [],
+    hlsWindows: [],
+    hlsDoneWindowSet: new Set(),
+    hlsKeyCache: new Map(),
+    hlsAnchorMs: 0,
+    hlsFilling: false,
+    audioMode: false,
+    notifiedReady: false,
+  },
   pendingSeekSec: 0,
   lastSavedPosTs: 0,
   // NKI Cloud Auto-Sync
@@ -460,7 +500,15 @@ const EP_POS_STORAGE_KEY = 'chillfilm_nki_ep_pos_v1';
 
 function loadPrefs() {
   try {
-    const saved = JSON.parse(localStorage.getItem('chillfilm_nki_prefs_v1') || '{}');
+    const raw = localStorage.getItem('chillfilm_nki_prefs_v1');
+    if (!raw) {
+      const browserLang = (navigator.language || '').toLowerCase();
+      if (browserLang.startsWith('vi')) {
+        return { ...DEFAULT_PREFS, uiLang: 'vi', primaryLang: 'vi', secondaryLang: 'en' };
+      }
+      return { ...DEFAULT_PREFS };
+    }
+    const saved = JSON.parse(raw);
     return { ...DEFAULT_PREFS, ...saved };
   } catch {
     return { ...DEFAULT_PREFS };
@@ -1377,6 +1425,19 @@ function renderDetailView(detail) {
   const dispDesc = getDisplayDesc(detail) || tr('heroDefaultDesc');
   const origSubtitle = dispTitle !== detail.name ? detail.name : detail.origin_name;
   const savedInMyList = isInMyList(detail);
+  const primarySrvEps = detail.servers[0]?.episodes || [];
+  const defaultSubEp = resumeEp || primarySrvEps[0] || null;
+  state.detailSelectedEp = defaultSubEp;
+
+  const langOptionsHtml = SUBTITLE_LANGUAGES.map((l) =>
+    `<option value="${escapeHtml(l.code)}" ${l.code === lang.code ? 'selected' : ''}>${escapeHtml(l.badge)} • ${escapeHtml(l.name)}</option>`
+  ).join('');
+  const epOptionsHtml = primarySrvEps.length > 1
+    ? primarySrvEps.map((e, i) => {
+        const isSel = defaultSubEp && (e.link_m3u8 === defaultSubEp.link_m3u8 || e.name === defaultSubEp.name);
+        return `<option value="${i}" ${isSel ? 'selected' : ''}>Tập: ${escapeHtml(e.name)}</option>`;
+      }).join('')
+    : '';
 
   dv.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
@@ -1388,7 +1449,7 @@ function renderDetailView(detail) {
       <div style="display:flex;flex-direction:column;gap:10px;min-width:0;">
         <div class="hero-meta">
           <span class="match-score">98% Match</span>
-          <span class="badge-ai">AI SUB (${lang.badge})</span>
+          <span class="badge-ai" id="detailHeroSubBadge">AI SUB (${lang.badge})</span>
           <span style="font-size:12px;color:#b3b3b3;font-weight:700;">${escapeHtml(detail.year)} • ${escapeHtml(detail.time || detail.quality)}</span>
         </div>
         <h2 style="font-size:clamp(20px,3.2vw,32px);font-weight:900;">${escapeHtml(dispTitle)}</h2>
@@ -1400,6 +1461,46 @@ function renderDetailView(detail) {
         </div>
       </div>
     </div>
+
+    ${defaultSubEp ? `
+    <section class="detail-sub-card" id="detailSubCard" aria-label="AI Subtitle Pre-Translator">
+      <div class="detail-sub-head">
+        <div class="detail-sub-title-row">
+          <span class="detail-sub-title">✨ Tự dịch phụ đề AI (NKI)</span>
+          <span class="detail-sub-badge" id="detailSubBadge">Đang kiểm tra Sub...</span>
+        </div>
+        <div class="detail-sub-controls">
+          ${epOptionsHtml ? `<select class="detail-sub-select" id="detailSubEpSelect" title="Chọn tập để dịch trước">${epOptionsHtml}</select>` : ''}
+          <select class="detail-sub-select" id="detailSubLangSelect" title="Ngôn ngữ dịch phụ đề">${langOptionsHtml}</select>
+          <select class="detail-sub-select" id="detailSubScopeSelect" title="Phạm vi dịch Audio AI (khi chưa có SRT)">
+            <option value="lookahead10">⚡ Dịch trước 10 phút (Xem nhanh)</option>
+            <option value="full">🎬 Dịch trọn bộ 100% tập</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="detail-sub-actions">
+        <button class="btn-ai-sub-primary" id="detailAutoSubBtn" type="button">✨ Tự dịch Sub AI ngay</button>
+        <button class="btn-nf-play" id="detailSubWatchNowBtn" type="button" style="display:none;padding:9px 15px;font-size:13px;">▶ Xem ngay với Sub</button>
+        <label class="btn-glass" style="cursor:pointer;padding:8px 13px;font-size:12.5px;">
+          📂 Nạp .SRT &amp; Dịch
+          <input type="file" id="detailLocalSubFile" accept=".srt,.vtt,.ass,.ssa,.txt" style="display:none;" />
+        </label>
+        <button class="btn-glass" id="detailSubCloudBtn" type="button" style="display:none;padding:8px 13px;font-size:12.5px;border-color:rgba(0,230,118,0.45);color:#86efac;">☁️ Đăng nhập NKI Cloud</button>
+      </div>
+
+      <div class="detail-sub-progress-wrap" id="detailSubProgressWrap">
+        <div class="detail-sub-progress-track">
+          <div class="detail-sub-progress-fill" id="detailSubProgressFill"></div>
+        </div>
+        <div class="detail-sub-progress-meta">
+          <span id="detailSubStatusText">Bấm "Tự dịch Sub AI ngay" để dịch trước phụ đề (SRT 100% trong ~10s hoặc tự tách âm thanh HLS dịch trước 10 phút).</span>
+          <span class="detail-sub-pct" id="detailSubPercent">0%</span>
+        </div>
+      </div>
+    </section>
+    ` : ''}
+
     <div id="detailServersWrap" style="margin-top:22px;"></div>
     <div id="detailSimilarWrap" class="similar-section"></div>
   `;
@@ -1415,6 +1516,103 @@ function renderDetailView(detail) {
       $('detailMyListBtn').classList.toggle('saved', nowSaved);
       $('detailMyListBtn').textContent = nowSaved ? '✓ In My List' : '+ My List';
     };
+  }
+
+  // Bind Detail Page AI Subtitle Pre-Translator Card
+  if (defaultSubEp) {
+    const getPickedDetailEp = () => {
+      const sel = $('detailSubEpSelect');
+      if (sel && primarySrvEps[Number(sel.value)]) {
+        state.detailSelectedEp = primarySrvEps[Number(sel.value)];
+      }
+      return state.detailSelectedEp || defaultSubEp;
+    };
+
+    if ($('detailSubEpSelect')) {
+      $('detailSubEpSelect').onchange = () => {
+        const ep = getPickedDetailEp();
+        refreshDetailSubCardForSelection(detail, ep);
+      };
+    }
+
+    if ($('detailSubLangSelect')) {
+      $('detailSubLangSelect').onchange = () => {
+        const pickedLang = $('detailSubLangSelect').value || 'vi';
+        state.prefs.primaryLang = pickedLang;
+        savePrefs();
+        const lObj = resolveLanguage(pickedLang);
+        if ($('detailHeroSubBadge')) $('detailHeroSubBadge').textContent = `AI SUB (${lObj.badge})`;
+        refreshDetailSubCardForSelection(detail, getPickedDetailEp());
+      };
+    }
+
+    if ($('detailSubScopeSelect') && state.subJob.active && isSubJobFor(detail, defaultSubEp, lang.code)) {
+      $('detailSubScopeSelect').value = state.subJob.scope || 'lookahead10';
+    }
+
+    if ($('detailAutoSubBtn')) {
+      $('detailAutoSubBtn').onclick = () => {
+        const ep = getPickedDetailEp();
+        const langCode = $('detailSubLangSelect')?.value || state.prefs.primaryLang || 'vi';
+        const scope = $('detailSubScopeSelect')?.value || 'lookahead10';
+        const epStartSec = getSavedEpisodePosition(detail.slug, ep);
+        if (state.subJob.active && isSubJobFor(detail, ep, langCode)) {
+          stopActiveSubJob(false, true);
+          refreshDetailSubCardForSelection(detail, ep);
+          return;
+        }
+        startUnifiedAiSubJob({
+          movie: detail,
+          episode: ep,
+          langCode,
+          scope,
+          startSec: epStartSec,
+          initiatedFrom: 'detail',
+        });
+      };
+    }
+
+    if ($('detailSubWatchNowBtn')) {
+      $('detailSubWatchNowBtn').onclick = () => {
+        const ep = getPickedDetailEp();
+        const epStartSec = getSavedEpisodePosition(detail.slug, ep);
+        state.episodesFlat = primarySrvEps.length ? primarySrvEps : state.episodesFlat;
+        openPlayer(detail, ep, epStartSec);
+      };
+    }
+
+    if ($('detailSubCloudBtn')) {
+      $('detailSubCloudBtn').onclick = () => openSettingsModal();
+    }
+
+    if ($('detailLocalSubFile')) {
+      $('detailLocalSubFile').onchange = async (ev) => {
+        const f = ev.target.files?.[0];
+        if (!f) return;
+        const raw = await f.text();
+        const cues = parseSubtitleText(raw);
+        ev.target.value = '';
+        if (!cues.length) {
+          showToast('File phụ đề không hợp lệ hoặc rỗng!');
+          return;
+        }
+        const ep = getPickedDetailEp();
+        const langCode = $('detailSubLangSelect')?.value || state.prefs.primaryLang || 'vi';
+        startUnifiedAiSubJob({
+          movie: detail,
+          episode: ep,
+          langCode,
+          scope: 'full',
+          startSec: 0,
+          initiatedFrom: 'detail',
+          forceRetranslate: true,
+          localCues: cues,
+          localLabel: f.name,
+        });
+      };
+    }
+
+    refreshDetailSubCardForSelection(detail, defaultSubEp);
   }
 
   const wrap = $('detailServersWrap');
@@ -1914,7 +2112,14 @@ function updateMediaSession(movie, episode) {
   }
 }
 
-/* ==================== WEB LIVE AI AUDIO SUBTITLER (ROLLING 18s CHUNKS) ==================== */
+/* ==================== UNIFIED AI SUBTITLE ENGINE (PARALLEL SRT + 10-MIN HLS LOOKAHEAD AUDIO + LIVE FALLBACK) ==================== */
+const HLS_LOOKAHEAD_TARGET_MS = 10 * 60 * 1000; // Minimum 10 minutes pre-translated ahead of playhead
+const HLS_LOOKAHEAD_REFILL_MS = 7 * 60 * 1000;  // Refill back to 10 min whenever ahead-buffer drops < 7 min
+const HLS_AUDIO_WINDOW_SEC = 38;                // ~38s ADTS AAC (~380-520KB) -> fast 3-5s Gemini latency, zero 504s
+const HLS_AUDIO_CONCURRENCY = 3;                // 3 parallel audio windows -> 10 min buffered in ~20-28s!
+const SRT_BATCH_SIZE = 55;                      // Within /api/ai/translate 80-line limit
+const SRT_CONCURRENCY = 3;                      // 3 parallel SRT batches -> full 1,200-line film in ~10-15s!
+
 function blobToBase64(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -1928,48 +2133,1034 @@ function blobToBase64(blob) {
   });
 }
 
+function hasAiAudioCredentials() {
+  return isCloudSignedIn() || (state.prefs.geminiApiKey || '').trim().length >= 15;
+}
+
+function buildMovieContext(movie) {
+  const m = movie || state.currentMovie;
+  if (!m) return null;
+  return {
+    title: m.nameEn || m.origin_name || m.name || '',
+    genres: Array.isArray(m.genres) ? m.genres.slice(0, 4) : [],
+  };
+}
+
+function isSubJobFor(movie, episode, langCode) {
+  const j = state.subJob;
+  if (!j || !movie || !episode) return false;
+  const mSlug = normalizeMovieSlug(movie.slug);
+  const eKey = normalizeEpisodeKey(episode.name || episode.slug || 'full');
+  const lCode = resolveLanguage(langCode || state.prefs.primaryLang).code;
+  return j.movieSlug === mSlug && j.episodeKey === eKey && j.langCode === lCode;
+}
+
+function isCurrentPlayerMatch(movie, episode, langCode = '') {
+  if (!$('playerModal')?.classList.contains('open')) return false;
+  if (!state.currentMovie || !state.currentEpisode || !movie || !episode) return false;
+  const sameMovie = normalizeMovieSlug(state.currentMovie.slug) === normalizeMovieSlug(movie.slug);
+  const sameEp = normalizeEpisodeKey(state.currentEpisode.name || state.currentEpisode.slug) ===
+    normalizeEpisodeKey(episode.name || episode.slug);
+  if (!sameMovie || !sameEp) return false;
+  if (langCode && resolveLanguage(state.prefs.primaryLang).code !== resolveLanguage(langCode).code) return false;
+  return true;
+}
+
+function mergeCuesChronological(existingCues, newCues) {
+  const combined = [...(existingCues || []), ...(newCues || [])]
+    .filter((c) => c && c.text && Number.isFinite(c.startMs))
+    .sort((a, b) => a.startMs - b.startMs);
+  const deduped = [];
+  for (const c of combined) {
+    const prev = deduped[deduped.length - 1];
+    if (prev && Math.abs(prev.startMs - c.startMs) < 900 && prev.text === c.text) continue;
+    deduped.push({
+      id: deduped.length + 1,
+      startMs: Math.max(0, Math.round(c.startMs)),
+      endMs: Math.max(Math.round(c.endMs || c.startMs + 2500), Math.round(c.startMs) + 450),
+      text: String(c.text).trim(),
+    });
+  }
+  return deduped;
+}
+
+function computeContiguousAheadMs(windows, doneSet, anchorMs) {
+  if (!windows.length || !doneSet.size) return anchorMs;
+  let startIdx = windows.findIndex((w) => w.endMs > anchorMs);
+  if (startIdx < 0) return anchorMs;
+  let frontierMs = anchorMs;
+  for (let i = startIdx; i < windows.length; i++) {
+    if (!doneSet.has(windows[i].index)) break;
+    frontierMs = Math.max(frontierMs, windows[i].endMs);
+  }
+  return frontierMs;
+}
+
+function setHudSubProgress(percent, visible) {
+  const wrap = $('hudSubProgressWrap');
+  const fill = $('hudSubProgressFill');
+  if (!wrap || !fill) return;
+  wrap.style.display = visible ? 'block' : 'none';
+  if (visible) {
+    fill.style.width = `${Math.max(2, Math.min(100, Math.round(percent)))}%`;
+  }
+}
+
 function syncAudioSubUi(statusMsg = '') {
+  const j = state.subJob;
+  const isRunning = Boolean(state.audioSubActive || (j.active && j.mode === 'hls-audio'));
   const modalBtn = $('aiAudioSubBtn');
+  const modalFullBtn = $('aiAudioSubFullBtn');
   const modalStatus = $('aiAudioSubStatus');
+  const modalProgWrap = $('modalSubProgressWrap');
+  const modalProgFill = $('modalSubProgressFill');
   const promptBtn = $('hudAudioSubPrompt');
   const promptTxt = $('hudAudioSubPromptText');
 
   if (modalBtn) {
-    modalBtn.textContent = state.audioSubActive ? '⏹ Stop AI Audio Sub' : '🎙 Start AI Audio Sub';
-    modalBtn.style.background = state.audioSubActive ? '#dc2626' : '';
-    modalBtn.style.color = state.audioSubActive ? '#ffffff' : '';
+    modalBtn.textContent = isRunning ? '⏹ Dừng dịch Audio AI' : '🎙 Dịch trước 10 phút';
+    modalBtn.style.background = isRunning ? '#dc2626' : '';
+    modalBtn.style.color = isRunning ? '#ffffff' : '';
   }
-  if (modalStatus && statusMsg) {
-    modalStatus.textContent = statusMsg;
+  if (modalFullBtn) {
+    modalFullBtn.style.display = isRunning ? 'none' : 'inline-flex';
+  }
+  if (modalStatus) {
+    const txt = statusMsg || (isRunning ? j.message : '');
+    if (txt) modalStatus.textContent = txt;
+  }
+  if (modalProgWrap && modalProgFill) {
+    const showProg = isRunning && j.mode === 'hls-audio';
+    modalProgWrap.style.display = showProg ? 'block' : 'none';
+    modalProgFill.style.width = `${Math.max(4, Math.min(100, Math.round(j.percent || 0)))}%`;
+    modalProgFill.classList.toggle('active', showProg);
   }
   if (promptBtn && promptTxt) {
-    if (state.audioSubActive) {
+    if (isRunning) {
       promptBtn.style.display = 'inline-flex';
       promptBtn.classList.add('recording');
-      promptTxt.textContent = statusMsg || `🎙 AI Listening (${state.primaryCues.length} cues) • Stop`;
+      promptTxt.textContent = statusMsg || j.message || `🎙 AI đang dịch trước 10 phút (${state.primaryCues.length} câu)...`;
     } else {
       promptBtn.classList.remove('recording');
-      promptTxt.textContent = 'No SRT • Tap for AI Audio Sub';
+      promptTxt.textContent = hasAiAudioCredentials()
+        ? 'Chưa có SRT • Bấm dịch trước 10 phút Audio AI'
+        : 'Chưa có SRT • Đăng nhập Cloud để AI dịch 10 phút';
     }
   }
 }
 
+function syncAllSubProgressUi() {
+  const j = state.subJob;
+
+  // 1. Update Player Top HUD if player is open on this episode
+  if (j.movie && j.episode && isCurrentPlayerMatch(j.movie, j.episode, j.langCode)) {
+    if (j.active) {
+      updateSubStatusBadge(j.message || `✨ AI đang dịch (${j.percent}%)...`);
+      setHudSubProgress(j.percent, true);
+    } else if (j.phase === 'ready' || j.phase === 'partial_ready') {
+      updateSubStatusBadge(j.message || `✅ Sub ${resolveLanguage(j.langCode).badge} sẵn sàng`);
+      setHudSubProgress(100, false);
+    } else if (j.phase === 'error' && j.errorMsg) {
+      updateSubStatusBadge(`⚠️ ${j.errorMsg}`);
+      setHudSubProgress(0, false);
+    }
+    syncAudioSubUi(j.message || j.errorMsg || '');
+  }
+
+  // 2. Update Movie Detail Page #detailSubCard if visible and matches selected episode/lang
+  const card = $('detailSubCard');
+  if (!card || !$('detailView')?.classList.contains('active') || !state.currentMovie) return;
+  const pickedEp = state.detailSelectedEp || state.currentMovie.servers?.[0]?.episodes?.[0];
+  const pickedLang = $('detailSubLangSelect')?.value || state.prefs.primaryLang || 'vi';
+  if (!pickedEp || !isSubJobFor(state.currentMovie, pickedEp, pickedLang)) return;
+
+  applyDetailSubCardVisualState({
+    phase: j.active ? 'translating' : j.phase,
+    percent: j.percent,
+    badgeText: j.active
+      ? `⏳ Đang dịch ${j.percent}%`
+      : j.phase === 'ready'
+        ? '✅ Đã dịch xong 100%'
+        : j.phase === 'partial_ready'
+          ? `✅ Sẵn sàng (${formatTime(Math.floor((j.coveredMs || 0) / 1000))})`
+          : j.phase === 'error'
+            ? '⚠️ Cần lưu ý'
+            : '⚡ Sẵn sàng dịch',
+    statusText: j.errorMsg || j.message || 'Bấm "Tự dịch Sub AI ngay" để bắt đầu.',
+    isRunning: j.active,
+    canWatchNow: (j.cues?.length || 0) >= 3 || j.phase === 'ready' || j.phase === 'partial_ready',
+    needsCloud: Boolean(j.errorMsg && j.errorMsg.toLowerCase().includes('cloud')),
+    buttonLabel: j.active
+      ? '⏹ Dừng dịch'
+      : j.phase === 'partial_ready'
+        ? '🎬 Dịch tiếp 100% tập'
+        : j.phase === 'ready'
+          ? '🔄 Dịch lại'
+          : '✨ Tự dịch Sub AI ngay',
+  });
+}
+
+function applyDetailSubCardVisualState({
+  phase = 'idle',
+  percent = 0,
+  badgeText = '',
+  statusText = '',
+  isRunning = false,
+  canWatchNow = false,
+  needsCloud = false,
+  buttonLabel = '✨ Tự dịch Sub AI ngay',
+} = {}) {
+  const card = $('detailSubCard');
+  const badge = $('detailSubBadge');
+  const fill = $('detailSubProgressFill');
+  const txt = $('detailSubStatusText');
+  const pctEl = $('detailSubPercent');
+  const btn = $('detailAutoSubBtn');
+  const watchBtn = $('detailSubWatchNowBtn');
+  const cloudBtn = $('detailSubCloudBtn');
+  if (!card) return;
+
+  const clampedPct = Math.max(0, Math.min(100, Math.round(percent || 0)));
+  card.classList.toggle('is-ready', phase === 'ready' || phase === 'partial_ready');
+  card.classList.toggle('is-working', isRunning);
+
+  if (badge) {
+    badge.textContent = badgeText || '⚡ Sẵn sàng dịch';
+    badge.className = 'detail-sub-badge ' + (
+      isRunning ? 'working' : (phase === 'ready' || phase === 'partial_ready') ? 'ready' : phase === 'error' ? 'warn' : ''
+    );
+  }
+  if (fill) {
+    fill.style.width = `${clampedPct}%`;
+    fill.classList.toggle('active', isRunning);
+  }
+  if (pctEl) pctEl.textContent = `${clampedPct}%`;
+  if (txt && statusText) txt.textContent = statusText;
+  if (btn) {
+    btn.textContent = buttonLabel;
+    btn.classList.toggle('stop-mode', isRunning);
+  }
+  if (watchBtn) {
+    watchBtn.style.display = canWatchNow ? 'inline-flex' : 'none';
+  }
+  if (cloudBtn) {
+    cloudBtn.style.display = needsCloud ? 'inline-flex' : 'none';
+  }
+}
+
+async function refreshDetailSubCardForSelection(detail, episode) {
+  if (!detail || !episode || !$('detailSubCard')) return;
+  const langCode = $('detailSubLangSelect')?.value || state.prefs.primaryLang || 'vi';
+  const lang = resolveLanguage(langCode);
+
+  // 1. If unified job is already active/finished for this exact episode + language -> sync live!
+  if (isSubJobFor(detail, episode, lang.code) && (state.subJob.active || state.subJob.phase !== 'idle')) {
+    syncAllSubProgressUi();
+    return;
+  }
+
+  applyDetailSubCardVisualState({
+    phase: 'checking',
+    percent: 0,
+    badgeText: '🔍 Đang kiểm tra...',
+    statusText: `Đang kiểm tra Sub ${lang.name} đã lưu trên máy & NKI Cloud...`,
+    isRunning: false,
+    canWatchNow: false,
+  });
+
+  const cacheKey = buildSubCacheKey(detail.slug, episode, lang.code);
+  let cached = await loadCachedEpisodeSub(cacheKey);
+  let fromCloud = false;
+
+  if ((!cached || (cached.primaryCues?.length || 0) < 3) && isCloudSignedIn()) {
+    const cloudBundle = await cloudFetchSubtitle(detail.slug, episode.name || episode.slug, lang.code);
+    if (cloudBundle && Array.isArray(cloudBundle.primaryCues) && cloudBundle.primaryCues.length >= 3) {
+      cached = {
+        ...cloudBundle,
+        trackLabel: cloudBundle.sourcePlatform || `☁️ NKI Cloud ${lang.badge}`,
+        translatedCount: cloudBundle.primaryCues.length,
+      };
+      fromCloud = true;
+      saveCachedEpisodeSub(cacheKey, cached).catch(() => {});
+    }
+  }
+
+  // Abort UI update if user switched movie/ep/lang while checking
+  if (!$('detailSubCard') || state.currentMovie?.slug !== detail.slug) return;
+  const curPickedLang = $('detailSubLangSelect')?.value || state.prefs.primaryLang || 'vi';
+  if (resolveLanguage(curPickedLang).code !== lang.code) return;
+
+  if (cached && cached.primaryCues?.length >= 3) {
+    const count = cached.primaryCues.length;
+    if (cached.isFullyTranslated) {
+      applyDetailSubCardVisualState({
+        phase: 'ready',
+        percent: 100,
+        badgeText: fromCloud ? `☁️ Sẵn sàng 100% (Cloud)` : `✅ Sẵn sàng 100%`,
+        statusText: `✅ Sub ${lang.name} đã dịch xong 100% (${count} câu • ${fromCloud ? 'NKI Cloud' : 'Đã lưu máy'}) — Bấm Xem ngay để thưởng thức!`,
+        isRunning: false,
+        canWatchNow: true,
+        buttonLabel: '🔄 Dịch lại',
+      });
+      return;
+    }
+    const covSec = Math.floor((cached.audioTranslatedUntilMs || 0) / 1000);
+    const totSec = Math.floor((cached.totalDurationMs || 0) / 1000);
+    const partialPct = totSec > 0
+      ? Math.min(99, Math.max(8, Math.round((covSec / totSec) * 100)))
+      : Math.min(95, Math.max(15, Math.round(((cached.translatedCount || count) / Math.max(count, 1)) * 100)));
+    applyDetailSubCardVisualState({
+      phase: 'partial_ready',
+      percent: partialPct,
+      badgeText: covSec > 0 ? `✅ Đã dịch ${formatTime(covSec)}` : `⚡ Đã dịch ${partialPct}%`,
+      statusText: covSec > 0
+        ? `✅ Đã dịch sẵn ${formatTime(covSec)}${totSec > 0 ? ` / ${formatTime(totSec)}` : ''} (${count} câu) — Bấm Xem ngay (AI tự dịch gối tiếp 10 phút) hoặc bấm dịch tiếp 100%!`
+        : `⚡ Đã dịch ${count} câu (${partialPct}%) — Bấm xem ngay hoặc tiếp tục dịch 100%.`,
+      isRunning: false,
+      canWatchNow: true,
+      buttonLabel: '⚡ Tiếp tục dịch Sub AI',
+    });
+    return;
+  }
+
+  applyDetailSubCardVisualState({
+    phase: 'idle',
+    percent: 0,
+    badgeText: `⚡ Chưa có Sub ${lang.badge}`,
+    statusText: `Chưa có Sub ${lang.name} cho ${episode.name || 'tập này'}. Bấm "Tự dịch Sub AI ngay" — nếu có SRT sẽ dịch 100% trong ~10s; nếu chưa có SRT sẽ tự tách âm thanh HLS dịch trước 10 phút!`,
+    isRunning: false,
+    canWatchNow: false,
+    buttonLabel: '✨ Tự dịch Sub AI ngay',
+  });
+}
+
+function stopActiveSubJob(silent = false, keepCues = true) {
+  const j = state.subJob;
+  const wasActive = j.active;
+  j.id += 1;
+  j.active = false;
+  j.hlsFilling = false;
+  if (j.abortCtrl) {
+    try { j.abortCtrl.abort(); } catch { /* ignore */ }
+    j.abortCtrl = null;
+  }
+  stopWebAiAudioSub(true);
+  if (!keepCues) {
+    j.cues = [];
+    j.phase = 'idle';
+    j.percent = 0;
+  } else if (wasActive) {
+    const hasSome = (j.cues?.length || 0) >= 3;
+    j.phase = hasSome ? 'partial_ready' : 'idle';
+    j.message = hasSome
+      ? `⏹ Đã tạm dừng • Đã lưu ${j.cues.length} câu Sub`
+      : '⏹ Đã dừng dịch Sub AI';
+  }
+  setHudSubProgress(0, false);
+  syncAllSubProgressUi();
+  if (!silent && wasActive) showToast('⏹ Đã dừng dịch Sub AI (đã lưu các câu đã dịch)');
+}
+
+async function persistJobSubCache({ movie, episode, langCode, sourceLangCode, trackLabel, sourceCues, primaryCues, secondaryCues = [], isFullyTranslated = false, translatedCount = 0, audioMode = false, audioTranslatedUntilMs = 0, totalDurationMs = 0, translatedWindows = [], pushCloud = false }) {
+  if (!movie || !episode || !Array.isArray(primaryCues) || primaryCues.length < 3) return;
+  const lang = resolveLanguage(langCode || state.prefs.primaryLang);
+  const key = buildSubCacheKey(movie.slug, episode, lang.code);
+  const payload = {
+    primaryLangCode: lang.code,
+    secondaryLangCode: state.prefs.dualSub ? state.prefs.secondaryLang : '',
+    sourceLangCode: sourceLangCode || 'auto',
+    trackLabel: trackLabel || `Sub ${lang.badge}`,
+    sourceCues: sourceCues?.length ? sourceCues : primaryCues,
+    primaryCues,
+    secondaryCues,
+    isFullyTranslated: Boolean(isFullyTranslated),
+    translatedCount: translatedCount || primaryCues.length,
+    audioMode: Boolean(audioMode),
+    audioTranslatedUntilMs: Number(audioTranslatedUntilMs || 0),
+    totalDurationMs: Number(totalDurationMs || 0),
+    translatedWindows: Array.isArray(translatedWindows) ? translatedWindows : [],
+  };
+  await saveCachedEpisodeSub(key, payload);
+
+  if (pushCloud && isCloudSignedIn()) {
+    state.lastCloudSubPushBatch = Date.now();
+    cloudSaveSubtitle({
+      movieSlug: movie.slug,
+      episodeNameOrSlug: episode.name || episode.slug,
+      ...payload,
+    }).catch(() => {});
+  }
+}
+
+async function runParallelSrtTranslation({ job, jobId, movie, episode, cues, sourceLangCode, targetLang, startSec = 0, trackLabel = '', resumeWorking = null }) {
+  job.mode = 'srt';
+  job.phase = 'translating';
+  job.audioMode = false;
+  job.totalCount = cues.length;
+  job.doneCount = 0;
+  job.engineLabel = isCloudSignedIn() || (state.prefs.geminiApiKey || '').length > 10 ? 'Gemini AI' : 'Free Neural';
+
+  if (sourceLangCode === targetLang.code) {
+    job.cues = cues;
+    job.doneCount = cues.length;
+    job.percent = 100;
+    job.active = false;
+    job.phase = 'ready';
+    job.message = `✅ Sub ${targetLang.badge} gốc sẵn sàng (${cues.length} câu)`;
+    if (isCurrentPlayerMatch(movie, episode, targetLang.code)) {
+      state.sourceCues = cues;
+      state.primaryCues = cues;
+      state.lastSubSourceLang = sourceLangCode;
+      state.lastSubTrackLabel = trackLabel || `Sub ${targetLang.badge}`;
+      renderActiveSubtitle(($('videoEl')?.currentTime || 0) * 1000);
+    }
+    await persistJobSubCache({
+      movie, episode, langCode: targetLang.code, sourceLangCode, trackLabel,
+      sourceCues: cues, primaryCues: cues, isFullyTranslated: true, translatedCount: cues.length, pushCloud: true,
+    });
+    syncAllSubProgressUi();
+    showToast(`✅ Đã nạp Sub ${targetLang.name} gốc (${cues.length} câu) — Bấm Xem ngay!`);
+    return;
+  }
+
+  const working = resumeWorking && resumeWorking.length === cues.length ? resumeWorking.slice() : cues.slice();
+  const batches = [];
+  for (let i = 0; i < cues.length; i += SRT_BATCH_SIZE) {
+    batches.push({ start: i, end: Math.min(cues.length, i + SRT_BATCH_SIZE) });
+  }
+
+  // Playhead-first priority ordering: translate current playback position + next ~10 minutes FIRST!
+  const anchorMs = Math.max(0, Math.round((startSec || 0) * 1000));
+  let anchorCueIdx = anchorMs > 1000 ? cues.findIndex((c) => c.endMs >= anchorMs) : 0;
+  if (anchorCueIdx < 0) anchorCueIdx = 0;
+  const anchorBatchIdx = Math.floor(anchorCueIdx / SRT_BATCH_SIZE);
+  const orderedBatches = anchorBatchIdx > 0
+    ? [...batches.slice(anchorBatchIdx), ...batches.slice(0, anchorBatchIdx)]
+    : batches;
+
+  let cursor = 0;
+  let completedCues = 0;
+  let completedBatches = 0;
+  const startedAt = Date.now();
+  const movieCtx = buildMovieContext(movie);
+
+  job.percent = 6;
+  job.message = `✨ Đang dịch SRT sang ${targetLang.name} (0/${cues.length} câu)...`;
+  syncAllSubProgressUi();
+
+  const workerFn = async () => {
+    while (cursor < orderedBatches.length) {
+      if (job.id !== jobId || !job.active) return;
+      const b = orderedBatches[cursor++];
+      const chunk = cues.slice(b.start, b.end);
+      const translated = await translateCueBatch({
+        cues: chunk,
+        targetLang: targetLang.code,
+        geminiApiKey: state.prefs.geminiApiKey,
+        geminiModel: state.prefs.geminiModel,
+        cloudTranslator: isCloudSignedIn() ? cloudTranslateCueBatch : null,
+        movieContext: movieCtx,
+        onEngine: (eng) => {
+          job.engineLabel = eng === 'cloud-gemini' ? 'Gemini AI' : eng === 'local-gemini' ? 'Gemini Key' : 'Free Neural';
+        },
+      });
+      if (job.id !== jobId || !job.active) return;
+
+      for (let k = 0; k < translated.length; k++) {
+        working[b.start + k] = translated[k];
+      }
+      completedCues += chunk.length;
+      completedBatches += 1;
+      job.cues = working.slice();
+      job.doneCount = Math.min(cues.length, completedCues);
+      job.percent = Math.min(99, Math.max(8, Math.round((job.doneCount / cues.length) * 100)));
+
+      const elapsedSec = Math.max(1, (Date.now() - startedAt) / 1000);
+      const rate = job.doneCount / elapsedSec;
+      const etaSec = rate > 0 ? Math.max(1, Math.round((cues.length - job.doneCount) / rate)) : 0;
+      job.message = `✨ ${job.engineLabel} (SRT ${targetLang.badge}) • ${job.percent}% (${job.doneCount}/${cues.length} câu)${etaSec > 0 ? ` • ~${etaSec}s` : ''}`;
+
+      if (isCurrentPlayerMatch(movie, episode, targetLang.code)) {
+        state.sourceCues = cues;
+        state.primaryCues = job.cues;
+        state.lastSubSourceLang = sourceLangCode;
+        state.lastSubTrackLabel = trackLabel || `Sub ${targetLang.badge}`;
+        renderActiveSubtitle(($('videoEl')?.currentTime || 0) * 1000);
+      }
+      syncAllSubProgressUi();
+
+      if (completedBatches % 3 === 0 || completedBatches === 1) {
+        await persistJobSubCache({
+          movie, episode, langCode: targetLang.code, sourceLangCode, trackLabel,
+          sourceCues: cues, primaryCues: job.cues, isFullyTranslated: false, translatedCount: job.doneCount, pushCloud: false,
+        });
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(SRT_CONCURRENCY, orderedBatches.length) }, () => workerFn()));
+  if (job.id !== jobId) return;
+
+  job.active = false;
+  job.phase = 'ready';
+  job.percent = 100;
+  job.doneCount = cues.length;
+  job.cues = working.slice();
+  job.message = `✅ Đã dịch xong 100% Sub ${targetLang.name} (${cues.length} câu • ${job.engineLabel}) — Bấm Xem ngay!`;
+
+  if (isCurrentPlayerMatch(movie, episode, targetLang.code)) {
+    state.sourceCues = cues;
+    state.primaryCues = job.cues;
+    state.lastSubSourceLang = sourceLangCode;
+    state.lastSubTrackLabel = trackLabel || `Sub ${targetLang.badge}`;
+    renderActiveSubtitle(($('videoEl')?.currentTime || 0) * 1000);
+  }
+  await persistJobSubCache({
+    movie, episode, langCode: targetLang.code, sourceLangCode, trackLabel,
+    sourceCues: cues, primaryCues: job.cues, isFullyTranslated: true, translatedCount: cues.length, pushCloud: true,
+  });
+  syncAllSubProgressUi();
+  showToast(`✅ Đã dịch xong 100% Sub ${targetLang.name} (${cues.length} câu)! Bấm Xem ngay!`);
+}
+
+async function transcribeSingleHlsAudioWindow({ win, job, targetLang, movieCtx, signal }) {
+  const { audioBase64, mimeType, byteLength } = await extractHlsWindowAdtsBase64(win, job.hlsKeyCache, signal);
+  if (!audioBase64 || byteLength < 512) return [];
+
+  const attemptCall = async () => {
+    if (isCloudSignedIn()) {
+      const resp = await cloudTranscribeAudioChunk({
+        audioBase64,
+        mimeType,
+        chunkStartOffsetMs: win.startMs,
+        chunkDurationMs: win.durationMs,
+        targetLang: targetLang.code,
+        model: state.prefs.geminiModel,
+        movieContext: movieCtx,
+      });
+      return Array.isArray(resp?.cues) ? resp.cues : [];
+    }
+    return transcribeAudioChunkDirect({
+      audioBase64,
+      mimeType,
+      chunkStartOffsetMs: win.startMs,
+      chunkDurationMs: win.durationMs,
+      targetLang: targetLang.code,
+      apiKey: state.prefs.geminiApiKey,
+      modelId: state.prefs.geminiModel,
+      movieContext: movieCtx,
+    });
+  };
+
+  try {
+    return await attemptCall();
+  } catch (err) {
+    const status = Number(err?.status || 0);
+    // Do NOT retry hard auth/quota/config errors
+    if ([401, 403, 429, 503].includes(status)) throw err;
+    // One clean retry on transient 502/504/network hiccup
+    await new Promise((r) => setTimeout(r, 900));
+    return attemptCall();
+  }
+}
+
+async function fillHlsAudioRange({ job, jobId, anchorMs, targetEndMs, isFullEpisode = false }) {
+  if (job.id !== jobId || !job.hlsWindows.length) return;
+  job.hlsFilling = true;
+  job.active = true;
+  job.phase = 'translating';
+  job.hlsAnchorMs = anchorMs;
+  job.targetMs = targetEndMs;
+
+  const targetLang = resolveLanguage(job.langCode);
+  const movie = job.movie;
+  const episode = job.episode;
+  const movieCtx = buildMovieContext(movie);
+  const signal = job.abortCtrl?.signal;
+
+  // Select untranslated windows covering [anchorMs, targetEndMs], ordered starting from anchorMs!
+  const pending = job.hlsWindows.filter(
+    (w) => !job.hlsDoneWindowSet.has(w.index) && w.endMs > anchorMs && w.startMs < targetEndMs
+  );
+  // If full episode mode, also pick any earlier windows before anchorMs after the ahead range finishes
+  if (isFullEpisode && anchorMs > 1000) {
+    const earlier = job.hlsWindows.filter((w) => !job.hlsDoneWindowSet.has(w.index) && w.endMs <= anchorMs);
+    pending.push(...earlier);
+  }
+
+  const totalRangeWindows = job.hlsWindows.filter((w) =>
+    isFullEpisode ? true : (w.endMs > anchorMs && w.startMs < targetEndMs)
+  ).length || 1;
+  const alreadyInRange = totalRangeWindows - pending.length;
+  let doneInThisPass = 0;
+  let fatalError = null;
+  let cursor = 0;
+  const startedAt = Date.now();
+
+  const updateProgressText = () => {
+    const covered = computeContiguousAheadMs(job.hlsWindows, job.hlsDoneWindowSet, anchorMs);
+    job.coveredMs = covered;
+    const completedTotal = isFullEpisode ? job.hlsDoneWindowSet.size : (alreadyInRange + doneInThisPass);
+    const pct = Math.min(99, Math.max(5, Math.round((completedTotal / totalRangeWindows) * 100)));
+    job.percent = pct;
+    const covStr = formatTime(Math.floor(covered / 1000));
+    const tgtStr = formatTime(Math.floor(targetEndMs / 1000));
+    const elapsedSec = Math.max(1, (Date.now() - startedAt) / 1000);
+    const leftWin = Math.max(0, pending.length - doneInThisPass);
+    const etaSec = doneInThisPass > 0 ? Math.max(1, Math.round((elapsedSec / doneInThisPass) * leftWin)) : 0;
+    job.message = `🎙 AI Audio ${targetLang.badge} • Đã dịch tới ${covStr} / ${tgtStr} (${job.cues.length} câu)${etaSec > 0 ? ` • ~${etaSec}s` : ''}`;
+    syncAllSubProgressUi();
+  };
+
+  if (!pending.length) {
+    const covered = computeContiguousAheadMs(job.hlsWindows, job.hlsDoneWindowSet, anchorMs);
+    job.coveredMs = covered;
+    const allDone = job.hlsDoneWindowSet.size >= job.hlsWindows.length;
+    job.active = false;
+    job.hlsFilling = false;
+    job.phase = allDone ? 'ready' : 'partial_ready';
+    job.percent = allDone ? 100 : Math.min(100, Math.round(((covered - anchorMs) / Math.max(1, targetEndMs - anchorMs)) * 100));
+    job.message = allDone
+      ? `✅ Đã dịch xong 100% Sub Audio ${targetLang.name} (${job.cues.length} câu)`
+      : `✅ Đã dịch sẵn tới ${formatTime(Math.floor(covered / 1000))} (${job.cues.length} câu) — AI tự dịch gối tiếp khi xem!`;
+    syncAllSubProgressUi();
+    return;
+  }
+
+  updateProgressText();
+
+  const workerFn = async () => {
+    while (cursor < pending.length) {
+      if (job.id !== jobId || !job.active || fatalError) return;
+      const win = pending[cursor++];
+      try {
+        const newCues = await transcribeSingleHlsAudioWindow({ win, job, targetLang, movieCtx, signal });
+        if (job.id !== jobId || !job.active) return;
+
+        job.hlsDoneWindowSet.add(win.index);
+        doneInThisPass += 1;
+        if (newCues.length) {
+          job.cues = mergeCuesChronological(job.cues, newCues);
+        }
+        job.doneCount = job.cues.length;
+
+        // Immediately surface translated cues to Player if playing!
+        if (isCurrentPlayerMatch(movie, episode, targetLang.code)) {
+          state.primaryCues = job.cues;
+          state.sourceCues = job.cues;
+          state.lastSubTrackLabel = `🎙 AI Audio (${targetLang.badge})`;
+          renderActiveSubtitle(($('videoEl')?.currentTime || 0) * 1000);
+          if ($('hudAudioSubPrompt') && job.cues.length >= 3) {
+            $('hudAudioSubPrompt').style.display = 'none';
+          }
+        }
+        updateProgressText();
+
+        // Persist incremental cache every chunk so closing or refreshing never loses progress!
+        const allDoneNow = job.hlsDoneWindowSet.size >= job.hlsWindows.length;
+        const shouldPushCloud = allDoneNow || (doneInThisPass % 6 === 0 && job.cues.length >= 10);
+        await persistJobSubCache({
+          movie, episode, langCode: targetLang.code, sourceLangCode: 'auto',
+          trackLabel: `🎙 AI Audio (${targetLang.badge})`,
+          sourceCues: job.cues, primaryCues: job.cues,
+          isFullyTranslated: allDoneNow, translatedCount: job.cues.length,
+          audioMode: true, audioTranslatedUntilMs: job.coveredMs,
+          totalDurationMs: job.totalDurationMs,
+          translatedWindows: [...job.hlsDoneWindowSet],
+          pushCloud: shouldPushCloud,
+        });
+      } catch (err) {
+        if (err?.name === 'AbortError' || job.id !== jobId) return;
+        const status = Number(err?.status || 0);
+        console.warn('[HLS Audio AI] window failed:', win.index, err?.message || err);
+        if ([401, 403, 429, 503].includes(status)) {
+          fatalError = err?.message || `AI HTTP ${status}`;
+          return;
+        }
+        // Transient single-window error: mark skipped for now and keep translating remaining windows!
+        doneInThisPass += 1;
+        updateProgressText();
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(HLS_AUDIO_CONCURRENCY, pending.length) }, () => workerFn()));
+  if (job.id !== jobId) return;
+
+  job.hlsFilling = false;
+  job.active = false;
+
+  if (fatalError) {
+    job.phase = job.cues.length >= 3 ? 'partial_ready' : 'error';
+    job.errorMsg = `Lỗi AI: ${String(fatalError).slice(0, 95)}`;
+    syncAllSubProgressUi();
+    showToast(`⚠️ ${job.errorMsg}`);
+    return;
+  }
+
+  const allDone = job.hlsDoneWindowSet.size >= job.hlsWindows.length;
+  const covered = computeContiguousAheadMs(job.hlsWindows, job.hlsDoneWindowSet, anchorMs);
+  job.coveredMs = covered;
+  job.phase = allDone ? 'ready' : 'partial_ready';
+  job.percent = allDone ? 100 : (isFullEpisode ? Math.round((job.hlsDoneWindowSet.size / Math.max(1, job.hlsWindows.length)) * 100) : 100);
+  const covStr = formatTime(Math.floor(covered / 1000));
+  const totStr = formatTime(Math.floor((job.totalDurationMs || covered) / 1000));
+  job.message = allDone
+    ? `✅ Đã dịch xong 100% Sub Audio ${targetLang.name} (${job.cues.length} câu • Lưu máy & Cloud)!`
+    : `✅ Đã dịch trước tới ${covStr} / ${totStr} (${job.cues.length} câu) — Bấm Xem ngay, AI tự dịch gối tiếp 10 phút phía trước!`;
+
+  await persistJobSubCache({
+    movie, episode, langCode: targetLang.code, sourceLangCode: 'auto',
+    trackLabel: `🎙 AI Audio (${targetLang.badge})`,
+    sourceCues: job.cues, primaryCues: job.cues,
+    isFullyTranslated: allDone, translatedCount: job.cues.length,
+    audioMode: true, audioTranslatedUntilMs: covered,
+    totalDurationMs: job.totalDurationMs,
+    translatedWindows: [...job.hlsDoneWindowSet],
+    pushCloud: job.cues.length >= 3,
+  });
+  syncAllSubProgressUi();
+
+  if (!job.notifiedReady) {
+    job.notifiedReady = true;
+    showToast(allDone
+      ? `✅ Đã dịch xong 100% Sub ${targetLang.name} (${job.cues.length} câu)!`
+      : `✅ Đã dịch sẵn tới ${covStr} Sub ${targetLang.name} (${job.cues.length} câu)! Xem ngay siêu mượt!`);
+  }
+}
+
+async function runHlsLookaheadAudioJob({ job, jobId, movie, episode, targetLang, startSec = 0, scope = 'lookahead10', cachedEntry = null }) {
+  job.mode = 'hls-audio';
+  job.audioMode = true;
+  job.phase = 'discovering';
+  job.percent = 4;
+  job.message = '🎙 Không có file SRT — Đang đọc luồng âm thanh HLS để dịch trước 10 phút...';
+  syncAllSubProgressUi();
+
+  const { segments, totalDurationMs } = await parseHlsMediaSegments(episode.link_m3u8, job.abortCtrl?.signal);
+  if (job.id !== jobId) return;
+
+  const windows = buildHlsAudioWindows(segments, HLS_AUDIO_WINDOW_SEC);
+  job.hlsWindows = windows;
+  job.totalDurationMs = totalDurationMs;
+  job.hlsKeyCache = new Map();
+  job.hlsDoneWindowSet = new Set(Array.isArray(cachedEntry?.translatedWindows) ? cachedEntry.translatedWindows : []);
+  if (cachedEntry?.primaryCues?.length) {
+    job.cues = mergeCuesChronological(job.cues, cachedEntry.primaryCues);
+  }
+
+  const anchorMs = Math.max(0, Math.round((startSec || 0) * 1000));
+  const isFull = scope === 'full';
+  const targetEndMs = isFull
+    ? totalDurationMs
+    : Math.min(totalDurationMs, anchorMs + HLS_LOOKAHEAD_TARGET_MS);
+
+  await fillHlsAudioRange({ job, jobId, anchorMs, targetEndMs, isFullEpisode: isFull });
+}
+
+/**
+ * Rolling 10-minute lookahead watchdog during live playback:
+ * ensures the viewer ALWAYS has 7–10 minutes of audio subtitles pre-translated ahead,
+ * and immediately jumps to [curSec -> curSec + 10 min] whenever the user seeks!
+ */
+async function maybeRefillHlsLookahead(curSec, { forceJump = false } = {}) {
+  const j = state.subJob;
+  if (!state.currentMovie || !state.currentEpisode) return;
+  if (!j.audioMode || !j.hlsWindows.length) return;
+  if (!isSubJobFor(state.currentMovie, state.currentEpisode, state.prefs.primaryLang)) return;
+  if (j.hlsDoneWindowSet.size >= j.hlsWindows.length) return; // 100% episode done!
+  if (!hasAiAudioCredentials()) return;
+
+  const curMs = Math.max(0, Math.round((curSec || 0) * 1000));
+  const curWin = j.hlsWindows.find((w) => curMs >= w.startMs && curMs < w.endMs);
+  const curUntranslated = Boolean(curWin && !j.hlsDoneWindowSet.has(curWin.index));
+  const aheadFrontierMs = computeContiguousAheadMs(j.hlsWindows, j.hlsDoneWindowSet, curMs);
+  const bufferedAheadMs = Math.max(0, aheadFrontierMs - curMs);
+
+  // Already actively filling near playhead and current window is either done or in-flight
+  if (j.hlsFilling && !forceJump) return;
+  if (j.hlsFilling && forceJump && !curUntranslated && bufferedAheadMs >= HLS_LOOKAHEAD_REFILL_MS) return;
+
+  if (!curUntranslated && bufferedAheadMs >= HLS_LOOKAHEAD_REFILL_MS) return;
+
+  // If user seeked far outside current filling range, abort old range and prioritize new playhead!
+  if (j.hlsFilling && forceJump && curUntranslated) {
+    if (j.abortCtrl) {
+      try { j.abortCtrl.abort(); } catch { /* ignore */ }
+    }
+    j.id += 1;
+    j.abortCtrl = new AbortController();
+  } else if (j.hlsFilling) {
+    return;
+  } else {
+    j.abortCtrl = new AbortController();
+  }
+
+  const jobId = j.id;
+  const targetEndMs = Math.min(j.totalDurationMs, curMs + HLS_LOOKAHEAD_TARGET_MS);
+  fillHlsAudioRange({ job: j, jobId, anchorMs: curMs, targetEndMs, isFullEpisode: false }).catch((err) => {
+    console.warn('[HLS Lookahead Refill] error:', err?.message || err);
+  });
+}
+
+/**
+ * Unified Entry Point for BOTH Movie Detail Page ("✨ Tự dịch Sub AI ngay") AND Player Auto-Sub!
+ */
+async function startUnifiedAiSubJob({
+  movie,
+  episode,
+  langCode = '',
+  scope = 'lookahead10',
+  startSec = 0,
+  initiatedFrom = 'detail',
+  forceRetranslate = false,
+  localCues = null,
+  localLabel = '',
+  preferAudioOnly = false,
+} = {}) {
+  if (!movie || !episode) return;
+  const targetLang = resolveLanguage(langCode || state.prefs.primaryLang || 'vi');
+
+  // Stop any previous running job cleanly
+  stopActiveSubJob(true, true);
+
+  const j = state.subJob;
+  const jobId = ++j.id;
+  j.active = true;
+  j.mode = '';
+  j.phase = 'checking';
+  j.movieSlug = normalizeMovieSlug(movie.slug);
+  j.episodeKey = normalizeEpisodeKey(episode.name || episode.slug || 'full');
+  j.episodeName = episode.name || 'Full';
+  j.langCode = targetLang.code;
+  j.scope = scope || 'lookahead10';
+  j.percent = 3;
+  j.doneCount = 0;
+  j.totalCount = 0;
+  j.coveredMs = 0;
+  j.targetMs = 0;
+  j.totalDurationMs = 0;
+  j.engineLabel = '';
+  j.message = `🔍 Đang kiểm tra kho Sub ${targetLang.name}...`;
+  j.errorMsg = '';
+  j.startedAt = Date.now();
+  j.abortCtrl = new AbortController();
+  j.movie = movie;
+  j.episode = episode;
+  j.cues = [];
+  j.hlsWindows = [];
+  j.hlsDoneWindowSet = new Set();
+  j.hlsKeyCache = new Map();
+  j.hlsAnchorMs = Math.max(0, Math.round((startSec || 0) * 1000));
+  j.hlsFilling = false;
+  j.audioMode = false;
+  j.notifiedReady = false;
+  syncAllSubProgressUi();
+
+  try {
+    // 0. Direct local .SRT file uploaded by user
+    if (Array.isArray(localCues) && localCues.length >= 1) {
+      await runParallelSrtTranslation({
+        job: j, jobId, movie, episode, cues: localCues, sourceLangCode: 'auto',
+        targetLang, startSec, trackLabel: localLabel || 'Local .SRT',
+      });
+      return;
+    }
+
+    // 1. Check local IndexedDB + Shared NKI Cloud Pool first (instant <150ms, 0 Gemini tokens!)
+    const cacheKey = buildSubCacheKey(movie.slug, episode, targetLang.code);
+    let cached = !forceRetranslate ? await loadCachedEpisodeSub(cacheKey) : null;
+    let fromCloud = false;
+    if (j.id !== jobId) return;
+
+    if (!forceRetranslate && (!cached || (cached.primaryCues?.length || 0) < 3) && isCloudSignedIn()) {
+      j.message = `☁️ Đang kiểm tra kho Sub NKI Cloud (${targetLang.badge})...`;
+      syncAllSubProgressUi();
+      const cloudBundle = await cloudFetchSubtitle(movie.slug, episode.name || episode.slug, targetLang.code);
+      if (j.id !== jobId) return;
+      if (cloudBundle && Array.isArray(cloudBundle.primaryCues) && cloudBundle.primaryCues.length >= 3) {
+        cached = {
+          ...cloudBundle,
+          trackLabel: cloudBundle.sourcePlatform || `☁️ NKI Cloud ${targetLang.badge}`,
+          translatedCount: cloudBundle.primaryCues.length,
+        };
+        fromCloud = true;
+        saveCachedEpisodeSub(cacheKey, cached).catch(() => {});
+      }
+    }
+
+    // If 100% cached -> instant ready!
+    if (cached && cached.primaryCues?.length >= 3 && cached.isFullyTranslated && !forceRetranslate) {
+      j.cues = cached.primaryCues;
+      j.active = false;
+      j.phase = 'ready';
+      j.percent = 100;
+      j.doneCount = cached.primaryCues.length;
+      j.totalCount = cached.primaryCues.length;
+      j.message = fromCloud
+        ? `☁️ Sub ${targetLang.name} sẵn sàng 100% từ NKI Cloud (${cached.primaryCues.length} câu)!`
+        : `💾 Sub ${targetLang.name} sẵn sàng 100% (${cached.primaryCues.length} câu • Đã lưu)!`;
+      if (isCurrentPlayerMatch(movie, episode, targetLang.code)) {
+        state.sourceCues = cached.sourceCues?.length ? cached.sourceCues : cached.primaryCues;
+        state.primaryCues = cached.primaryCues;
+        state.lastSubSourceLang = cached.sourceLangCode || 'auto';
+        state.lastSubTrackLabel = cached.trackLabel || `Sub ${targetLang.badge}`;
+        renderActiveSubtitle(($('videoEl')?.currentTime || 0) * 1000);
+      }
+      syncAllSubProgressUi();
+      if (initiatedFrom === 'detail') showToast(j.message);
+      return;
+    }
+
+    // If partial Audio AI cache exists and user wants to continue (or play with 10-min lookahead)
+    if (cached && cached.audioMode && cached.primaryCues?.length >= 3 && episode.link_m3u8?.includes('.m3u8')) {
+      j.cues = cached.primaryCues.slice();
+      if (isCurrentPlayerMatch(movie, episode, targetLang.code)) {
+        state.primaryCues = j.cues;
+        state.sourceCues = j.cues;
+        renderActiveSubtitle(($('videoEl')?.currentTime || 0) * 1000);
+      }
+      if (hasAiAudioCredentials()) {
+        await runHlsLookaheadAudioJob({
+          job: j, jobId, movie, episode, targetLang, startSec, scope, cachedEntry: cached,
+        });
+        return;
+      }
+    }
+
+    // 2. Auto-discover online .SRT tracks (built-in Archive subs + Server Cinemeta IMDb + OpenSubtitles v3!)
+    if (!preferAudioOnly) {
+      j.phase = 'discovering';
+      j.percent = 5;
+      j.message = '🔎 Đang tìm file .SRT online (Cinemeta + OpenSubtitles)...';
+      syncAllSubProgressUi();
+
+      let tracks = Array.isArray(episode.subtitles) && episode.subtitles.length ? episode.subtitles.slice() : [];
+      if (!tracks.length) {
+        const isSeries = movie.type !== 'single' || (movie.servers?.[0]?.episodes?.length || 1) > 1;
+        const epNumMatch = String(episode.name || '').match(/\d+/);
+        const epNum = epNumMatch ? Number(epNumMatch[0]) : 1;
+        const disc = await fetchCatalogSubtitles({
+          imdbId: movie.imdbId || '',
+          title: movie.nameEn || movie.name || '',
+          originTitle: movie.origin_name || '',
+          year: movie.year || '',
+          isSeries,
+          season: 1,
+          episode: epNum,
+        });
+        if (j.id !== jobId) return;
+        if (disc.imdbId && !movie.imdbId) movie.imdbId = disc.imdbId;
+        tracks = disc.tracks || [];
+      }
+
+      if (isCurrentPlayerMatch(movie, episode)) {
+        state.subTracks = tracks;
+      }
+
+      if (tracks.length > 0) {
+        // Rank best candidates: target language first -> English -> Vietnamese -> others
+        const ranked = [
+          ...tracks.filter((t) => t.langCode === targetLang.code),
+          ...tracks.filter((t) => t.langCode === 'en' && t.langCode !== targetLang.code),
+          ...tracks.filter((t) => t.langCode === 'vi' && t.langCode !== targetLang.code && t.langCode !== 'en'),
+          ...tracks.filter((t) => t.langCode !== targetLang.code && t.langCode !== 'en' && t.langCode !== 'vi'),
+        ];
+
+        for (const cand of ranked.slice(0, 4)) {
+          if (j.id !== jobId || !j.active) return;
+          try {
+            j.message = `📥 Đang tải ${cand.label || 'SRT'}...`;
+            syncAllSubProgressUi();
+            const raw = await fetchSubtitleTextSmart(cand, j.abortCtrl?.signal);
+            if (j.id !== jobId || !j.active) return;
+            const parsedCues = parseSubtitleText(raw);
+            if (parsedCues.length >= 3) {
+              if (isCurrentPlayerMatch(movie, episode)) {
+                state.activeSubTrackId = cand.id;
+                state.lastSubTrackLabel = cand.label || '';
+              }
+              await runParallelSrtTranslation({
+                job: j, jobId, movie, episode, cues: parsedCues,
+                sourceLangCode: cand.langCode || 'auto',
+                targetLang, startSec, trackLabel: cand.label || 'OpenSubtitles',
+              });
+              return;
+            }
+          } catch (e) {
+            console.warn('[Sub Track] retry next candidate:', cand.label, e?.message || e);
+          }
+        }
+      }
+    }
+
+    // 3. No online .SRT found -> Launch 10-Minute HLS Lookahead Audio AI Engine!
+    if (!hasAiAudioCredentials()) {
+      j.active = false;
+      j.phase = 'error';
+      j.percent = 0;
+      j.errorMsg = 'Phim chưa có file .SRT online — Đăng nhập NKI Cloud (hoặc thêm Gemini Key) để AI tự nghe & dịch trước 10 phút từ âm thanh phim, hoặc nạp file .SRT từ máy!';
+      if (isCurrentPlayerMatch(movie, episode) && $('hudAudioSubPrompt')) {
+        $('hudAudioSubPrompt').style.display = 'inline-flex';
+      }
+      syncAllSubProgressUi();
+      return;
+    }
+
+    if (episode.link_m3u8 && episode.link_m3u8.includes('.m3u8')) {
+      try {
+        await runHlsLookaheadAudioJob({ job: j, jobId, movie, episode, targetLang, startSec, scope });
+        return;
+      } catch (hlsErr) {
+        if (hlsErr?.name === 'AbortError' || j.id !== jobId) return;
+        console.warn('[HLS Lookahead] fallback check:', hlsErr?.message || hlsErr);
+        // If inside Player, gracefully fall back to fixed 8s live MediaRecorder!
+        if (isCurrentPlayerMatch(movie, episode, targetLang.code)) {
+          j.active = false;
+          j.mode = 'live-audio';
+          startLiveMediaRecorderFallback();
+          return;
+        }
+        j.active = false;
+        j.phase = 'error';
+        j.errorMsg = `Không tách được luồng HLS (${String(hlsErr?.message || 'CORS').slice(0, 60)}) — Bấm Xem ngay rồi bật AI Nghe trực tiếp trong Player hoặc nạp .SRT!`;
+        syncAllSubProgressUi();
+        return;
+      }
+    }
+
+    // Non-HLS direct video stream (e.g. MP4)
+    j.active = false;
+    if (isCurrentPlayerMatch(movie, episode, targetLang.code)) {
+      j.mode = 'live-audio';
+      startLiveMediaRecorderFallback();
+    } else {
+      j.phase = 'error';
+      j.errorMsg = 'Link phim này là MP4 trực tiếp (không phải HLS .m3u8) và chưa có SRT — Bấm Xem ngay rồi bật AI Audio trong Player hoặc nạp .SRT!';
+      syncAllSubProgressUi();
+    }
+  } catch (err) {
+    if (err?.name === 'AbortError' || j.id !== jobId) return;
+    j.active = false;
+    j.phase = 'error';
+    j.errorMsg = `Lỗi dịch Sub AI: ${String(err?.message || err).slice(0, 95)}`;
+    syncAllSubProgressUi();
+  }
+}
+
+/* ==================== FIXED 8s LIVE MEDIARECORDER FALLBACK (ONLY FOR NON-HLS / MP4 STREAMS) ==================== */
 function mergeAudioSubCues(newCues) {
   if (!Array.isArray(newCues) || !newCues.length) return;
-  const combined = [...state.primaryCues, ...newCues]
-    .filter((c) => c && c.text && Number.isFinite(c.startMs))
-    .sort((a, b) => a.startMs - b.startMs);
-
-  // Deduplicate overlapping identical cues
-  const deduped = [];
-  for (const c of combined) {
-    const prev = deduped[deduped.length - 1];
-    if (prev && Math.abs(prev.startMs - c.startMs) < 1200 && prev.text === c.text) continue;
-    deduped.push({ id: deduped.length + 1, startMs: c.startMs, endMs: Math.max(c.endMs || c.startMs + 2500, c.startMs + 500), text: c.text });
-  }
+  const deduped = mergeCuesChronological(state.primaryCues, newCues);
   state.primaryCues = deduped;
   state.sourceCues = deduped;
   state.lastSubTrackLabel = `🎙 AI Audio (${resolveLanguage(state.prefs.primaryLang).badge})`;
+
+  // Live rolling grace buffer: show latest transcribed line immediately even if video passed chunk end!
+  const latestCue = newCues[newCues.length - 1];
+  if (latestCue?.text) {
+    state.liveAudioFallbackCue = { text: latestCue.text, expiresAt: Date.now() + 5500 };
+  }
   renderActiveSubtitle(($('videoEl')?.currentTime || 0) * 1000);
   if (deduped.length >= 3) {
     persistCurrentSubCache(false, deduped.length).catch(() => {});
@@ -1979,6 +3170,7 @@ function mergeAudioSubCues(newCues) {
 function stopWebAiAudioSub(silent = false) {
   state.audioSubActive = false;
   state.audioSubSessionId += 1;
+  state.liveAudioFallbackCue = null;
   clearTimeout(state.audioSubLoopTimer);
   state.audioSubLoopTimer = null;
   if (state.audioSubRecorder && state.audioSubRecorder.state !== 'inactive') {
@@ -1993,13 +3185,13 @@ function stopWebAiAudioSub(silent = false) {
   }
   syncAudioSubUi(
     state.primaryCues.length
-      ? `Stopped • Saved ${state.primaryCues.length} AI cues to cache & NKI Cloud Pool`
-      : 'Listens to playing audio in 18s chunks & saves to NKI Cloud Pool'
+      ? `Đã lưu ${state.primaryCues.length} câu AI Sub vào máy & NKI Cloud Pool`
+      : 'Tự tách âm thanh HLS & dịch gối đầu trước 10 phút bằng Gemini AI'
   );
   if (state.primaryCues.length >= 3) {
-    persistCurrentSubCache(true, state.primaryCues.length).catch(() => {});
+    persistCurrentSubCache(false, state.primaryCues.length).catch(() => {});
   }
-  if (!silent) showToast('⏹ Stopped AI Live Audio Subtitler');
+  if (!silent) showToast('⏹ Đã dừng AI Audio Sub');
 }
 
 async function captureNextAudioSubChunk(sessionId) {
@@ -2010,7 +3202,7 @@ async function captureNextAudioSubChunk(sessionId) {
     return;
   }
   if (video.paused) {
-    state.audioSubLoopTimer = setTimeout(() => captureNextAudioSubChunk(sessionId), 1500);
+    state.audioSubLoopTimer = setTimeout(() => captureNextAudioSubChunk(sessionId), 1200);
     return;
   }
 
@@ -2019,7 +3211,7 @@ async function captureNextAudioSubChunk(sessionId) {
   const audioTracks = stream?.getAudioTracks?.() || [];
   if (!stream || !audioTracks.length || typeof MediaRecorder === 'undefined') {
     stopWebAiAudioSub(true);
-    showToast('⚠️ Browser or video CORS blocked live audio capture — try Chrome/Edge or upload .SRT');
+    showToast('⚠️ Trình duyệt hoặc CORS chặn ghi âm trực tiếp — hãy dùng Chrome/Edge hoặc nạp .SRT');
     return;
   }
 
@@ -2027,7 +3219,7 @@ async function captureNextAudioSubChunk(sessionId) {
   const mimeCandidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
   const pickedMime = mimeCandidates.find((m) => MediaRecorder.isTypeSupported?.(m)) || '';
   const chunkStartMs = Math.round((video.currentTime || 0) * 1000);
-  const CHUNK_MS = 18000;
+  const CHUNK_MS = 8000; // Short 8s rolling chunk for fast non-HLS live fallback!
   const parts = [];
 
   try {
@@ -2039,15 +3231,14 @@ async function captureNextAudioSubChunk(sessionId) {
     rec.onstop = async () => {
       if (sessionId !== state.audioSubSessionId) return;
       const blob = new Blob(parts, { type: rec.mimeType || pickedMime || 'audio/webm' });
-      // Schedule next rolling chunk immediately so continuous speech isn't missed!
       if (state.audioSubActive && sessionId === state.audioSubSessionId) {
         captureNextAudioSubChunk(sessionId);
       }
-      if (blob.size < 1200) return;
+      if (blob.size < 1000) return;
 
       const targetLang = resolveLanguage(state.prefs.primaryLang);
-      syncAudioSubUi(`🎙 AI transcribing → ${targetLang.badge} (${state.primaryCues.length} cues)...`);
-      updateSubStatusBadge(`🎙 AI Listening → ${targetLang.badge} (${state.primaryCues.length})...`);
+      syncAudioSubUi(`🎙 AI đang nghe trực tiếp → ${targetLang.badge} (${state.primaryCues.length} câu)...`);
+      updateSubStatusBadge(`🎙 AI Nghe Live → ${targetLang.badge} (${state.primaryCues.length})...`);
 
       try {
         const audioBase64 = await blobToBase64(blob);
@@ -2061,7 +3252,7 @@ async function captureNextAudioSubChunk(sessionId) {
             chunkDurationMs: CHUNK_MS,
             targetLang: targetLang.code,
             model: state.prefs.geminiModel,
-            movieContext: getCurrentMovieContext(),
+            movieContext: buildMovieContext(state.currentMovie),
           });
           cues = Array.isArray(resp?.cues) ? resp.cues : [];
         } else {
@@ -2073,17 +3264,17 @@ async function captureNextAudioSubChunk(sessionId) {
             targetLang: targetLang.code,
             apiKey: state.prefs.geminiApiKey,
             modelId: state.prefs.geminiModel,
-            movieContext: getCurrentMovieContext(),
+            movieContext: buildMovieContext(state.currentMovie),
           });
         }
         if (sessionId !== state.audioSubSessionId) return;
         state.audioSubChunksDone += 1;
         mergeAudioSubCues(cues);
-        updateSubStatusBadge(`🎙 AI Audio ${targetLang.badge} • ${state.primaryCues.length} cues`);
-        syncAudioSubUi(`🎙 Listening live • ${state.primaryCues.length} cues saved`);
+        updateSubStatusBadge(`🎙 AI Audio ${targetLang.badge} • ${state.primaryCues.length} câu`);
+        syncAudioSubUi(`🎙 Đang nghe Live (8s) • ${state.primaryCues.length} câu`);
       } catch (err) {
         console.warn('[AI Audio Sub] chunk failed:', err?.message || err);
-        syncAudioSubUi(`⚠️ AI Audio chunk error: ${String(err?.message || 'retry next chunk').slice(0, 50)}`);
+        syncAudioSubUi(`⚠️ Lỗi AI Audio: ${String(err?.message || 'đang thử lại').slice(0, 55)}`);
       }
     };
 
@@ -2095,33 +3286,52 @@ async function captureNextAudioSubChunk(sessionId) {
     }, CHUNK_MS);
   } catch (err) {
     stopWebAiAudioSub(true);
-    showToast(`⚠️ Live Audio Sub unavailable: ${err?.message || 'unsupported'}`);
+    showToast(`⚠️ Không bật được Live Audio Sub: ${err?.message || 'unsupported'}`);
   }
 }
 
-function startWebAiAudioSub() {
-  if (state.audioSubActive) {
-    stopWebAiAudioSub(false);
-    return;
-  }
-  const hasPersonalKey = (state.prefs.geminiApiKey || '').trim().length >= 15;
-  if (!isCloudSignedIn() && !hasPersonalKey) {
-    showToast('☁️ Sign in to NKI Cloud (or add a Gemini API Key in Settings) to use AI Live Audio Sub!');
-    openSettingsModal();
-    return;
-  }
+function startLiveMediaRecorderFallback() {
   const video = $('videoEl');
   ensureWebAudioDsp(video);
   if (video.paused) video.play().catch(() => {});
-
   state.audioSubActive = true;
   state.audioSubChunksDone = 0;
   const sessionId = ++state.audioSubSessionId;
   const targetLang = resolveLanguage(state.prefs.primaryLang);
-  updateSubStatusBadge(`🎙 AI Live Audio Sub (${targetLang.badge}) listening...`);
-  syncAudioSubUi(`🎙 Capturing 18s rolling audio → ${targetLang.badge}...`);
-  showToast(`🎙 AI Live Audio Sub started (${targetLang.badge}) — first cues arrive in ~18s!`);
+  updateSubStatusBadge(`🎙 AI Nghe Live (${targetLang.badge})...`);
+  syncAudioSubUi(`🎙 Đang nghe trực tiếp từng đoạn 8s → ${targetLang.badge}...`);
+  showToast(`🎙 Đã bật AI Nghe Live (${targetLang.badge}) — câu đầu sẽ hiện sau ~10s!`);
   captureNextAudioSubChunk(sessionId);
+}
+
+function startWebAiAudioSub(scope = 'lookahead10') {
+  if (state.audioSubActive || (state.subJob.active && state.subJob.mode === 'hls-audio')) {
+    stopActiveSubJob(false, true);
+    return;
+  }
+  if (!hasAiAudioCredentials()) {
+    showToast('☁️ Đăng nhập NKI Cloud (hoặc thêm Gemini API Key trong Cài đặt) để bật AI Dịch Audio 10 phút!');
+    openSettingsModal();
+    return;
+  }
+  if (!state.currentMovie || !state.currentEpisode) return;
+
+  const curSec = Math.floor($('videoEl')?.currentTime || 0);
+  if (state.currentEpisode.link_m3u8?.includes('.m3u8')) {
+    const label = scope === 'full' ? 'toàn bộ tập (100%)' : 'trước 10 phút';
+    showToast(`🎙 Đang tách âm thanh HLS & dịch ${label} bằng Gemini AI...`);
+    startUnifiedAiSubJob({
+      movie: state.currentMovie,
+      episode: state.currentEpisode,
+      langCode: state.prefs.primaryLang,
+      scope,
+      startSec: curSec,
+      initiatedFrom: 'player',
+      preferAudioOnly: true,
+    });
+    return;
+  }
+  startLiveMediaRecorderFallback();
 }
 
 /* ==================== PHASE 3: WATCH PARTY ENGINE (NEON SYNC + LIVE CHAT) ==================== */
@@ -2552,8 +3762,8 @@ function openPlayer(movie, episode, startSec = 0, { preserveFailover = false, pr
     };
   }
 
-  // Auto-discover (or instantly restore from IndexedDB!) subtitles into user's chosen AI language!
-  autoLoadSubtitlesForMovie(movie, episode);
+  // Auto-discover (or seamlessly attach to Detail Page pre-translator / 10-min HLS lookahead!)
+  autoLoadSubtitlesForMovie(movie, episode, resolvedStartSec);
 }
 
 function minimizePlayer(e) {
@@ -2600,7 +3810,7 @@ function closePlayer(e) {
   if (e && typeof e.stopPropagation === 'function') {
     e.stopPropagation();
   }
-  stopWebAiAudioSub(true);
+  stopActiveSubJob(true, true);
   cancelAutoNext(false);
   clearStallWatchdog();
   closePlayerDrawer();
@@ -2687,15 +3897,32 @@ async function persistCurrentSubCache(isFullyTranslated, translatedCount, { skip
   }
 }
 
-async function autoLoadSubtitlesForMovie(movie, episode) {
+async function autoLoadSubtitlesForMovie(movie, episode, startSec = 0) {
   const runId = ++state.subTranslationRunId;
+  const targetLang = resolveLanguage(state.prefs.primaryLang);
+  state.liveAudioFallbackCue = null;
+
+  // SEAMLESS HANDOFF: If user already started pre-translating this exact episode on the Detail Page,
+  // attach immediately without canceling or losing progress!
+  if (isSubJobFor(movie, episode, targetLang.code) && (state.subJob.active || state.subJob.cues.length >= 3)) {
+    state.sourceCues = state.subJob.cues.slice();
+    state.primaryCues = state.subJob.cues.slice();
+    state.secondaryCues = state.prefs.dualSub ? state.sourceCues : [];
+    renderActiveSubtitle(($('videoEl')?.currentTime || startSec || 0) * 1000);
+    syncAllSubProgressUi();
+    if (state.subJob.audioMode && state.subJob.hlsWindows.length) {
+      maybeRefillHlsLookahead(startSec || $('videoEl')?.currentTime || 0, { forceJump: true });
+    }
+    return;
+  }
+
   state.subTracks = [];
   state.sourceCues = [];
   state.primaryCues = [];
   state.secondaryCues = [];
+  setHudSubProgress(0, false);
   renderActiveSubtitle(0);
 
-  const targetLang = resolveLanguage(state.prefs.primaryLang);
   const cacheKey = buildSubCacheKey(movie.slug, episode, targetLang.code);
 
   // STEP 0A: INSTANT RESTORE FROM LOCAL INDEXEDDB (<10ms)
@@ -2705,7 +3932,7 @@ async function autoLoadSubtitlesForMovie(movie, episode) {
 
   // STEP 0B: SHARED NKI CLOUD SUBTITLE POOL ON VERCEL BLOB (<150ms, 0 GEMINI TOKENS!)
   if ((!cached || (cached.primaryCues?.length || 0) < 3) && isCloudSignedIn()) {
-    updateSubStatusBadge(`☁️ Checking NKI Cloud Sub (${targetLang.badge})...`);
+    updateSubStatusBadge(`☁️ Đang kiểm tra kho Sub NKI Cloud (${targetLang.badge})...`);
     const cloudBundle = await cloudFetchSubtitle(movie.slug, episode.name || episode.slug, targetLang.code);
     if (runId !== state.subTranslationRunId) return;
     if (cloudBundle && Array.isArray(cloudBundle.primaryCues) && cloudBundle.primaryCues.length >= 3) {
@@ -2715,7 +3942,6 @@ async function autoLoadSubtitlesForMovie(movie, episode) {
         translatedCount: cloudBundle.primaryCues.length,
       };
       fromCloud = true;
-      // Save cloud subtitle to local IndexedDB for instant offline reuse next time
       saveCachedEpisodeSub(cacheKey, cached).catch(() => {});
     }
   }
@@ -2733,31 +3959,57 @@ async function autoLoadSubtitlesForMovie(movie, episode) {
       state.secondaryCues = state.sourceCues;
     }
 
+    const covSec = Math.floor((cached.audioTranslatedUntilMs || 0) / 1000);
     updateSubStatusBadge(
       fromCloud
-        ? `☁️ Sub ${targetLang.badge} • NKI Cloud (${state.primaryCues.length})`
-        : `💾 Sub ${targetLang.badge} • Saved (${state.primaryCues.length})`
+        ? `☁️ Sub ${targetLang.badge} • NKI Cloud (${state.primaryCues.length} câu)`
+        : cached.isFullyTranslated
+          ? `💾 Sub ${targetLang.badge} • 100% Đã lưu (${state.primaryCues.length} câu)`
+          : covSec > 0
+            ? `💾 Sub ${targetLang.badge} • Đã dịch tới ${formatTime(covSec)} (${state.primaryCues.length} câu)`
+            : `💾 Sub ${targetLang.badge} • Đã lưu (${state.primaryCues.length} câu)`
     );
-    renderActiveSubtitle(($('videoEl').currentTime || 0) * 1000);
+    renderActiveSubtitle(($('videoEl')?.currentTime || startSec || 0) * 1000);
 
-    // Hydrate OpenSubtitles track list silently in background (non-blocking) for track switcher
-    const isSeriesBg = movie.type !== 'single' || state.episodesFlat.length > 1;
-    const epMatchBg = (episode.name || '').match(/\d+/);
-    const epNumBg = epMatchBg ? Number(epMatchBg[0]) : 1;
-    if (movie.imdbId) {
-      fetchOpenSubtitlesV3(movie.imdbId, isSeriesBg, 1, epNumBg).then((tracks) => {
-        if (state.currentEpisode?.link_m3u8 === episode.link_m3u8) {
-          state.subTracks = tracks;
-        }
-      }).catch(() => {});
+    // If this was a partial Audio AI cache (e.g. first 10 minutes pre-translated from Detail Page!),
+    // automatically prime the 10-minute rolling HLS Lookahead engine so playback stays 7–10 min ahead!
+    if (cached.audioMode && !cached.isFullyTranslated && episode.link_m3u8?.includes('.m3u8') && hasAiAudioCredentials()) {
+      startUnifiedAiSubJob({
+        movie,
+        episode,
+        langCode: targetLang.code,
+        scope: 'lookahead10',
+        startSec: startSec || $('videoEl')?.currentTime || 0,
+        initiatedFrom: 'player',
+        preferAudioOnly: true,
+      });
+      return;
     }
 
-    // Resume translating remaining batches ONLY if a previous session closed mid-translation
-    if (!cached.isFullyTranslated && (cached.translatedCount || 0) < state.sourceCues.length) {
+    // Hydrate online track list silently in background for track switcher
+    const isSeriesBg = movie.type !== 'single' || state.episodesFlat.length > 1;
+    const epMatchBg = String(episode.name || '').match(/\d+/);
+    const epNumBg = epMatchBg ? Number(epMatchBg[0]) : 1;
+    fetchCatalogSubtitles({
+      imdbId: movie.imdbId || '',
+      title: movie.nameEn || movie.name || '',
+      originTitle: movie.origin_name || '',
+      year: movie.year || '',
+      isSeries: isSeriesBg,
+      season: 1,
+      episode: epNumBg,
+    }).then((disc) => {
+      if (state.currentEpisode?.link_m3u8 === episode.link_m3u8 && Array.isArray(disc?.tracks)) {
+        state.subTracks = disc.tracks;
+      }
+    }).catch(() => {});
+
+    // Resume remaining SRT translation ONLY if a previous session closed mid-translation
+    if (!cached.isFullyTranslated && !cached.audioMode && (cached.translatedCount || 0) < state.sourceCues.length) {
       await applyLoadedSourceCues(state.sourceCues, state.lastSubSourceLang, {
         resumeWorking: state.primaryCues.slice(),
-        resumeStartIdx: cached.translatedCount || 0,
         trackLabel: state.lastSubTrackLabel,
+        startSec,
       });
     } else if (wantSec && (!cached.secondaryCues?.length || cached.secondaryLangCode !== state.prefs.secondaryLang)) {
       await translateSecondaryInBackground(runId, state.sourceCues, state.lastSubSourceLang);
@@ -2765,64 +4017,36 @@ async function autoLoadSubtitlesForMovie(movie, episode) {
     return;
   }
 
-  const isSeries = movie.type !== 'single' || state.episodesFlat.length > 1;
-  const epNumMatch = (episode.name || '').match(/\d+/);
-  const epNum = epNumMatch ? Number(epNumMatch[0]) : 1;
-
-  // Built-in episode subtitles (e.g. Internet Archive attached .SRT/.VTT tracks)
-  const attachedSubs = Array.isArray(episode.subtitles) ? episode.subtitles : [];
-  if (attachedSubs.length > 0) {
-    state.subTracks = attachedSubs;
-    await selectSubtitleTrack(attachedSubs[0]);
-    return;
-  }
-
-  if (!movie.imdbId) {
-    updateSubStatusBadge('Chưa có SRT • Bấm 🎙 AI Audio Sub hoặc nạp .SRT');
-    if ($('hudAudioSubPrompt') && !state.audioSubActive) {
-      $('hudAudioSubPrompt').style.display = 'inline-flex';
-      syncAudioSubUi();
-    }
-    return;
-  }
-
-  updateSubStatusBadge('Đang tìm phụ đề trên OpenSubtitles...');
-  const tracks = await fetchOpenSubtitlesV3(movie.imdbId, isSeries, 1, epNum);
-  if (runId !== state.subTranslationRunId) return;
-  state.subTracks = tracks;
-  if (!tracks.length) {
-    updateSubStatusBadge('Không thấy SRT • Bấm 🎙 AI Audio Sub hoặc nạp .SRT');
-    if ($('hudAudioSubPrompt') && !state.audioSubActive) {
-      $('hudAudioSubPrompt').style.display = 'inline-flex';
-      syncAudioSubUi();
-    }
-    return;
-  }
-
-  const best =
-    tracks.find((t) => t.langCode === targetLang.code) ||
-    tracks.find((t) => t.langCode === 'en') ||
-    tracks.find((t) => t.langCode === 'vi') ||
-    tracks[0];
-
-  await selectSubtitleTrack(best);
+  // Fresh episode -> run Unified Auto-Discover (Cinemeta + OpenSubtitles SRT 3x55 Parallel OR 10-Min HLS Audio AI!)
+  await startUnifiedAiSubJob({
+    movie,
+    episode,
+    langCode: targetLang.code,
+    scope: 'lookahead10',
+    startSec: startSec || $('videoEl')?.currentTime || 0,
+    initiatedFrom: 'player',
+  });
 }
 
 async function selectSubtitleTrack(track) {
+  if (!track) return;
   state.activeSubTrackId = track.id;
   state.lastSubTrackLabel = track.label || '';
-  updateSubStatusBadge(`Đang tải ${track.label}...`);
+  updateSubStatusBadge(`📥 Đang tải ${track.label}...`);
   try {
-    const res = await fetch(track.url);
-    const raw = await res.text();
+    const raw = await fetchSubtitleTextSmart(track);
     const cues = parseSubtitleText(raw);
     if (!cues.length) {
       updateSubStatusBadge('File phụ đề rỗng — thử bản khác');
       return;
     }
-    await applyLoadedSourceCues(cues, track.langCode, { trackLabel: track.label });
+    await applyLoadedSourceCues(cues, track.langCode, {
+      trackLabel: track.label,
+      skipCacheLookup: true,
+      startSec: Math.floor($('videoEl')?.currentTime || 0),
+    });
   } catch {
-    updateSubStatusBadge('Không tải được file phụ đề (CORS) — thử nạp .SRT từ máy');
+    updateSubStatusBadge('Không tải được file phụ đề — thử chọn bản khác hoặc nạp .SRT');
   }
 }
 
@@ -2838,22 +4062,35 @@ async function translateSecondaryInBackground(runId, cues, sourceLangCode) {
     return;
   }
   const workingSec = cues.slice();
-  for (let i = 0; i < cues.length; i += 40) {
-    if (runId !== state.subTranslationRunId) return;
-    const chunk = cues.slice(i, i + 40);
-    const translated = await translateCueBatch({
-      cues: chunk,
-      targetLang: secCode,
-      geminiApiKey: state.prefs.geminiApiKey,
-      geminiModel: state.prefs.geminiModel,
-      cloudTranslator: isCloudSignedIn() ? cloudTranslateCueBatch : null,
-      movieContext: getCurrentMovieContext(),
-    });
-    if (runId !== state.subTranslationRunId) return;
-    for (let j = 0; j < translated.length; j++) workingSec[i + j] = translated[j];
-    state.secondaryCues = workingSec.slice();
+  const batches = [];
+  for (let i = 0; i < cues.length; i += SRT_BATCH_SIZE) {
+    batches.push({ start: i, end: Math.min(cues.length, i + SRT_BATCH_SIZE) });
   }
-  await persistCurrentSubCache(true, cues.length);
+  let cursor = 0;
+  const movieCtx = buildMovieContext(state.currentMovie);
+  await Promise.all(
+    Array.from({ length: Math.min(2, batches.length) }, async () => {
+      while (cursor < batches.length) {
+        if (runId !== state.subTranslationRunId) return;
+        const b = batches[cursor++];
+        const chunk = cues.slice(b.start, b.end);
+        const translated = await translateCueBatch({
+          cues: chunk,
+          targetLang: secCode,
+          geminiApiKey: state.prefs.geminiApiKey,
+          geminiModel: state.prefs.geminiModel,
+          cloudTranslator: isCloudSignedIn() ? cloudTranslateCueBatch : null,
+          movieContext: movieCtx,
+        });
+        if (runId !== state.subTranslationRunId) return;
+        for (let j = 0; j < translated.length; j++) workingSec[b.start + j] = translated[j];
+        state.secondaryCues = workingSec.slice();
+      }
+    })
+  );
+  if (runId === state.subTranslationRunId) {
+    await persistCurrentSubCache(true, cues.length);
+  }
 }
 
 async function applyLoadedSourceCues(cues, sourceLangCode = 'auto', opts = {}) {
@@ -2877,7 +4114,8 @@ async function applyLoadedSourceCues(cues, sourceLangCode = 'auto', opts = {}) {
         state.secondaryCues = state.prefs.dualSub ? cues : [];
       }
       updateSubStatusBadge(`💾 Sub ${targetLang.badge} • Đã lưu (${cues.length} câu)`);
-      renderActiveSubtitle(($('videoEl').currentTime || 0) * 1000);
+      setHudSubProgress(100, false);
+      renderActiveSubtitle(($('videoEl')?.currentTime || 0) * 1000);
       if (state.prefs.dualSub && state.prefs.secondaryLang !== 'off' && cached.secondaryLangCode !== state.prefs.secondaryLang) {
         await translateSecondaryInBackground(runId, cues, sourceLangCode);
       }
@@ -2888,54 +4126,53 @@ async function applyLoadedSourceCues(cues, sourceLangCode = 'auto', opts = {}) {
   state.primaryCues = opts.resumeWorking ? opts.resumeWorking.slice() : cues;
   state.secondaryCues = state.prefs.dualSub ? cues : [];
 
-  if (sourceLangCode === targetLang.code) {
-    updateSubStatusBadge(`Sub ${targetLang.badge} Gốc (${cues.length} câu)`);
-    renderActiveSubtitle(($('videoEl').currentTime || 0) * 1000);
-    await persistCurrentSubCache(true, cues.length);
-  } else {
-    updateSubStatusBadge(`AI đang dịch sang ${targetLang.name}...`);
-    const working = opts.resumeWorking ? opts.resumeWorking.slice() : cues.slice();
-    const startIdx = Math.max(0, opts.resumeStartIdx || 0);
-    const batchSize = 35;
-    for (let i = startIdx; i < cues.length; i += batchSize) {
-      if (runId !== state.subTranslationRunId) return;
-      const chunk = cues.slice(i, i + batchSize);
-      const translated = await translateCueBatch({
-        cues: chunk,
-        targetLang: targetLang.code,
-        geminiApiKey: state.prefs.geminiApiKey,
-        geminiModel: state.prefs.geminiModel,
-        cloudTranslator: isCloudSignedIn() ? cloudTranslateCueBatch : null,
-        movieContext: getCurrentMovieContext(),
-      });
-      if (runId !== state.subTranslationRunId) return;
-      for (let j = 0; j < translated.length; j++) {
-        working[i + j] = translated[j];
-      }
-      state.primaryCues = working.slice();
-      const doneCount = Math.min(cues.length, i + batchSize);
-      const isDone = doneCount >= cues.length;
-      const pct = Math.min(99, Math.round((doneCount / cues.length) * 100));
-      updateSubStatusBadge(isDone ? `💾 Sub ${targetLang.badge} AI (${cues.length} câu)` : `Sub ${targetLang.badge} AI (${pct}%)`);
-      renderActiveSubtitle(($('videoEl').currentTime || 0) * 1000);
-      await persistCurrentSubCache(isDone, doneCount);
-    }
-    updateSubStatusBadge(`💾 Sub ${targetLang.badge} AI (${cues.length} câu • Đã lưu)`);
-    await persistCurrentSubCache(true, cues.length);
-  }
+  // Reuse unified 3x55 parallel playhead-first SRT translator + live HUD progress bar!
+  const j = state.subJob;
+  stopActiveSubJob(true, true);
+  const jobId = ++j.id;
+  j.active = true;
+  j.mode = 'srt';
+  j.phase = 'translating';
+  j.movieSlug = normalizeMovieSlug(state.currentMovie?.slug || 'local');
+  j.episodeKey = normalizeEpisodeKey(state.currentEpisode?.name || state.currentEpisode?.slug || 'full');
+  j.episodeName = state.currentEpisode?.name || 'Full';
+  j.langCode = targetLang.code;
+  j.movie = state.currentMovie;
+  j.episode = state.currentEpisode;
+  j.cues = state.primaryCues;
+  j.abortCtrl = new AbortController();
 
-  // Secondary subtitle language translation if Dual Sub is ON and differs from source
-  await translateSecondaryInBackground(runId, cues, sourceLangCode);
+  await runParallelSrtTranslation({
+    job: j,
+    jobId,
+    movie: state.currentMovie,
+    episode: state.currentEpisode,
+    cues,
+    sourceLangCode,
+    targetLang,
+    startSec: opts.startSec ?? Math.floor($('videoEl')?.currentTime || 0),
+    trackLabel: opts.trackLabel || state.lastSubTrackLabel || `Sub ${targetLang.badge}`,
+    resumeWorking: opts.resumeWorking || null,
+  });
+
+  if (runId === state.subTranslationRunId) {
+    await translateSecondaryInBackground(runId, cues, sourceLangCode);
+  }
 }
 
 function renderActiveSubtitle(currentMs) {
   const pill = $('subPill');
+  if (!pill) return;
   if (!state.prefs.subEnabled) {
     pill.innerHTML = '';
     return;
   }
   const effectiveMs = currentMs - state.prefs.syncOffsetMs;
-  const pText = findActiveCueText(state.primaryCues, effectiveMs);
+  let pText = findActiveCueText(state.primaryCues, effectiveMs);
+  // Grace window for non-HLS live MediaRecorder fallback so lines are NEVER dropped in the past
+  if (!pText && state.liveAudioFallbackCue && Date.now() < state.liveAudioFallbackCue.expiresAt) {
+    pText = state.liveAudioFallbackCue.text;
+  }
   const sText = state.prefs.dualSub && state.prefs.secondaryLang !== 'off'
     ? findActiveCueText(state.secondaryCues, effectiveMs)
     : '';
@@ -3039,6 +4276,7 @@ function openSubModal() {
   $('dualSubToggle').checked = state.prefs.dualSub;
   $('subEnableToggle').checked = state.prefs.subEnabled;
   $('syncValLabel').textContent = `${(state.prefs.syncOffsetMs / 1000).toFixed(1)}s`;
+  syncAudioSubUi();
   $('subModal').classList.add('open');
 }
 
@@ -3053,7 +4291,11 @@ function renderLanguagePickers() {
       state.prefs.primaryLang = l.code;
       savePrefs();
       renderLanguagePickers();
-      if (state.sourceCues.length) applyLoadedSourceCues(state.sourceCues, 'auto');
+      if (state.sourceCues.length && !state.subJob.audioMode) {
+        applyLoadedSourceCues(state.sourceCues, 'auto');
+      } else if (state.currentMovie && state.currentEpisode) {
+        autoLoadSubtitlesForMovie(state.currentMovie, state.currentEpisode, Math.floor($('videoEl')?.currentTime || 0));
+      }
       updateSubStatusBadge(`Đã đổi sang ${l.name}`);
     };
     pWrap.appendChild(b);
@@ -3891,9 +5133,11 @@ function init() {
     }
   });
   video.addEventListener('seeked', () => {
-    pushHostPartyState({ positionSec: video.currentTime || 0 });
+    const pos = video.currentTime || 0;
+    pushHostPartyState({ positionSec: pos });
+    maybeRefillHlsLookahead(pos, { forceJump: true });
     if (state.audioSubActive && state.audioSubRecorder?.state === 'recording') {
-      // Restart rolling 18s AI audio capture cleanly at the new seeked timestamp
+      // Restart rolling 8s live audio fallback cleanly at the new seeked timestamp
       try { state.audioSubRecorder.stop(); } catch { /* ignore */ }
     }
   });
@@ -3918,6 +5162,10 @@ function init() {
     renderActiveSubtitle(cur * 1000);
     updateSkipIntroUi(cur, dur);
     checkAutoNext(cur, dur);
+    if (Date.now() - state.lastLookaheadCheckTs >= 3000) {
+      state.lastLookaheadCheckTs = Date.now();
+      maybeRefillHlsLookahead(cur, { forceJump: false });
+    }
     if (!video.paused && cur > 2 && Date.now() - state.lastSavedPosTs >= 3000) {
       persistCurrentPlaybackProgress({ immediate: false });
     }
@@ -3988,11 +5236,12 @@ function init() {
     };
   }
 
-  if ($('aiAudioSubBtn')) $('aiAudioSubBtn').onclick = () => startWebAiAudioSub();
+  if ($('aiAudioSubBtn')) $('aiAudioSubBtn').onclick = () => startWebAiAudioSub('lookahead10');
+  if ($('aiAudioSubFullBtn')) $('aiAudioSubFullBtn').onclick = () => startWebAiAudioSub('full');
   if ($('hudAudioSubPrompt')) {
     $('hudAudioSubPrompt').onclick = (e) => {
       e.stopPropagation();
-      startWebAiAudioSub();
+      startWebAiAudioSub('lookahead10');
     };
   }
 

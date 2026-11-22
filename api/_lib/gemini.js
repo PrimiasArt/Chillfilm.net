@@ -26,11 +26,14 @@ export function resolveLangInstruction(targetLang) {
   return LANGUAGE_INSTRUCTIONS[key] || `natural cinema-quality movie subtitles in ${clean}`;
 }
 
-export function buildLowLatencyGenConfig(modelId, includeThinkingConfig = true) {
+export function buildLowLatencyGenConfig(modelId, includeThinkingConfig = true, maxOutputTokens = 0) {
   const cfg = {
     temperature: 0.15,
     responseMimeType: 'application/json',
   };
+  if (maxOutputTokens > 0) {
+    cfg.maxOutputTokens = maxOutputTokens;
+  }
   if (!includeThinkingConfig) return cfg;
   const clean = String(modelId || '').trim().replace(/^models\//, '').toLowerCase();
   if (clean.startsWith('gemini-3') && clean.includes('flash')) {
@@ -46,16 +49,25 @@ export function buildLowLatencyGenConfig(modelId, includeThinkingConfig = true) 
 }
 
 export function buildModelFallbackChain(preferredModel, preferTurboFlash = false) {
-  const clean = String(preferredModel || 'gemini-3-flash-preview')
+  const clean = String(preferredModel || 'gemini-2.5-flash')
     .trim()
-    .replace(/^models\//, '') || 'gemini-3-flash-preview';
-  const ordered = preferTurboFlash && clean.toLowerCase().includes('pro')
-    ? ['gemini-3-flash-preview', 'gemini-2.5-flash', clean, 'gemini-2.0-flash']
-    : [clean, 'gemini-2.5-flash', 'gemini-2.0-flash'];
+    .replace(/^models\//, '') || 'gemini-2.5-flash';
+  const low = clean.toLowerCase();
+  // For turbo audio/batch subtitles, prioritize stable ultra-low-latency gemini-2.5-flash over slow pro/preview models to prevent 504 timeouts
+  const ordered = preferTurboFlash && (low.includes('pro') || low.includes('preview'))
+    ? ['gemini-2.5-flash', clean, 'gemini-2.0-flash', 'gemini-2.5-flash-lite']
+    : [clean, 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash-lite'];
   return [...new Set(ordered)];
 }
 
-async function callGeminiWithFallback({ apiKey, contents, preferredModel, preferTurboFlash = false }) {
+async function callGeminiWithFallback({
+  apiKey,
+  contents,
+  preferredModel,
+  preferTurboFlash = false,
+  perAttemptTimeoutMs = 18000,
+  maxOutputTokens = 0,
+}) {
   const chain = buildModelFallbackChain(preferredModel, preferTurboFlash);
   let lastError = 'Gemini request failed';
 
@@ -64,16 +76,32 @@ async function callGeminiWithFallback({ apiKey, contents, preferredModel, prefer
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
     for (const useThinking of [true, false]) {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents,
-          generationConfig: buildLowLatencyGenConfig(model, useThinking),
-        }),
-      });
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), perAttemptTimeoutMs);
+      let res;
+      let bodyText = '';
+      try {
+        res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: ctrl.signal,
+          body: JSON.stringify({
+            contents,
+            generationConfig: buildLowLatencyGenConfig(model, useThinking, maxOutputTokens),
+          }),
+        });
+        bodyText = await res.text();
+      } catch (fetchErr) {
+        clearTimeout(timer);
+        const isTimeout = fetchErr?.name === 'AbortError';
+        lastError = isTimeout
+          ? `Gemini (${model}) timed out after ${Math.round(perAttemptTimeoutMs / 1000)}s`
+          : `Gemini (${model}) network error: ${String(fetchErr?.message || fetchErr).slice(0, 120)}`;
+        if (i === chain.length - 1) throw new Error(lastError);
+        break; // move immediately to next fast fallback model instead of hitting Vercel 504!
+      }
+      clearTimeout(timer);
 
-      const bodyText = await res.text();
       if (!res.ok) {
         let errDetail = '';
         try {
@@ -85,7 +113,7 @@ async function callGeminiWithFallback({ apiKey, contents, preferredModel, prefer
         if (useThinking && res.status === 400 && errDetail.toLowerCase().includes('thinking')) {
           continue; // retry same model without thinkingConfig
         }
-        const retryable = [404, 429, 500, 502, 503].includes(res.status) ||
+        const retryable = [404, 408, 429, 500, 502, 503, 504].includes(res.status) ||
           (res.status === 400 && errDetail.toLowerCase().includes('model'));
         if (!retryable || i === chain.length - 1) {
           throw new Error(lastError);
@@ -141,6 +169,9 @@ export async function translateTextsServerSide({ texts, targetLang, apiKey, pref
   const { rawText, modelUsed } = await callGeminiWithFallback({
     apiKey,
     preferredModel,
+    preferTurboFlash: true,
+    perAttemptTimeoutMs: 18000,
+    maxOutputTokens: 4096,
     contents: [{ parts: [{ text: prompt }] }],
   });
 
@@ -262,7 +293,9 @@ export async function transcribeAudioChunkServerSide({
   const { rawText, modelUsed } = await callGeminiWithFallback({
     apiKey,
     preferredModel,
-    preferTurboFlash,
+    preferTurboFlash: true,
+    perAttemptTimeoutMs: 22000,
+    maxOutputTokens: 2048,
     contents: [
       {
         parts: [
@@ -287,8 +320,22 @@ export async function transcribeAudioChunkServerSide({
   const cues = [];
   const s = cleaned.indexOf('[');
   const e = cleaned.lastIndexOf(']');
+  let arr = [];
   if (s >= 0 && e > s) {
-    const arr = JSON.parse(cleaned.slice(s, e + 1));
+    try {
+      arr = JSON.parse(cleaned.slice(s, e + 1));
+    } catch {
+      arr = [];
+    }
+  }
+  // Salvage complete cue objects even if output was truncated at maxOutputTokens
+  if (!arr.length && s >= 0) {
+    const matches = cleaned.slice(s).match(/\{[^{}]*"t"\s*:\s*"[^"]*"[^{}]*\}/g) || [];
+    for (const m of matches) {
+      try { arr.push(JSON.parse(m)); } catch { /* ignore */ }
+    }
+  }
+  if (arr.length) {
     const maxRelMs = Number(chunkDurationMs || 60000) + 5000;
     const baseOffset = Number(chunkStartOffsetMs || 0);
     for (let i = 0; i < arr.length; i++) {

@@ -10,7 +10,9 @@
     { "source": "/api/auth/me", "destination": "/api/auth?op=me" },
     { "source": "/api/catalog/feed", "destination": "/api/catalog?op=feed" },
     { "source": "/api/catalog/browse", "destination": "/api/catalog?op=browse" },
-    { "source": "/api/catalog/detail", "destination": "/api/catalog?op=detail" }
+    { "source": "/api/catalog/detail", "destination": "/api/catalog?op=detail" },
+    { "source": "/api/catalog/subtitles", "destination": "/api/catalog?op=subtitles" },
+    { "source": "/api/catalog/subproxy", "destination": "/api/catalog?op=subproxy" }
   ],
   "functions": {
     "api/schedules/crawl.js": {

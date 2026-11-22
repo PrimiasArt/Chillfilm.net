@@ -366,6 +366,70 @@ export async function fetchCatalogDetail({ source = 'phimapi', slug, sourceId = 
   return data.detail;
 }
 
+/**
+ * Discovers online subtitle tracks via server-side Cinemeta IMDb lookup + OpenSubtitles v3,
+ * returning tracks equipped with CORS-safe proxyUrl fallbacks.
+ */
+export async function fetchCatalogSubtitles({
+  imdbId = '',
+  title = '',
+  originTitle = '',
+  year = '',
+  isSeries = false,
+  season = 1,
+  episode = 1,
+} = {}) {
+  const qs = new URLSearchParams();
+  if (imdbId) qs.set('imdbId', imdbId);
+  if (title) qs.set('title', title);
+  if (originTitle) qs.set('originTitle', originTitle);
+  if (year) qs.set('year', String(year));
+  qs.set('type', isSeries ? 'series' : 'movie');
+  qs.set('season', String(season || 1));
+  qs.set('episode', String(episode || 1));
+
+  try {
+    const res = await fetch(`${getCloudApiBase()}/api/catalog/subtitles?${qs.toString()}`);
+    if (!res.ok) return { imdbId: imdbId || '', tracks: [], resolvedViaCinemeta: false };
+    const data = await res.json().catch(() => ({}));
+    return {
+      imdbId: data.imdbId || imdbId || '',
+      tracks: Array.isArray(data.tracks) ? data.tracks : [],
+      resolvedViaCinemeta: Boolean(data.resolvedViaCinemeta),
+    };
+  } catch {
+    return { imdbId: imdbId || '', tracks: [], resolvedViaCinemeta: false };
+  }
+}
+
+/**
+ * Downloads raw .SRT/.VTT/.ASS text reliably: tries direct CORS fetch first, then falls back
+ * to ChillFilm's CORS-free /api/catalog/subproxy endpoint.
+ */
+export async function fetchSubtitleTextSmart(track, signal = undefined) {
+  if (!track || !track.url) return '';
+  const base = getCloudApiBase();
+  const proxyUrl = track.proxyUrl
+    ? (track.proxyUrl.startsWith('http') ? track.proxyUrl : `${base}${track.proxyUrl}`)
+    : `${base}/api/catalog/subproxy?url=${encodeURIComponent(track.url)}`;
+
+  // Try direct fetch first if HTTPS (fast when CDN sets ACAO: *)
+  try {
+    const directRes = await fetch(track.url, { signal });
+    if (directRes.ok) {
+      const txt = await directRes.text();
+      if (txt && txt.trim().length > 20) return txt;
+    }
+  } catch {
+    // Fall through to server-side CORS proxy
+  }
+
+  // Fallback to CORS-safe allowlisted server proxy
+  const proxyRes = await fetch(proxyUrl, { signal });
+  if (!proxyRes.ok) throw new Error(`Subtitle proxy HTTP ${proxyRes.status}`);
+  return proxyRes.text();
+}
+
 /* ==================== WATCH PARTY CLIENT (/api/party) ==================== */
 export async function partyCreate({ movie, episode, nickname, positionSec = 0, isPlaying = false }) {
   return apiFetch('/api/party', {

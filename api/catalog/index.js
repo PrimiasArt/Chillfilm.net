@@ -3,6 +3,8 @@ import {
   handleCatalogBrowse,
   handleCatalogDetail,
   handleCatalogFeed,
+  handleCatalogSubProxy,
+  handleCatalogSubtitles,
 } from '../_lib/catalogHandlers.js';
 
 export async function OPTIONS() {
@@ -17,6 +19,12 @@ export async function GET(request) {
   }
   if (op === 'detail' || url.pathname.endsWith('/detail')) {
     return handleCatalogDetail(request);
+  }
+  if (op === 'subtitles' || url.pathname.endsWith('/subtitles')) {
+    return handleCatalogSubtitles(request);
+  }
+  if (op === 'subproxy' || url.pathname.endsWith('/subproxy')) {
+    return handleCatalogSubProxy(request);
   }
   return handleCatalogFeed(request);
 }

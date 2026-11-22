@@ -619,3 +619,261 @@ export async function handleCatalogDetail(request) {
     return jsonResponse({ error: err?.message || 'Detail fetch failed' }, 500);
   }
 }
+
+/* ==================== SUBTITLE AUTO-DISCOVERY (CINEMETA IMDB + OPENSUBTITLES V3) & CORS PROXY ==================== */
+const OS3_LANG_MAP = {
+  vie: { code: 'vi', native: 'Tiếng Việt' },
+  eng: { code: 'en', native: 'English' },
+  tha: { code: 'th', native: 'ภาษาไทย' },
+  chi: { code: 'zh', native: '简体中文' },
+  zho: { code: 'zh', native: '简体中文' },
+  zht: { code: 'zh-TW', native: '繁體中文' },
+  kor: { code: 'ko', native: '한국어' },
+  jpn: { code: 'ja', native: '日本語' },
+  fre: { code: 'fr', native: 'Français' },
+  fra: { code: 'fr', native: 'Français' },
+  spa: { code: 'es', native: 'Español' },
+  ger: { code: 'de', native: 'Deutsch' },
+  deu: { code: 'de', native: 'Deutsch' },
+  ind: { code: 'id', native: 'Bahasa Indonesia' },
+  rus: { code: 'ru', native: 'Русский' },
+  por: { code: 'pt', native: 'Português' },
+  ita: { code: 'it', native: 'Italiano' },
+  ara: { code: 'ar', native: 'العربية' },
+  hin: { code: 'hi', native: 'हिन्दी' },
+  may: { code: 'ms', native: 'Bahasa Melayu' },
+  msa: { code: 'ms', native: 'Bahasa Melayu' },
+};
+
+function cleanTitleForImdbLookup(raw) {
+  return String(raw || '')
+    .split('/')[0]
+    .replace(/\((?:season|phần|phan|tập|tap|part|vol)\s*\d+[^)]*\)/gi, '')
+    .replace(/\b(?:season|phần|phan|part)\s*\d+\b/gi, '')
+    .replace(/\(\d{4}\)/g, '')
+    .replace(/[$@#^*]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function resolveImdbViaCinemeta({ title, originTitle, year, isSeries }) {
+  const queries = [...new Set([
+    cleanTitleForImdbLookup(originTitle),
+    cleanTitleForImdbLookup(title),
+  ].filter((q) => q && q.length >= 2))];
+  if (!queries.length) return '';
+
+  const yearNum = Number(String(year || '').match(/\d{4}/)?.[0] || 0);
+  const kinds = isSeries ? ['series', 'movie'] : ['movie', 'series'];
+
+  for (const q of queries) {
+    for (const kind of kinds) {
+      const endpoint = `https://v3-cinemeta.strem.io/catalog/${kind}/top/search=${encodeURIComponent(q)}.json`;
+      const data = await fetchJsonSafe(endpoint, 4200);
+      const metas = Array.isArray(data?.metas) ? data.metas : [];
+      if (!metas.length) continue;
+
+      const qNorm = q.toLowerCase().replace(/[^a-z0-9\u00c0-\u024f\u4e00-\u9fff]+/g, ' ').trim();
+      const qWords = new Set(qNorm.split(' ').filter((w) => w.length >= 2));
+
+      let best = null;
+      let bestScore = -1;
+      for (const m of metas.slice(0, 8)) {
+        const id = String(m?.id || '').trim();
+        if (!id.startsWith('tt')) continue;
+        const mName = String(m?.name || '').toLowerCase().replace(/[^a-z0-9\u00c0-\u024f\u4e00-\u9fff]+/g, ' ').trim();
+        let score = 0;
+        if (mName === qNorm) score += 100;
+        else if (mName.includes(qNorm) || qNorm.includes(mName)) score += 60;
+        else if (qWords.size) {
+          let overlap = 0;
+          for (const w of qWords) if (mName.includes(w)) overlap++;
+          score += Math.round((overlap / qWords.size) * 45);
+        }
+        const mYear = Number(String(m?.releaseInfo || '').match(/\d{4}/)?.[0] || 0);
+        if (yearNum && mYear) {
+          const diff = Math.abs(mYear - yearNum);
+          if (diff === 0) score += 28;
+          else if (diff === 1) score += 16;
+          else if (diff > 5) score -= 20;
+        }
+        if (score > bestScore) {
+          bestScore = score;
+          best = id;
+        }
+      }
+      if (best && bestScore >= 40) return best;
+    }
+  }
+  return '';
+}
+
+async function queryOpenSubtitlesTracks(imdbId, isSeries, season, episode) {
+  if (!imdbId || !imdbId.startsWith('tt')) return [];
+  const endpoints = isSeries
+    ? [
+        `https://opensubtitles-v3.strem.io/subtitles/series/${imdbId}:${season}:${episode}.json`,
+        ...(season !== 1 || episode !== 1 ? [`https://opensubtitles-v3.strem.io/subtitles/series/${imdbId}:1:1.json`] : []),
+        `https://opensubtitles-v3.strem.io/subtitles/movie/${imdbId}.json`,
+      ]
+    : [
+        `https://opensubtitles-v3.strem.io/subtitles/movie/${imdbId}.json`,
+        `https://opensubtitles-v3.strem.io/subtitles/series/${imdbId}:${season}:${episode}.json`,
+      ];
+
+  for (const ep of endpoints) {
+    const data = await fetchJsonSafe(ep, 4800);
+    const list = Array.isArray(data?.subtitles) ? data.subtitles : [];
+    if (list.length > 0) return list;
+  }
+  return [];
+}
+
+export async function handleCatalogSubtitles(request) {
+  const startedAt = performance.now();
+  try {
+    const url = new URL(request.url);
+    let imdbId = String(url.searchParams.get('imdbId') || '').trim();
+    const title = String(url.searchParams.get('title') || '').trim();
+    const originTitle = String(url.searchParams.get('originTitle') || '').trim();
+    const year = String(url.searchParams.get('year') || '').trim();
+    const type = String(url.searchParams.get('type') || 'movie').trim().toLowerCase();
+    const isSeries = type === 'series' || type === 'tv';
+    const season = Math.max(1, Math.min(99, Number(url.searchParams.get('season') || 1) || 1));
+    const episode = Math.max(1, Math.min(2000, Number(url.searchParams.get('episode') || 1) || 1));
+
+    let lookupMode = 'direct_imdb';
+    if (!imdbId || !/^tt\d{5,}$/.test(imdbId)) {
+      lookupMode = 'cinemeta';
+      imdbId = await resolveImdbViaCinemeta({ title, originTitle, year, isSeries });
+    }
+
+    const rawList = imdbId ? await queryOpenSubtitlesTracks(imdbId, isSeries, season, episode) : [];
+    const seenUrls = new Set();
+    const tracks = [];
+    for (let idx = 0; idx < rawList.length; idx++) {
+      const s = rawList[idx];
+      if (!s || !s.url || !s.lang || seenUrls.has(s.url)) continue;
+      seenUrls.add(s.url);
+      const rawLang = String(s.lang).trim().toLowerCase();
+      const mapped = OS3_LANG_MAP[rawLang] || { code: rawLang.slice(0, 2) || 'en', native: rawLang.toUpperCase() };
+      const isUtf8 = String(s.url).toLowerCase().includes('utf8');
+      tracks.push({
+        id: String(s.id || `osv3_${idx}`),
+        langCode: mapped.code,
+        rawLang,
+        label: `${mapped.native} (OpenSubtitles #${tracks.length + 1})`,
+        url: s.url,
+        proxyUrl: `/api/catalog/subproxy?url=${encodeURIComponent(s.url)}`,
+        priority: (mapped.code === 'vi' ? 30 : mapped.code === 'en' ? 20 : 5) + (isUtf8 ? 5 : 0),
+      });
+    }
+
+    tracks.sort((a, b) => b.priority - a.priority);
+    const trimmed = tracks.slice(0, 30).map(({ priority, ...rest }) => rest);
+
+    metric('catalog.subtitles', 1, { outcome: trimmed.length ? 'hit' : 'miss', lookup: lookupMode });
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        imdbId: imdbId || '',
+        resolvedViaCinemeta: lookupMode === 'cinemeta' && Boolean(imdbId),
+        tracks: trimmed,
+      }),
+      {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          ...CORS_HEADERS,
+          'Cache-Control': 'public, s-maxage=900, stale-while-revalidate=3600',
+        },
+      }
+    );
+  } catch (err) {
+    console.error('[catalog/subtitles] error:', err);
+    metric('catalog.subtitles', 1, { outcome: 'error', lookup: 'unknown' });
+    return jsonResponse({ ok: false, tracks: [], error: err?.message || 'Subtitle lookup failed' }, 500);
+  } finally {
+    metric('catalog.subtitles.duration_ms', performance.now() - startedAt);
+  }
+}
+
+function isAllowedSubProxyHost(hostname) {
+  const h = String(hostname || '').toLowerCase();
+  if (!h) return false;
+  return (
+    h === 'opensubtitles-v3.strem.io' ||
+    h.endsWith('.strem.io') ||
+    h === 'dl.opensubtitles.org' ||
+    h.endsWith('.opensubtitles.org') ||
+    h === 'archive.org' ||
+    h.endsWith('.archive.org')
+  );
+}
+
+export async function handleCatalogSubProxy(request) {
+  try {
+    const url = new URL(request.url);
+    const targetRaw = String(url.searchParams.get('url') || '').trim();
+    if (!targetRaw) return jsonResponse({ error: 'url is required' }, 400);
+
+    let parsed;
+    try {
+      parsed = new URL(targetRaw);
+    } catch {
+      return jsonResponse({ error: 'Invalid subtitle URL' }, 400);
+    }
+    if (parsed.protocol !== 'https:' || !isAllowedSubProxyHost(parsed.hostname)) {
+      return jsonResponse({ error: 'Subtitle host not allowed' }, 403);
+    }
+
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8500);
+    let upstream;
+    try {
+      upstream = await fetch(parsed.href, {
+        signal: ctrl.signal,
+        headers: {
+          'User-Agent': 'ChillFilm-NKI/3.6',
+          Accept: 'text/plain, text/vtt, application/x-subrip, */*',
+        },
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!upstream.ok) {
+      return jsonResponse({ error: `Upstream subtitle HTTP ${upstream.status}` }, 502);
+    }
+
+    const buf = await upstream.arrayBuffer();
+    if (buf.byteLength > 2_500_000) {
+      return jsonResponse({ error: 'Subtitle file too large' }, 413);
+    }
+
+    let text = new TextDecoder('utf-8', { fatal: false }).decode(buf);
+    // Fallback to Windows-1252/Latin1 if raw UTF-8 decode produced excessive replacement characters
+    const replacementCount = (text.match(/\uFFFD/g) || []).length;
+    if (replacementCount > 12) {
+      try {
+        text = new TextDecoder('windows-1252').decode(buf);
+      } catch {
+        // Keep UTF-8 text
+      }
+    }
+    text = text.replace(/^\uFEFF/, '');
+
+    return new Response(text, {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Cache-Control': 'public, s-maxage=3600, stale-while-revalidate=86400',
+      },
+    });
+  } catch (err) {
+    console.error('[catalog/subproxy] error:', err);
+    return jsonResponse({ error: err?.message || 'Subtitle proxy failed' }, 502);
+  }
+}
