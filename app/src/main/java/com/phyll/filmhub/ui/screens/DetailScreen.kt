@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -58,6 +59,7 @@ import com.phyll.filmhub.model.ControlTargetMode
 import com.phyll.filmhub.model.Episode
 import com.phyll.filmhub.model.MovieItem
 import com.phyll.filmhub.model.WatchProgress
+import com.phyll.filmhub.ui.DetailSubPreTranslateState
 import com.phyll.filmhub.ui.i18n.LocalAppStrings
 import com.phyll.filmhub.ui.theme.BrandEmeraldVioletBrush
 import com.phyll.filmhub.ui.theme.CinemaGlass
@@ -85,6 +87,9 @@ fun DetailScreen(
     controlTargetMode: ControlTargetMode = ControlTargetMode.LOCAL_DEVICE,
     selectedTvName: String = "",
     savedWatchProgress: WatchProgress? = null,
+    detailSubState: DetailSubPreTranslateState = DetailSubPreTranslateState(),
+    isEpisodeWatched: (Episode) -> Boolean = { false },
+    onPreTranslateEpisode: (Episode) -> Unit = {},
     onPlayEpisode: (Episode) -> Unit,
     onPlayOnPhone: (Episode) -> Unit = onPlayEpisode,
     onPlayOnTv: (Episode) -> Unit = onPlayEpisode,
@@ -541,6 +546,97 @@ fun DetailScreen(
                 }
             }
 
+            // 3b. AI Subtitle Pre-Translator Card (0-100% Progress Bar — Phone & Smart TV D-Pad Ready)
+            if (!isResolving && firstEp != null) {
+                val activeSubForThisMovie = detailSubState.movieId == movie.id
+                val subPct = if (activeSubForThisMovie) detailSubState.percent.coerceIn(0, 100) else 0
+                val subRunning = activeSubForThisMovie && detailSubState.isRunning
+                val subReady = activeSubForThisMovie && detailSubState.isReady
+                Spacer(modifier = Modifier.height(14.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(EmeraldPrimary.copy(alpha = 0.09f))
+                        .border(1.dp, EmeraldNeon.copy(alpha = 0.34f), RoundedCornerShape(14.dp))
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "✨ Tự dịch phụ đề AI (${firstEp.name})",
+                            color = EmeraldNeon,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = if (subReady) "100%" else if (subRunning) "$subPct%" else "NKI AI",
+                            color = if (subReady) EmeraldNeon else TextSecondary,
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Black
+                        )
+                    }
+
+                    if (subRunning || subPct > 0) {
+                        LinearProgressIndicator(
+                            progress = { subPct / 100f },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(6.dp)
+                                .clip(RoundedCornerShape(99.dp)),
+                            color = EmeraldNeon,
+                            trackColor = CinemaSurfaceElevated
+                        )
+                    }
+
+                    Text(
+                        text = if (activeSubForThisMovie && detailSubState.statusText.isNotBlank()) {
+                            detailSubState.statusText
+                        } else {
+                            "Dịch trước phụ đề AI & lưu lên NKI Cloud — vào xem có phụ đề ngay không phải chờ."
+                        },
+                        color = Color(0xFFD1D5DB),
+                        fontSize = 11.5.sp,
+                        lineHeight = 16.sp
+                    )
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Box(
+                            modifier = Modifier
+                                .tvFocusableClickable(
+                                    shape = RoundedCornerShape(8.dp),
+                                    focusedBorderColor = EmeraldNeon,
+                                    unfocusedBorderColor = EmeraldPrimary,
+                                    onClick = {
+                                        if (subReady) onPlayOnPhone(firstEp)
+                                        else if (!subRunning) onPreTranslateEpisode(firstEp)
+                                    }
+                                )
+                                .background(if (subReady) EmeraldPrimary else EmeraldPrimary.copy(alpha = 0.22f))
+                                .padding(horizontal = 14.dp, vertical = 8.dp)
+                        ) {
+                            Text(
+                                text = when {
+                                    subRunning -> "⏳ Đang dịch ($subPct%)..."
+                                    subReady -> "▶ Xem ngay với Sub AI"
+                                    else -> "✨ Tự dịch Sub AI ngay"
+                                },
+                                color = if (subReady) CinemaObsidian else EmeraldNeon,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        }
+                    }
+                }
+            }
+
             // Mobile synopsis (expandable so episodes stay reachable without endless scrolling!)
             if (!isWide && movie.description.isNotBlank()) {
                 Spacer(modifier = Modifier.height(14.dp))
@@ -624,22 +720,34 @@ fun DetailScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     for (ep in currentServer.episodes) {
+                        val watched = isEpisodeWatched(ep)
+                        val isCurrentResume = resumeEp != null && (ep.id == resumeEp.id || ep.streamUrl == resumeEp.streamUrl)
                         Box(
                             modifier = Modifier
                                 .widthIn(min = 74.dp)
                                 .tvFocusableClickable(
                                     shape = RoundedCornerShape(12.dp),
                                     focusedBorderColor = EmeraldNeon,
-                                    unfocusedBorderColor = CinemaGlassBorder,
+                                    unfocusedBorderColor = when {
+                                        isCurrentResume -> EmeraldNeon
+                                        watched -> EmeraldPrimary.copy(alpha = 0.55f)
+                                        else -> CinemaGlassBorder
+                                    },
                                     onClick = { onPlayOnPhone(ep) }
                                 )
-                                .background(CinemaSurface)
+                                .background(
+                                    when {
+                                        isCurrentResume -> EmeraldPrimary.copy(alpha = 0.22f)
+                                        watched -> EmeraldPrimary.copy(alpha = 0.11f)
+                                        else -> CinemaSurface
+                                    }
+                                )
                                 .padding(horizontal = 14.dp, vertical = 10.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = ep.name,
-                                color = TextPrimary,
+                                text = if (watched) "${ep.name} ✓" else ep.name,
+                                color = if (watched || isCurrentResume) EmeraldNeon else TextPrimary,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 maxLines = 1

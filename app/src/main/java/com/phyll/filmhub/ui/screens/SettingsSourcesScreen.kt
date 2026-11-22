@@ -116,6 +116,7 @@ fun SettingsSourcesScreen(
     adminVaultSnapshot: AdminVaultSnapshot? = null,
     onCloudLogin: (String, String) -> Unit = { _, _ -> },
     onCloudRegister: (String, String, String, String) -> Unit = { _, _, _, _ -> },
+    onCloudUpdateProfile: (String?, String?, String?, Boolean) -> Unit = { _, _, _, _ -> },
     onCloudLogout: () -> Unit = {},
     onCloudSyncNow: () -> Unit = {},
     onLoadAdminVault: () -> Unit = {},
@@ -172,8 +173,16 @@ fun SettingsSourcesScreen(
     var cloudIsRegisterMode by remember { mutableStateOf(false) }
     var cloudUserInput by remember { mutableStateOf("") }
     var cloudPassInput by remember { mutableStateOf("") }
+    var cloudConfirmPassInput by remember { mutableStateOf("") }
     var cloudDisplayNameInput by remember { mutableStateOf("") }
     var cloudInviteInput by remember { mutableStateOf("") }
+    var cloudFormError by remember { mutableStateOf("") }
+    var showProfileManager by remember { mutableStateOf(false) }
+    var profileNameInput by remember(cloudSession?.displayName) { mutableStateOf(cloudSession?.displayName.orEmpty()) }
+    var profileCurPassInput by remember { mutableStateOf("") }
+    var profileNewPassInput by remember { mutableStateOf("") }
+    var profileConfirmPassInput by remember { mutableStateOf("") }
+    var profileFormError by remember { mutableStateOf("") }
     var showAdminVault by remember { mutableStateOf(false) }
     var adminNewKeyInput by remember { mutableStateOf("") }
 
@@ -341,8 +350,8 @@ fun SettingsSourcesScreen(
 
                         OutlinedTextField(
                             value = cloudUserInput,
-                            onValueChange = { cloudUserInput = it },
-                            label = { Text("Username (e.g. admin or email)", fontSize = 12.sp) },
+                            onValueChange = { cloudUserInput = it; cloudFormError = "" },
+                            label = { Text("Tên đăng nhập (vd: admin hoặc email)", fontSize = 12.sp) },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth(),
                             colors = OutlinedTextFieldDefaults.colors(
@@ -352,10 +361,25 @@ fun SettingsSourcesScreen(
                                 unfocusedTextColor = TextPrimary
                             )
                         )
+                        if (cloudIsRegisterMode) {
+                            OutlinedTextField(
+                                value = cloudDisplayNameInput,
+                                onValueChange = { cloudDisplayNameInput = it; cloudFormError = "" },
+                                label = { Text("Tên hiển thị công khai / Biệt danh (KHÔNG nhập mật khẩu)", fontSize = 11.5.sp) },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = EmeraldNeon,
+                                    unfocusedBorderColor = CinemaGlassBorder,
+                                    focusedTextColor = TextPrimary,
+                                    unfocusedTextColor = TextPrimary
+                                )
+                            )
+                        }
                         OutlinedTextField(
                             value = cloudPassInput,
-                            onValueChange = { cloudPassInput = it },
-                            label = { Text("Password (min 6 chars)", fontSize = 12.sp) },
+                            onValueChange = { cloudPassInput = it; cloudFormError = "" },
+                            label = { Text("Mật khẩu (tối thiểu 6 ký tự)", fontSize = 12.sp) },
                             singleLine = true,
                             visualTransformation = PasswordVisualTransformation(),
                             modifier = Modifier.fillMaxWidth(),
@@ -368,10 +392,11 @@ fun SettingsSourcesScreen(
                         )
                         if (cloudIsRegisterMode) {
                             OutlinedTextField(
-                                value = cloudDisplayNameInput,
-                                onValueChange = { cloudDisplayNameInput = it },
-                                label = { Text("Display Name (optional)", fontSize = 12.sp) },
+                                value = cloudConfirmPassInput,
+                                onValueChange = { cloudConfirmPassInput = it; cloudFormError = "" },
+                                label = { Text("Xác nhận mật khẩu", fontSize = 12.sp) },
                                 singleLine = true,
+                                visualTransformation = PasswordVisualTransformation(),
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = OutlinedTextFieldDefaults.colors(
                                     focusedBorderColor = EmeraldNeon,
@@ -384,7 +409,7 @@ fun SettingsSourcesScreen(
                                 OutlinedTextField(
                                     value = cloudInviteInput,
                                     onValueChange = { cloudInviteInput = it.uppercase() },
-                                    label = { Text("Admin Invite Code (NKI-XXXX-XXXX)", fontSize = 12.sp) },
+                                    label = { Text("Mã mời Admin (NKI-XXXX-XXXX)", fontSize = 12.sp) },
                                     singleLine = true,
                                     modifier = Modifier.fillMaxWidth(),
                                     colors = OutlinedTextFieldDefaults.colors(
@@ -396,6 +421,9 @@ fun SettingsSourcesScreen(
                                 )
                             }
                         }
+                        if (cloudFormError.isNotBlank()) {
+                            Text(text = cloudFormError, color = LiveRed, fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                        }
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -406,11 +434,23 @@ fun SettingsSourcesScreen(
                                     onClick = {
                                         if (!cloudSyncBusy) {
                                             if (cloudIsRegisterMode) {
-                                                onCloudRegister(cloudUserInput, cloudPassInput, cloudDisplayNameInput, cloudInviteInput)
+                                                when {
+                                                    cloudPassInput.length < 6 -> cloudFormError = "Mật khẩu phải ít nhất 6 ký tự"
+                                                    cloudPassInput != cloudConfirmPassInput -> cloudFormError = "Mật khẩu xác nhận không khớp!"
+                                                    cloudDisplayNameInput.trim().isNotBlank() && cloudDisplayNameInput.trim() == cloudPassInput ->
+                                                        cloudFormError = "⚠️ Biệt danh không được trùng mật khẩu!"
+                                                    else -> {
+                                                        cloudFormError = ""
+                                                        onCloudRegister(cloudUserInput, cloudPassInput, cloudDisplayNameInput, cloudInviteInput)
+                                                        cloudPassInput = ""
+                                                        cloudConfirmPassInput = ""
+                                                    }
+                                                }
                                             } else {
+                                                cloudFormError = ""
                                                 onCloudLogin(cloudUserInput, cloudPassInput)
+                                                cloudPassInput = ""
                                             }
-                                            cloudPassInput = ""
                                         }
                                     }
                                 )
@@ -420,9 +460,9 @@ fun SettingsSourcesScreen(
                         ) {
                             Text(
                                 text = when {
-                                    cloudSyncBusy -> "⏳ Connecting to NKI Cloud..."
-                                    cloudIsRegisterMode -> "✨ Create NKI Account & Auto-Sync"
-                                    else -> "☁️ Sign In & Auto-Sync"
+                                    cloudSyncBusy -> "⏳ Đang kết nối NKI Cloud..."
+                                    cloudIsRegisterMode -> "✨ Tạo tài khoản NKI & Đồng bộ"
+                                    else -> "☁️ Đăng nhập & Đồng bộ"
                                 },
                                 color = CinemaObsidian,
                                 fontSize = 13.sp,
@@ -485,7 +525,172 @@ fun SettingsSourcesScreen(
                                         .background(CinemaSurfaceElevated)
                                         .padding(horizontal = 12.dp, vertical = 7.dp)
                                 ) {
-                                    Text("Sign Out", color = LiveRed, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    Text("Đăng xuất", color = LiveRed, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+
+                        // Profile & Security Manager (Visible to ALL signed-in users: Rename, Change Password, Revoke other devices)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .tvFocusableClickable(
+                                    shape = RoundedCornerShape(8.dp),
+                                    focusedBorderColor = EmeraldNeon,
+                                    unfocusedBorderColor = CinemaGlassBorder,
+                                    onClick = { showProfileManager = !showProfileManager }
+                                )
+                                .background(CinemaSurfaceElevated)
+                                .padding(horizontal = 12.dp, vertical = 9.dp)
+                        ) {
+                            Text(
+                                text = if (showProfileManager) "👤 Ẩn Quản lý Hồ sơ & Bảo mật ▲" else "👤 Quản lý Hồ sơ & Bảo mật (Đổi tên • Đổi mật khẩu) ▼",
+                                color = TextPrimary,
+                                fontSize = 12.5.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        if (showProfileManager) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(CinemaObsidian.copy(alpha = 0.72f))
+                                    .border(1.dp, CinemaGlassBorder, RoundedCornerShape(8.dp))
+                                    .padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = "Tài khoản: @${cloudSession.username} • Vai trò: ${cloudSession.role}",
+                                    color = TextSecondary,
+                                    fontSize = 11.5.sp
+                                )
+                                OutlinedTextField(
+                                    value = profileNameInput,
+                                    onValueChange = { profileNameInput = it; profileFormError = "" },
+                                    label = { Text("Tên hiển thị công khai (Biệt danh)", fontSize = 11.5.sp) },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = EmeraldNeon,
+                                        unfocusedBorderColor = CinemaGlassBorder,
+                                        focusedTextColor = TextPrimary,
+                                        unfocusedTextColor = TextPrimary
+                                    )
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .tvFocusableClickable(
+                                            shape = RoundedCornerShape(8.dp),
+                                            focusedBorderColor = EmeraldNeon,
+                                            unfocusedBorderColor = EmeraldPrimary,
+                                            onClick = {
+                                                val clean = profileNameInput.trim()
+                                                if (clean.isBlank()) {
+                                                    profileFormError = "Vui lòng nhập biệt danh mới"
+                                                } else {
+                                                    profileFormError = ""
+                                                    onCloudUpdateProfile(clean, null, null, false)
+                                                }
+                                            }
+                                        )
+                                        .background(EmeraldPrimary)
+                                        .padding(vertical = 8.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text("💾 Lưu tên hiển thị mới", color = CinemaObsidian, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                                }
+
+                                OutlinedTextField(
+                                    value = profileCurPassInput,
+                                    onValueChange = { profileCurPassInput = it; profileFormError = "" },
+                                    label = { Text("Mật khẩu hiện tại", fontSize = 11.5.sp) },
+                                    singleLine = true,
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = EmeraldNeon,
+                                        unfocusedBorderColor = CinemaGlassBorder,
+                                        focusedTextColor = TextPrimary,
+                                        unfocusedTextColor = TextPrimary
+                                    )
+                                )
+                                OutlinedTextField(
+                                    value = profileNewPassInput,
+                                    onValueChange = { profileNewPassInput = it; profileFormError = "" },
+                                    label = { Text("Mật khẩu mới (tối thiểu 6 ký tự)", fontSize = 11.5.sp) },
+                                    singleLine = true,
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = EmeraldNeon,
+                                        unfocusedBorderColor = CinemaGlassBorder,
+                                        focusedTextColor = TextPrimary,
+                                        unfocusedTextColor = TextPrimary
+                                    )
+                                )
+                                OutlinedTextField(
+                                    value = profileConfirmPassInput,
+                                    onValueChange = { profileConfirmPassInput = it; profileFormError = "" },
+                                    label = { Text("Nhập lại mật khẩu mới", fontSize = 11.5.sp) },
+                                    singleLine = true,
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = EmeraldNeon,
+                                        unfocusedBorderColor = CinemaGlassBorder,
+                                        focusedTextColor = TextPrimary,
+                                        unfocusedTextColor = TextPrimary
+                                    )
+                                )
+                                if (profileFormError.isNotBlank()) {
+                                    Text(text = profileFormError, color = LiveRed, fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .tvFocusableClickable(
+                                                shape = RoundedCornerShape(8.dp),
+                                                focusedBorderColor = EmeraldNeon,
+                                                unfocusedBorderColor = EmeraldPrimary,
+                                                onClick = {
+                                                    when {
+                                                        profileCurPassInput.isBlank() -> profileFormError = "Nhập mật khẩu hiện tại"
+                                                        profileNewPassInput.length < 6 -> profileFormError = "Mật khẩu mới tối thiểu 6 ký tự"
+                                                        profileNewPassInput != profileConfirmPassInput -> profileFormError = "Mật khẩu xác nhận không khớp!"
+                                                        else -> {
+                                                            profileFormError = ""
+                                                            onCloudUpdateProfile(null, profileCurPassInput, profileNewPassInput, false)
+                                                            profileCurPassInput = ""
+                                                            profileNewPassInput = ""
+                                                            profileConfirmPassInput = ""
+                                                        }
+                                                    }
+                                                }
+                                            )
+                                            .background(EmeraldPrimary)
+                                            .padding(vertical = 8.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text("🔑 Đổi mật khẩu", color = CinemaObsidian, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .tvFocusableClickable(
+                                                shape = RoundedCornerShape(8.dp),
+                                                focusedBorderColor = LiveRed,
+                                                unfocusedBorderColor = CinemaGlassBorder,
+                                                onClick = { onCloudUpdateProfile(null, null, null, true) }
+                                            )
+                                            .background(CinemaSurfaceElevated)
+                                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text("🛡️ Đăng xuất máy khác", color = LiveRed, fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                                    }
                                 }
                             }
                         }

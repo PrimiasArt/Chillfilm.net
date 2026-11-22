@@ -14,7 +14,7 @@ import {
   extractHlsWindowAdtsBase64,
   downloadSrtFile,
 } from './subtitles.js?v=14';
-import { UI_LANGUAGES, resolveUiLang, t } from './i18n.js?v=3';
+import { UI_LANGUAGES, resolveUiLang, t } from './i18n.js?v=16';
 import {
   normalizeMovieSlug,
   normalizeEpisodeKey,
@@ -49,7 +49,7 @@ import {
   fetchMovieGlossary,
   saveMovieGlossary,
   fetchAiVibeSearch,
-} from './sync.js?v=15';
+} from './sync.js?v=16';
 
 const PHIM_API = 'https://phimapi.com';
 const PHIM_CDN = 'https://phimimg.com';
@@ -111,6 +111,8 @@ const DEFAULT_PREFS = {
   ttsDubbing: false,
   ttsRate: 1.15,
   ambientGlow: true,
+  nightAudio: false,
+  preferredQuality: 'auto',
   geminiApiKey: '',
   geminiModel: 'gemini-2.5-flash',
   tvIp: '',
@@ -247,9 +249,214 @@ const state = {
   scrubHls: null,
   scrubLoadedUrl: '',
   scrubLastHoverTs: 0,
+  // V16 Practical UX Pack
+  compressorNode: null,
+  movieSyncMap: loadMovieSyncMap(),
+  watchedMap: loadWatchedEpisodesMap(),
+  myListTab: 'all',
+  drawerEpQuery: '',
+  drawerEpDesc: false,
+  nextEpBgStartedKeys: new Set(),
+  nextEpBgReadyKeys: new Set(),
+  hlsLevels: [],
+  currentQualityLevel: -1,
+  deferredPwaPrompt: null,
+  isPopstateNav: false,
+  hold2xActive: false,
 };
 
 const MOVIE_INTRO_STORAGE_KEY = 'chillfilm_nki_movie_intro_v1';
+const MOVIE_SYNC_STORAGE_KEY = 'chillfilm_nki_movie_sync_v1';
+const WATCHED_EPS_STORAGE_KEY = 'chillfilm_nki_watched_eps_v1';
+const SEARCH_HISTORY_STORAGE_KEY = 'chillfilm_nki_search_history_v1';
+
+function loadMovieSyncMap() {
+  try {
+    const obj = JSON.parse(localStorage.getItem(MOVIE_SYNC_STORAGE_KEY) || '{}');
+    return obj && typeof obj === 'object' ? obj : {};
+  } catch {
+    return {};
+  }
+}
+
+function getMovieSyncOffsetMs(movieSlug) {
+  if (!movieSlug) return state.prefs.syncOffsetMs || 0;
+  const k = normalizeMovieSlug(movieSlug);
+  const v = state.movieSyncMap?.[k];
+  return typeof v === 'number' && Number.isFinite(v) ? v : (state.prefs.syncOffsetMs || 0);
+}
+
+function setMovieSyncOffsetMs(movieSlug, offsetMs) {
+  const clamped = Math.max(-15000, Math.min(15000, Math.round(Number(offsetMs) || 0)));
+  state.prefs.syncOffsetMs = clamped;
+  if (movieSlug) {
+    const k = normalizeMovieSlug(movieSlug);
+    state.movieSyncMap[k] = clamped;
+    try {
+      localStorage.setItem(MOVIE_SYNC_STORAGE_KEY, JSON.stringify(state.movieSyncMap));
+    } catch { /* ignore */ }
+  }
+  savePrefs();
+  if ($('syncValLabel')) $('syncValLabel').textContent = `${(clamped / 1000).toFixed(2).replace(/\.00$/, '.0')}s`;
+  if ($('syncRangeSlider')) $('syncRangeSlider').value = String(Math.max(-10000, Math.min(10000, clamped)));
+  const video = $('videoEl');
+  if (video) renderActiveSubtitle((video.currentTime || 0) * 1000);
+}
+
+function loadWatchedEpisodesMap() {
+  try {
+    const obj = JSON.parse(localStorage.getItem(WATCHED_EPS_STORAGE_KEY) || '{}');
+    return obj && typeof obj === 'object' ? obj : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveWatchedEpisodesMap() {
+  try {
+    localStorage.setItem(WATCHED_EPS_STORAGE_KEY, JSON.stringify(state.watchedMap));
+  } catch { /* ignore */ }
+}
+
+function markEpisodeWatched(movieSlug, epOrKey) {
+  if (!movieSlug) return;
+  const mKey = normalizeMovieSlug(movieSlug);
+  const epKey = typeof epOrKey === 'string'
+    ? normalizeEpisodeKey(epOrKey)
+    : normalizeEpisodeKey(epOrKey?.name || epOrKey?.slug || 'full');
+  if (!mKey || mKey === 'unknown' || !epKey) return;
+  if (!Array.isArray(state.watchedMap[mKey])) state.watchedMap[mKey] = [];
+  if (!state.watchedMap[mKey].includes(epKey)) {
+    state.watchedMap[mKey].push(epKey);
+    if (state.watchedMap[mKey].length > 500) state.watchedMap[mKey] = state.watchedMap[mKey].slice(-500);
+    saveWatchedEpisodesMap();
+  }
+}
+
+function isEpisodeWatched(movieSlug, epOrKey) {
+  if (!movieSlug) return false;
+  const mKey = normalizeMovieSlug(movieSlug);
+  const list = state.watchedMap?.[mKey];
+  if (!Array.isArray(list) || !list.length) return false;
+  const epKey = typeof epOrKey === 'string'
+    ? normalizeEpisodeKey(epOrKey)
+    : normalizeEpisodeKey(epOrKey?.name || epOrKey?.slug || 'full');
+  return list.includes(epKey);
+}
+
+function loadSearchHistory() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(SEARCH_HISTORY_STORAGE_KEY) || '[]');
+    return Array.isArray(arr) ? arr.filter((x) => typeof x === 'string' && x.trim()) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveSearchHistory(keyword) {
+  const q = String(keyword || '').trim();
+  if (q.length < 2) return;
+  const next = [q, ...loadSearchHistory().filter((x) => x.toLowerCase() !== q.toLowerCase())].slice(0, 8);
+  try {
+    localStorage.setItem(SEARCH_HISTORY_STORAGE_KEY, JSON.stringify(next));
+  } catch { /* ignore */ }
+}
+
+function clearSearchHistory() {
+  try { localStorage.removeItem(SEARCH_HISTORY_STORAGE_KEY); } catch { /* ignore */ }
+}
+
+function removeHistoryItem(slug) {
+  const canonical = normalizeMovieSlug(slug);
+  const next = loadHistory().filter((h) => normalizeMovieSlug(h.slug) !== canonical);
+  try {
+    localStorage.setItem('chillfilm_nki_history_v1', JSON.stringify(next));
+    const epMap = loadEpisodePosMap();
+    Object.keys(epMap).forEach((k) => {
+      if (k.startsWith(`${canonical}|`)) delete epMap[k];
+    });
+    localStorage.setItem(EP_POS_STORAGE_KEY, JSON.stringify(epMap));
+  } catch { /* ignore */ }
+  if (isCloudSignedIn()) {
+    cloudPushState({ watchProgressRemoved: [canonical] }).catch(() => {});
+  }
+  renderHistorySection();
+  renderMyListSection();
+  showToast('🗑️ Đã xóa khỏi danh sách Tiếp tục xem');
+}
+
+function clearAllHistory() {
+  const hist = loadHistory();
+  if (!hist.length) return;
+  if (!window.confirm('Xóa toàn bộ danh sách "Tiếp tục xem" trên thiết bị này và Cloud?')) return;
+  const slugs = hist.map((h) => normalizeMovieSlug(h.slug)).filter(Boolean);
+  try {
+    localStorage.removeItem('chillfilm_nki_history_v1');
+    localStorage.removeItem(EP_POS_STORAGE_KEY);
+  } catch { /* ignore */ }
+  if (isCloudSignedIn() && slugs.length) {
+    cloudPushState({ watchProgressRemoved: slugs }).catch(() => {});
+  }
+  renderHistorySection();
+  renderMyListSection();
+  showToast('🗑️ Đã xóa toàn bộ lịch sử Tiếp tục xem');
+}
+
+function syncBrowserUrl({ movie = null, episode = null, playing = false } = {}, { push = true } = {}) {
+  if (state.isPopstateNav || typeof window === 'undefined' || !window.history?.pushState) return;
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('movie');
+    url.searchParams.delete('sid');
+    url.searchParams.delete('ep');
+    url.searchParams.delete('play');
+    if (movie && movie.slug && movie.slug !== 'direct' && movie.slug !== 'local') {
+      const src = (movie.source || 'phimapi').trim().toLowerCase();
+      url.searchParams.set('movie', `${src}:${movie.slug}`);
+      if (movie.sourceId) url.searchParams.set('sid', String(movie.sourceId));
+      if (episode?.name || episode?.slug) {
+        url.searchParams.set('ep', String(episode.name || episode.slug));
+      }
+      if (playing) url.searchParams.set('play', '1');
+    }
+    const nextHref = `${url.pathname}${url.search}${url.hash}`;
+    const curHref = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (nextHref === curHref) return;
+    const histState = {
+      view: playing ? 'player' : (movie ? 'detail' : 'home'),
+      slug: movie?.slug || '',
+      source: movie?.source || 'phimapi',
+      sourceId: movie?.sourceId || '',
+      ep: episode?.name || '',
+    };
+    if (push) window.history.pushState(histState, '', nextHref);
+    else window.history.replaceState(histState, '', nextHref);
+  } catch { /* ignore */ }
+}
+
+async function shareCurrentMovie(movie, ep = null) {
+  if (!movie?.slug) return;
+  const src = (movie.source || 'phimapi').trim().toLowerCase();
+  const qs = new URLSearchParams();
+  qs.set('movie', `${src}:${movie.slug}`);
+  if (movie.sourceId) qs.set('sid', String(movie.sourceId));
+  if (ep?.name) qs.set('ep', ep.name);
+  const shareUrl = `${window.location.origin}/?${qs.toString()}`;
+  const title = getDisplayTitle(movie);
+  const text = `Xem "${title}"${ep?.name ? ` (${ep.name})` : ''} có phụ đề AI trên ChillFilm NKI!`;
+  if (navigator.share) {
+    try {
+      await navigator.share({ title, text, url: shareUrl });
+      return;
+    } catch { /* user cancelled or unsupported -> fall back to clipboard */ }
+  }
+  try {
+    await navigator.clipboard?.writeText(shareUrl);
+    showToast(`🔗 Đã copy link phim "${title}"!`);
+  } catch {
+    showToast(shareUrl);
+  }
+}
 function loadMovieIntroMap() {
   try {
     const obj = JSON.parse(localStorage.getItem(MOVIE_INTRO_STORAGE_KEY) || '{}');
@@ -480,8 +687,50 @@ function renderMyListSection() {
     return;
   }
   sec.style.display = 'block';
+  const histSlugs = new Set(loadHistory().map((h) => normalizeMovieSlug(h.slug)));
+  const isNewEpItem = (item) => {
+    const latestEp = item.latestEpisode || state.latestEpisodeMap[item.slug] || '';
+    const knownEp = item.lastKnownEpisode || item.quality || '';
+    const newNum = extractEpNumber(latestEp);
+    const oldNum = extractEpNumber(knownEp);
+    return Boolean(item.hasNewEpisode || (latestEp && newNum > 0 && ((oldNum > 0 && newNum > oldNum) || (!oldNum && /tập|ep|第/i.test(latestEp) && latestEp !== knownEp))));
+  };
+
+  const countAll = list.length;
+  const countNew = list.filter(isNewEpItem).length;
+  const countWatching = list.filter((it) => histSlugs.has(normalizeMovieSlug(it.slug))).length;
+  const countUnwatched = list.filter((it) => !histSlugs.has(normalizeMovieSlug(it.slug))).length;
+
+  const filterBar = $('myListFilterBar');
+  if (filterBar) {
+    const labels = {
+      all: `${tr('myListTabAll')} (${countAll})`,
+      new: `${tr('myListTabNew')}${countNew ? ` (${countNew})` : ''}`,
+      watching: `${tr('myListTabWatching')} (${countWatching})`,
+      unwatched: `${tr('myListTabUnwatched')} (${countUnwatched})`,
+    };
+    filterBar.querySelectorAll('[data-mylist-tab]').forEach((btn) => {
+      const tab = btn.dataset.mylistTab;
+      btn.textContent = labels[tab] || tab;
+      btn.classList.toggle('active', tab === state.myListTab);
+      btn.onclick = () => {
+        state.myListTab = tab;
+        renderMyListSection();
+      };
+    });
+  }
+
+  let filtered = list;
+  if (state.myListTab === 'new') filtered = list.filter(isNewEpItem);
+  else if (state.myListTab === 'watching') filtered = list.filter((it) => histSlugs.has(normalizeMovieSlug(it.slug)));
+  else if (state.myListTab === 'unwatched') filtered = list.filter((it) => !histSlugs.has(normalizeMovieSlug(it.slug)));
+
   grid.innerHTML = '';
-  list.slice(0, 24).forEach((item) => {
+  if (!filtered.length) {
+    grid.innerHTML = `<div style="padding:18px 10px;color:#9ca3af;font-size:12.5px;">${escapeHtml(tr('noResults'))}</div>`;
+    return;
+  }
+  filtered.slice(0, 36).forEach((item) => {
     const card = createMovieCardElement(item);
     card.onclick = () => openMovieDetail(item, false);
     grid.appendChild(card);
@@ -505,7 +754,7 @@ function renderCountryPicker(countries) {
   const sel = $('countryPickerSelect');
   if (!sel || !state.globalCountries.length) return;
   const curVal = sel.value || '';
-  sel.innerHTML = `<option value="">🌍 All Countries (${state.globalCountries.length})</option>` +
+  sel.innerHTML = `<option value="">${escapeHtml(tr('allCountriesOpt', { n: state.globalCountries.length }))}</option>` +
     state.globalCountries
       .map((c) => `<option value="${escapeHtml(c.slug)}" ${c.slug === curVal ? 'selected' : ''}>${escapeHtml(c.flag || '🌍')} ${escapeHtml(c.name)}</option>`)
       .join('');
@@ -562,8 +811,16 @@ function applyUiTranslations() {
   setText('searchBtnDesktop', 'searchBtn');
   setText('searchBtnMobile', 'searchBtn');
   setText('continueSectionTitle', 'continueWatching');
+  setText('clearAllHistoryBtn', 'clearHistoryBtn');
+  setText('myListSectionTitle', 'myListTitle');
+  setText('advFilterLabelText', 'filterBtn');
+  setText('advFilterApplyBtn', 'applyFiltersBtn');
+  setText('advFilterResetBtn', 'resetBtn');
+  setText('pwaInstallBtn', 'installPwaBtn');
   setHtml('footerTagline', 'footerTagline');
   setText('footerApkLink', 'downloadApk');
+  renderCountryPicker();
+  renderMyListSection();
   if ($('hudLockBtn')) $('hudLockBtn').title = tr('lockBtn');
   const isFs = Boolean(document.fullscreenElement || document.webkitFullscreenElement);
   if ($('hudFsBtn')) {
@@ -608,10 +865,18 @@ function applyUiTranslations() {
     if (mins > 0) b.textContent = tr('sleepMin', { m: mins });
   });
   setText('pipBtn', 'pipBtn');
+  setText('openShortcutsBtn', 'shortcutsBtn');
+  setText('qualityLabelText', 'qualityLabel');
+  setText('nightAudioLabelText', 'nightAudioLabel');
+  setText('skipIntroDurationLabel', 'skipIntroDurationLabel');
+  syncSkipIntroSettingsUi();
 
   // Settings & TV Cast modals
   setText('settingsTitle', 'settingsTitle');
   setHtml('settingsPrivacyBox', 'settingsPrivacy');
+  setText('cloudSyncNowBtn', 'cloudSyncNowBtn');
+  setText('cloudLogoutBtn', 'cloudLogoutBtn');
+  setText('loadModelsBtn', 'loadModelsBtn');
   setText('uiLangLabelText', 'uiLangLabel');
   setText('defaultSubLangLabelText', 'defaultSubLangLabel');
   setText('geminiKeyLabelText', 'geminiKeyLabel');
@@ -759,6 +1024,9 @@ function saveHistoryItem(movie, ep, currentTime, duration, { immediateCloudFlush
 
   // 2. Update "Continue Watching" movie history strip (preserve source & sourceId for MacCMS / Archive!)
   if (dur >= 10) {
+    if (isFinished || (dur > 30 && pos / dur >= 0.85)) {
+      markEpisodeWatched(movie.slug || canonicalSlug, ep);
+    }
     const list = loadHistory().filter((h) => normalizeMovieSlug(h.slug) !== canonicalSlug);
     list.unshift({
       slug: movie.slug || canonicalSlug,
@@ -838,6 +1106,9 @@ async function pullCloudStateAndMerge({ silent = true, force = false } = {}) {
         const remoteTs = Number(item.updatedAt || 0);
 
         const localEntry = map[mapKey];
+        if (dur > 30 && pos / dur >= 0.85) {
+          markEpisodeWatched(slug, epKey);
+        }
         if (!localEntry || remoteTs > (localEntry.ts || 0)) {
           if (dur > 30 && pos / dur >= 0.97) {
             delete map[mapKey];
@@ -1234,11 +1505,13 @@ async function executeAdvancedFilter() {
 
 async function executeSearch(keyword) {
   const q = (keyword || '').trim();
+  closeAllSearchDropdowns();
   if ($('aiVibeBanner')) $('aiVibeBanner').style.display = 'none';
   if (!q) {
     loadCategory(state.activeCategory);
     return;
   }
+  saveSearchHistory(q);
   closeDetailView();
   $('heroBox').style.display = 'none';
   $('historySection').style.display = 'none';
@@ -1268,11 +1541,13 @@ async function executeSearch(keyword) {
 /* ==================== #9 AI VIBE & MOOD NATURAL-LANGUAGE SEARCH ==================== */
 async function executeAiVibeSearch(rawQuery) {
   const q = String(rawQuery || '').trim();
+  closeAllSearchDropdowns();
   if (!q) {
     showToast('✨ Gõ mô tả phim bạn muốn xem (vd: "phim tiên hiệp đánh nhau cháy" hoặc "trinh thám Hàn sau 2022")!');
     $('searchInputDesktop')?.focus();
     return;
   }
+  saveSearchHistory(q);
   closeDetailView();
   $('heroBox').style.display = 'none';
   $('historySection').style.display = 'none';
@@ -1413,7 +1688,7 @@ function renderHero(movie) {
         <div class="hero-actions">
           <button class="btn-nf-play" id="heroPlayBtn">${escapeHtml(tr('watchNow'))}</button>
           <button class="btn-nf-info" id="heroDetailBtn">ⓘ ${escapeHtml(tr('detailsBtn'))}</button>
-          <button class="btn-nf-mylist ${savedInMyList ? 'saved' : ''}" id="heroMyListBtn" type="button">${savedInMyList ? '✓ In My List' : '+ My List'}</button>
+          <button class="btn-nf-mylist ${savedInMyList ? 'saved' : ''}" id="heroMyListBtn" type="button">${escapeHtml(savedInMyList ? tr('inMyListBtn') : tr('addMyListBtn'))}</button>
         </div>
       </div>
     </div>
@@ -1427,7 +1702,7 @@ function renderHero(movie) {
     $('heroMyListBtn').onclick = () => {
       const nowSaved = toggleMyList(movie);
       $('heroMyListBtn').classList.toggle('saved', nowSaved);
-      $('heroMyListBtn').textContent = nowSaved ? '✓ In My List' : '+ My List';
+      $('heroMyListBtn').textContent = nowSaved ? tr('inMyListBtn') : tr('addMyListBtn');
     };
   }
   if (totalSlides > 1) {
@@ -1458,7 +1733,7 @@ function renderHistorySection() {
   sec.style.display = 'block';
   const grid = $('historyGrid');
   grid.innerHTML = '';
-  history.slice(0, 12).forEach((item) => {
+  history.slice(0, 14).forEach((item) => {
     const card = createMovieCardElement({
       slug: item.slug,
       source: item.source || 'phimapi',
@@ -1471,6 +1746,17 @@ function renderHistorySection() {
       poster: item.poster,
       progress: item.progress,
     });
+    const rmBtn = document.createElement('button');
+    rmBtn.type = 'button';
+    rmBtn.className = 'card-remove-history-btn';
+    rmBtn.title = tr('removeHistoryTitle');
+    rmBtn.setAttribute('aria-label', tr('removeHistoryTitle'));
+    rmBtn.textContent = '✕';
+    rmBtn.onclick = (e) => {
+      e.stopPropagation();
+      removeHistoryItem(item.slug);
+    };
+    card.querySelector('.poster-wrap')?.appendChild(rmBtn);
     card.onclick = () => openMovieDetail(item, true, item.position, item.epUrl);
     grid.appendChild(card);
   });
@@ -1651,10 +1937,11 @@ async function openMovieDetail(movieOrSlug, autoPlayFirst = false, resumeSec = 0
     if (autoPlayFirst && state.episodesFlat.length) {
       const savedHist = resumeSec <= 0 && !resumeUrl ? getLatestMovieHistory(detail.slug) : null;
       const targetUrl = resumeUrl || savedHist?.epUrl || '';
-      const targetEpName = savedHist?.epName || '';
+      const targetEpName = movieObj?.epName || savedHist?.epName || '';
+      const targetEpKey = targetEpName ? normalizeEpisodeKey(targetEpName) : '';
       const targetEp =
         (targetUrl && state.episodesFlat.find((e) => e.link_m3u8 === targetUrl)) ||
-        (targetEpName && state.episodesFlat.find((e) => e.name === targetEpName)) ||
+        (targetEpName && state.episodesFlat.find((e) => e.name === targetEpName || normalizeEpisodeKey(e.name || e.slug) === targetEpKey)) ||
         state.episodesFlat[0];
       const targetSec = resumeSec > 2 ? resumeSec : getSavedEpisodePosition(detail.slug, targetEp);
       openPlayer(detail, targetEp, targetSec);
@@ -1668,6 +1955,7 @@ async function openMovieDetail(movieOrSlug, autoPlayFirst = false, resumeSec = 0
 }
 
 function renderDetailView(detail) {
+  syncBrowserUrl({ movie: detail, playing: false }, { push: true });
   $('homeView').style.display = 'none';
   $('topbar')?.classList.add('solid');
   const dv = $('detailView');
@@ -1725,8 +2013,9 @@ function renderDetailView(detail) {
         ${actors.length ? `<div class="detail-people-row"><span>Diễn viên:</span>${actors.map((a) => `<button type="button" class="person-chip" data-person="${escapeHtml(a)}">${escapeHtml(a)}</button>`).join('')}</div>` : ''}
         <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:6px;">
           ${resumeEp ? `<button class="btn-nf-play" id="detailPlayPrimary">${escapeHtml(primaryBtnLabel)}</button>` : `<span style="color:#fca5a5;font-size:13px;">${escapeHtml(tr('noStream'))}</span>`}
-          <button class="btn-nf-mylist ${savedInMyList ? 'saved' : ''}" id="detailMyListBtn" type="button">${savedInMyList ? '✓ In My List' : '+ My List'}</button>
-          <button class="btn-glass" id="detailTrailerBtn" type="button" style="padding:10px 15px;font-size:13.5px;">🎬 Xem Trailer</button>
+          <button class="btn-nf-mylist ${savedInMyList ? 'saved' : ''}" id="detailMyListBtn" type="button">${escapeHtml(savedInMyList ? tr('inMyListBtn') : tr('addMyListBtn'))}</button>
+          <button class="btn-glass" id="detailShareBtn" type="button" style="padding:10px 15px;font-size:13.5px;">${escapeHtml(tr('shareMovieBtn'))}</button>
+          <button class="btn-glass" id="detailTrailerBtn" type="button" style="padding:10px 15px;font-size:13.5px;">${escapeHtml(tr('trailerBtn'))}</button>
         </div>
       </div>
     </div>
@@ -1805,8 +2094,11 @@ function renderDetailView(detail) {
     $('detailMyListBtn').onclick = () => {
       const nowSaved = toggleMyList(detail);
       $('detailMyListBtn').classList.toggle('saved', nowSaved);
-      $('detailMyListBtn').textContent = nowSaved ? '✓ In My List' : '+ My List';
+      $('detailMyListBtn').textContent = nowSaved ? tr('inMyListBtn') : tr('addMyListBtn');
     };
+  }
+  if ($('detailShareBtn')) {
+    $('detailShareBtn').onclick = () => shareCurrentMovie(detail, resumeEp);
   }
   if ($('detailTrailerBtn')) {
     $('detailTrailerBtn').onclick = () => openTrailerModal(detail);
@@ -2026,25 +2318,117 @@ function renderDetailView(detail) {
   }
 
   const wrap = $('detailServersWrap');
+  const CHUNK_SIZE = 50;
   detail.servers.forEach((srv) => {
+    const eps = Array.isArray(srv.episodes) ? srv.episodes : [];
     const block = document.createElement('div');
-    block.style.marginBottom = '18px';
-    block.innerHTML = `<div class="section-title" style="margin-bottom:8px;">${escapeHtml(tr('episodesCount', { srv: srv.server_name, n: srv.episodes.length }))}</div>`;
+    block.style.marginBottom = '20px';
+
+    const watchedCount = eps.filter((ep) => isEpisodeWatched(detail.slug, ep)).length;
+    const headHtml = `<div class="section-title" style="margin-bottom:8px;">${escapeHtml(tr('episodesCount', { srv: srv.server_name, n: eps.length }))}${watchedCount > 0 ? ` <span style="font-size:11.5px;color:#34d399;font-weight:700;">• ✓ ${watchedCount}/${eps.length} ${escapeHtml(tr('watchedMark'))}</span>` : ''}</div>`;
+    block.innerHTML = headHtml;
+
     const grid = document.createElement('div');
     grid.className = 'ep-grid';
-    srv.episodes.forEach((ep) => {
-      const epSavedSec = getSavedEpisodePosition(detail.slug, ep);
-      const b = document.createElement('button');
-      b.className = `ep-btn ${epSavedSec > 5 ? 'active' : ''}`;
-      b.innerHTML = epSavedSec > 5
-        ? `<div>${escapeHtml(ep.name)}</div><div style="font-size:10px;opacity:.88;margin-top:2px;">▶ ${formatTime(epSavedSec)}</div>`
-        : escapeHtml(ep.name);
-      b.onclick = () => {
-        state.episodesFlat = srv.episodes;
-        openPlayer(detail, ep, epSavedSec);
+
+    // Smart episode search + chunk range pills + sort order for long series (> 24 eps)
+    let epSearchQuery = '';
+    let sortDesc = false;
+    let activeChunk = 0;
+
+    // Auto-select chunk containing the user's resume episode!
+    if (eps.length > CHUNK_SIZE && resumeEp) {
+      const rIdx = eps.findIndex((e) => e.link_m3u8 === resumeEp.link_m3u8 || e.name === resumeEp.name);
+      if (rIdx >= 0) activeChunk = Math.floor(rIdx / CHUNK_SIZE);
+    }
+
+    let chunkBar = null;
+    if (eps.length > 24) {
+      const toolbar = document.createElement('div');
+      toolbar.className = 'ep-toolbar';
+      const searchInput = document.createElement('input');
+      searchInput.type = 'search';
+      searchInput.className = 'ep-search-input';
+      searchInput.placeholder = tr('epSearchPlaceholder');
+      searchInput.oninput = (ev) => {
+        epSearchQuery = ev.target.value.trim().toLowerCase();
+        renderServerEpisodes();
       };
-      grid.appendChild(b);
-    });
+      const sortBtn = document.createElement('button');
+      sortBtn.type = 'button';
+      sortBtn.className = 'btn-glass';
+      sortBtn.style.cssText = 'padding:6px 10px;font-size:11.5px;';
+      sortBtn.textContent = tr('epSortAsc');
+      sortBtn.onclick = () => {
+        sortDesc = !sortDesc;
+        sortBtn.textContent = sortDesc ? tr('epSortDesc') : tr('epSortAsc');
+        renderServerEpisodes();
+      };
+      toolbar.appendChild(searchInput);
+      toolbar.appendChild(sortBtn);
+      block.appendChild(toolbar);
+
+      if (eps.length > CHUNK_SIZE) {
+        chunkBar = document.createElement('div');
+        chunkBar.className = 'ep-chunk-bar';
+        block.appendChild(chunkBar);
+      }
+    }
+
+    const renderServerEpisodes = () => {
+      const ordered = sortDesc ? eps.slice().reverse() : eps.slice();
+      let visible = ordered;
+      if (epSearchQuery) {
+        visible = ordered.filter((ep) => String(ep.name || ep.slug || '').toLowerCase().includes(epSearchQuery));
+        if (chunkBar) chunkBar.style.display = 'none';
+      } else if (ordered.length > CHUNK_SIZE) {
+        const totalChunks = Math.ceil(ordered.length / CHUNK_SIZE);
+        if (activeChunk >= totalChunks) activeChunk = 0;
+        if (chunkBar) {
+          chunkBar.style.display = 'flex';
+          chunkBar.innerHTML = '';
+          for (let c = 0; c < totalChunks; c++) {
+            const startIdx = c * CHUNK_SIZE;
+            const endIdx = Math.min(ordered.length, startIdx + CHUNK_SIZE);
+            const firstLabel = ordered[startIdx]?.name?.replace(/^Tập\s*/i, '') || String(startIdx + 1);
+            const lastLabel = ordered[endIdx - 1]?.name?.replace(/^Tập\s*/i, '') || String(endIdx);
+            const cb = document.createElement('button');
+            cb.type = 'button';
+            cb.className = `ep-chunk-btn ${c === activeChunk ? 'active' : ''}`;
+            cb.textContent = `${firstLabel} – ${lastLabel}`;
+            cb.onclick = () => {
+              activeChunk = c;
+              renderServerEpisodes();
+            };
+            chunkBar.appendChild(cb);
+          }
+        }
+        visible = ordered.slice(activeChunk * CHUNK_SIZE, (activeChunk + 1) * CHUNK_SIZE);
+      }
+
+      grid.innerHTML = '';
+      if (!visible.length) {
+        grid.innerHTML = `<div style="grid-column:1/-1;color:#9ca3af;font-size:12px;padding:8px 0;">${escapeHtml(tr('noResults'))}</div>`;
+        return;
+      }
+      visible.forEach((ep) => {
+        const epSavedSec = getSavedEpisodePosition(detail.slug, ep);
+        const watched = isEpisodeWatched(detail.slug, ep);
+        const b = document.createElement('button');
+        b.className = `ep-btn ${epSavedSec > 5 ? 'active' : ''} ${watched ? 'watched' : ''}`;
+        const checkHtml = watched ? '<span class="ep-watched-check" title="Đã xem">✓</span>' : '';
+        b.innerHTML = epSavedSec > 5
+          ? `<div>${escapeHtml(ep.name)}${checkHtml}</div><div style="font-size:10px;opacity:.88;margin-top:2px;">▶ ${formatTime(epSavedSec)}</div>`
+          : `${escapeHtml(ep.name)}${checkHtml}`;
+        b.onclick = () => {
+          state.episodesFlat = eps;
+          openPlayer(detail, ep, epSavedSec);
+        };
+        grid.appendChild(b);
+      });
+    };
+
+    renderServerEpisodes();
     block.appendChild(grid);
     wrap.appendChild(block);
   });
@@ -2053,7 +2437,7 @@ function renderDetailView(detail) {
   const simWrap = $('detailSimilarWrap');
   if (simWrap && Array.isArray(detail.similar) && detail.similar.length > 0) {
     simWrap.innerHTML = `
-      <div class="section-head"><div class="section-title">✨ More Like This</div></div>
+      <div class="section-head"><div class="section-title">${escapeHtml(tr('moreLikeThis'))}</div></div>
       <div class="row-rail-wrap"><div class="row-rail" id="detailSimilarRail"></div></div>
     `;
     const rail = $('detailSimilarRail');
@@ -2072,6 +2456,7 @@ function closeDetailView() {
   if ($('heroBox').style.display !== 'none') {
     $('topbar')?.classList.remove('solid');
   }
+  syncBrowserUrl({}, { push: true });
 }
 
 /* ==================== CHILL-PLAYER ENGINE (HLS + WEB AUDIO 200% BOOST + EQ) ==================== */
@@ -2095,12 +2480,14 @@ function ensureWebAudioDsp(videoEl) {
     const high = ctx.createBiquadFilter();
     high.type = 'highshelf';
     high.frequency.value = 4500;
+    const compressor = ctx.createDynamicsCompressor();
     const gain = ctx.createGain();
     gain.gain.value = state.volumeScale;
     src.connect(low);
     low.connect(mid);
     mid.connect(high);
-    high.connect(gain);
+    high.connect(compressor);
+    compressor.connect(gain);
     gain.connect(ctx.destination);
     // Tap pre-gain clean audio into a MediaStreamDestination for Web AI Live Audio Subtitling
     try {
@@ -2112,9 +2499,119 @@ function ensureWebAudioDsp(videoEl) {
     }
     state.audioCtx = ctx;
     state.gainNode = gain;
+    state.compressorNode = compressor;
     state.eqNodes = { low, mid, high };
+    applyNightAudioMode(state.prefs.nightAudio);
   } catch {
     // Graceful fallback if browser blocks Web Audio on opaque media
+  }
+}
+
+function applyNightAudioMode(enabled) {
+  state.prefs.nightAudio = Boolean(enabled);
+  const c = state.compressorNode;
+  if (c && state.audioCtx) {
+    const t = state.audioCtx.currentTime;
+    if (state.prefs.nightAudio) {
+      c.threshold.setValueAtTime(-28, t);
+      c.knee.setValueAtTime(24, t);
+      c.ratio.setValueAtTime(10, t);
+      c.attack.setValueAtTime(0.005, t);
+      c.release.setValueAtTime(0.22, t);
+    } else {
+      c.threshold.setValueAtTime(0, t);
+      c.knee.setValueAtTime(0, t);
+      c.ratio.setValueAtTime(1, t);
+      c.attack.setValueAtTime(0.003, t);
+      c.release.setValueAtTime(0.25, t);
+    }
+  }
+  if ($('nightAudioToggle')) $('nightAudioToggle').checked = state.prefs.nightAudio;
+}
+
+function renderHlsQualityPicker(hls) {
+  const wrap = $('qualityChipsWrap');
+  const statsEl = $('streamStatsBadge');
+  if (!wrap) return;
+  const levels = Array.isArray(hls?.levels) ? hls.levels : [];
+  state.hlsLevels = levels;
+  if (!levels.length) {
+    wrap.innerHTML = `<button class="pill-choice active" data-quality="-1" type="button">${escapeHtml(tr('qualityAuto'))}</button>`;
+    if (statsEl) statsEl.textContent = 'Direct Stream';
+    return;
+  }
+
+  // Deduplicate by height (keep highest bitrate per resolution)
+  const byHeight = new Map();
+  levels.forEach((lv, idx) => {
+    const h = lv.height || 0;
+    const label = h > 0 ? `${h}p` : `L${idx + 1}`;
+    const prev = byHeight.get(label);
+    if (!prev || (lv.bitrate || 0) > (prev.bitrate || 0)) {
+      byHeight.set(label, { idx, height: h, bitrate: lv.bitrate || 0, label });
+    }
+  });
+  const sorted = Array.from(byHeight.values()).sort((a, b) => b.height - a.height);
+
+  // Auto-apply saved preferred quality if matching
+  const pref = String(state.prefs.preferredQuality || 'auto');
+  if (pref !== 'auto' && hls.currentLevel === -1) {
+    const match = sorted.find((x) => x.label === pref);
+    if (match) {
+      hls.currentLevel = match.idx;
+      state.currentQualityLevel = match.idx;
+    }
+  }
+
+  const curLv = hls.currentLevel;
+  const chips = [
+    `<button class="pill-choice ${curLv === -1 ? 'active' : ''}" data-quality="-1" type="button">${escapeHtml(tr('qualityAuto'))}</button>`,
+    ...sorted.map((item) => `<button class="pill-choice ${curLv === item.idx ? 'active' : ''}" data-quality="${item.idx}" data-qlabel="${escapeHtml(item.label)}" type="button">${escapeHtml(item.label)}</button>`),
+  ];
+  wrap.innerHTML = chips.join('');
+  wrap.querySelectorAll('[data-quality]').forEach((btn) => {
+    btn.onclick = () => {
+      const targetIdx = Number(btn.dataset.quality);
+      const qLabel = btn.dataset.qlabel || 'auto';
+      if (state.hls) {
+        state.hls.currentLevel = targetIdx;
+        state.currentQualityLevel = targetIdx;
+      }
+      state.prefs.preferredQuality = targetIdx === -1 ? 'auto' : qLabel;
+      savePrefs();
+      renderHlsQualityPicker(state.hls);
+      showGestureToast(`🎬 ${targetIdx === -1 ? tr('qualityAuto') : qLabel}`);
+    };
+  });
+  updateStreamStatsBadge();
+}
+
+function updateStreamStatsBadge() {
+  const statsEl = $('streamStatsBadge');
+  if (!statsEl) return;
+  const video = $('videoEl');
+  const hls = state.hls;
+  let bufAhead = 0;
+  try {
+    if (video?.buffered?.length) {
+      const cur = video.currentTime || 0;
+      for (let i = 0; i < video.buffered.length; i++) {
+        if (video.buffered.start(i) <= cur + 0.5 && video.buffered.end(i) >= cur) {
+          bufAhead = Math.max(0, Math.round(video.buffered.end(i) - cur));
+          break;
+        }
+      }
+    }
+  } catch { /* ignore */ }
+  if (hls && Array.isArray(hls.levels) && hls.levels.length) {
+    const activeIdx = hls.currentLevel >= 0 ? hls.currentLevel : hls.loadLevel;
+    const lv = hls.levels[activeIdx];
+    const resStr = lv?.height ? `${lv.height}p` : (video?.videoHeight ? `${video.videoHeight}p` : 'HLS');
+    const mbps = lv?.bitrate ? `${(lv.bitrate / 1_000_000).toFixed(1)} Mbps` : '';
+    const modePrefix = hls.currentLevel === -1 ? `${tr('qualityAuto')} (${resStr})` : resStr;
+    statsEl.textContent = [modePrefix, mbps, bufAhead > 0 ? `Buffer ${bufAhead}s` : ''].filter(Boolean).join(' • ');
+  } else if (video?.videoHeight) {
+    statsEl.textContent = [`${video.videoHeight}p`, bufAhead > 0 ? `Buffer ${bufAhead}s` : ''].filter(Boolean).join(' • ');
   }
 }
 
@@ -2261,7 +2758,7 @@ function syncSkipIntroSettingsUi() {
   const sec = getSkipIntroSec();
   if ($('skipIntroSettingLabel')) $('skipIntroSettingLabel').textContent = `${sec}s`;
   if ($('customSkipIntroInput')) $('customSkipIntroInput').value = String(sec);
-  if ($('skipIntroLabel')) $('skipIntroLabel').textContent = `Skip Intro (+${sec}s)`;
+  if ($('skipIntroLabel')) $('skipIntroLabel').textContent = tr('skipIntroLabel', { s: sec });
   document.querySelectorAll('[data-skipintro]').forEach((b) => {
     b.classList.toggle('active', Number(b.dataset.skipintro) === sec);
   });
@@ -2272,7 +2769,7 @@ function applySkipIntroPref(seconds) {
   state.prefs.skipIntroSec = clamped;
   savePrefs();
   syncSkipIntroSettingsUi();
-  showToast(`⏭ Skip Intro set to +${clamped}s`);
+  showToast(`⏭ ${tr('skipIntroLabel', { s: clamped })}`);
 }
 
 function updateSkipIntroUi(curSec, durSec) {
@@ -2288,7 +2785,7 @@ function updateSkipIntroUi(curSec, durSec) {
     curSec <= maxWindow &&
     (durSec === 0 || durSec > skipSec + 50);
   if (canShow) {
-    if ($('skipIntroLabel')) $('skipIntroLabel').textContent = `Skip Intro (+${skipSec}s)`;
+    if ($('skipIntroLabel')) $('skipIntroLabel').textContent = tr('skipIntroLabel', { s: skipSec });
     btn.style.display = 'inline-flex';
   } else {
     btn.style.display = 'none';
@@ -2380,22 +2877,31 @@ function renderPlayerDrawer() {
   const epGrid = $('drawerEpisodesGrid');
   if (epGrid) {
     epGrid.innerHTML = '';
-    const eps = curServer?.episodes || state.episodesFlat || [];
+    const rawEps = curServer?.episodes || state.episodesFlat || [];
+    const toolsWrap = $('drawerEpTools');
+    if (toolsWrap) {
+      toolsWrap.style.display = rawEps.length > 16 ? 'flex' : 'none';
+    }
+    const ordered = state.drawerEpDesc ? rawEps.slice().reverse() : rawEps.slice();
+    const q = (state.drawerEpQuery || '').trim().toLowerCase();
+    const eps = q ? ordered.filter((ep) => String(ep.name || ep.slug || '').toLowerCase().includes(q)) : ordered;
     eps.forEach((ep) => {
       const isCur = state.currentEpisode && (
         ep.link_m3u8 === state.currentEpisode.link_m3u8 ||
         normalizeEpisodeKey(ep.name || ep.slug) === normalizeEpisodeKey(state.currentEpisode.name || state.currentEpisode.slug)
       );
       const savedSec = !isCur ? getSavedEpisodePosition(movie.slug, ep) : 0;
+      const watched = !isCur && isEpisodeWatched(movie.slug, ep);
       const b = document.createElement('button');
       b.type = 'button';
-      b.className = `drawer-ep-btn ${isCur ? 'active' : ''}`;
+      b.className = `drawer-ep-btn ${isCur ? 'active' : ''} ${watched ? 'watched' : ''}`;
+      const checkHtml = watched ? '<span class="ep-watched-check">✓</span>' : '';
       b.innerHTML = savedSec > 10
-        ? `<span>${escapeHtml(ep.name)}</span><span style="font-size:9.5px;opacity:.78;">${formatTime(savedSec)}</span>`
-        : `<span>${escapeHtml(ep.name)}</span>`;
+        ? `<span>${escapeHtml(ep.name)}${checkHtml}</span><span style="font-size:9.5px;opacity:.78;">${formatTime(savedSec)}</span>`
+        : `<span>${escapeHtml(ep.name)}${checkHtml}</span>`;
       b.onclick = () => {
         closePlayerDrawer();
-        state.episodesFlat = eps;
+        state.episodesFlat = rawEps;
         persistCurrentPlaybackProgress({ immediate: true });
         openPlayer(movie, ep, 0);
       };
@@ -4053,6 +4559,8 @@ function openPlayer(movie, episode, startSec = 0, { preserveFailover = false, pr
 
   state.currentMovie = movie;
   state.currentEpisode = episode;
+  state.prefs.syncOffsetMs = getMovieSyncOffsetMs(movie.slug);
+  syncBrowserUrl({ movie, episode, playing: true }, { push: true });
   state.skipIntroDismissed = false;
   state.autoNextCancelled = false;
   state.hlsNetworkRetries = 0;
@@ -4151,7 +4659,12 @@ function openPlayer(movie, episode, startSec = 0, { preserveFailover = false, pr
       ensureWebAudioDsp(video);
       applyVolumeBoost(state.volumeScale);
       applyEqPreset(state.eqPreset);
+      applyNightAudioMode(state.prefs.nightAudio);
+      renderHlsQualityPicker(hls);
       startPlayback();
+    });
+    hls.on(window.Hls.Events.LEVEL_SWITCHED, () => {
+      updateStreamStatsBadge();
     });
     hls.on(window.Hls.Events.ERROR, (_, data) => {
       if (data.fatal) {
@@ -4229,6 +4742,11 @@ function minimizePlayer(e) {
   document.documentElement.style.overflow = '';
   document.body.style.overflow = '';
   syncPlayIcons($('videoEl').paused);
+  if ($('detailView')?.classList.contains('active') && state.currentMovie) {
+    syncBrowserUrl({ movie: state.currentMovie, playing: false }, { push: false });
+  } else {
+    syncBrowserUrl({}, { push: false });
+  }
 }
 
 function restorePlayer(e) {
@@ -4306,6 +4824,184 @@ function updateSubStatusBadge(text) {
   const lang = resolveLanguage(state.prefs.primaryLang);
   $('hudSubStatus').textContent = text;
   $('hudSubLangPill').textContent = `CC • ${lang.badge}`;
+}
+
+/* ==================== BACKGROUND NEXT-EPISODE AI PRE-TRANSLATION (ZERO-WAIT BINGE) ==================== */
+async function maybePreTranslateNextEpisode(curSec, durSec) {
+  if (!state.prefs.subEnabled || !state.currentMovie || !state.currentEpisode) return;
+  if (!durSec || !Number.isFinite(durSec) || durSec < 180) return;
+  const ratio = curSec / durSec;
+  const remaining = durSec - curSec;
+  // Trigger silently once user crosses 78% OR has <= 6 minutes left
+  if (ratio < 0.78 && remaining > 360) return;
+
+  const nextEp = getNextEpisode();
+  if (!nextEp || !nextEp.link_m3u8) return;
+  const targetLang = resolveLanguage(state.prefs.primaryLang);
+  const bgKey = buildSubCacheKey(state.currentMovie.slug, nextEp, targetLang.code);
+  if (state.nextEpBgStartedKeys.has(bgKey) || state.nextEpBgReadyKeys.has(bgKey)) return;
+  state.nextEpBgStartedKeys.add(bgKey);
+
+  const movie = state.currentMovie;
+  try {
+    // 1. Check local IndexedDB first
+    const localHit = await loadCachedEpisodeSub(bgKey);
+    if (localHit && localHit.primaryCues?.length >= 5) {
+      state.nextEpBgReadyKeys.add(bgKey);
+      return;
+    }
+    // 2. Check NKI Cloud Pool first (0 Gemini tokens!)
+    if (isCloudSignedIn()) {
+      const cloudHit = await cloudFetchSubtitle(movie.slug, nextEp.name || nextEp.slug, targetLang.code);
+      if (cloudHit && cloudHit.primaryCues?.length >= 5) {
+        await saveCachedEpisodeSub(bgKey, {
+          ...cloudHit,
+          trackLabel: cloudHit.sourcePlatform || `☁️ NKI Cloud ${targetLang.badge}`,
+          translatedCount: cloudHit.primaryCues.length,
+        }).catch(() => {});
+        state.nextEpBgReadyKeys.add(bgKey);
+        return;
+      }
+    }
+
+    if (!hasAiAudioCredentials()) return;
+    const epLabel = nextEp.name || 'Tập tiếp';
+    updateSubStatusBadge(`⚡ Đang dịch ngầm trước ${epLabel}...`);
+
+    // 3. Try fast online SRT for next episode
+    const epMatch = String(nextEp.name || '').match(/\d+/);
+    const epNum = epMatch ? Number(epMatch[0]) : 1;
+    const disc = await fetchCatalogSubtitles({
+      imdbId: movie.imdbId || '',
+      title: movie.nameEn || movie.name || '',
+      originTitle: movie.origin_name || '',
+      year: movie.year || '',
+      isSeries: true,
+      season: 1,
+      episode: epNum,
+    }).catch(() => null);
+
+    const bestTrack = Array.isArray(disc?.tracks) && disc.tracks.length
+      ? (disc.tracks.find((t) => t.lang === targetLang.code) || disc.tracks.find((t) => t.lang === 'en') || disc.tracks[0])
+      : null;
+
+    const movieCtx = {
+      slug: movie.slug,
+      title: getDisplayTitle(movie),
+      originTitle: movie.origin_name || movie.name || '',
+      synopsis: getDisplayDesc(movie).slice(0, 400),
+      genres: movie.genres || [],
+      glossary: movie.glossary || null,
+    };
+
+    if (bestTrack) {
+      const rawText = await fetchSubtitleTextSmart(bestTrack);
+      const srcCues = parseSubtitleText(rawText);
+      if (srcCues.length >= 5) {
+        let outCues = srcCues;
+        if (bestTrack.lang !== targetLang.code) {
+          const translated = [];
+          for (let i = 0; i < Math.min(srcCues.length, 180); i += 55) {
+            const slice = srcCues.slice(i, i + 55);
+            const res = isCloudSignedIn()
+              ? await cloudTranslateCueBatch({ cues: slice, targetLang: targetLang.code, model: state.prefs.geminiModel, movieContext: movieCtx }).catch(() => null)
+              : await translateCueBatch({ cues: slice, targetLang: targetLang.code, apiKey: state.prefs.geminiApiKey, model: state.prefs.geminiModel }).catch(() => null);
+            translated.push(...(res || slice));
+          }
+          if (srcCues.length > translated.length) {
+            translated.push(...srcCues.slice(translated.length));
+          }
+          outCues = translated;
+        }
+        const payload = {
+          primaryLangCode: targetLang.code,
+          secondaryLangCode: state.prefs.dualSub ? state.prefs.secondaryLang : '',
+          sourceLangCode: bestTrack.lang || 'auto',
+          trackLabel: `⚡ Pre-Translated ${epLabel}`,
+          sourceCues: srcCues,
+          primaryCues: outCues,
+          secondaryCues: state.prefs.dualSub ? srcCues : [],
+          isFullyTranslated: outCues.length >= srcCues.length && srcCues.length <= 180,
+          translatedCount: Math.min(srcCues.length, 180),
+        };
+        await saveCachedEpisodeSub(bgKey, payload).catch(() => {});
+        if (isCloudSignedIn()) {
+          cloudSaveSubtitle({ movieSlug: movie.slug, episodeNameOrSlug: nextEp.name || nextEp.slug, ...payload }).catch(() => {});
+        }
+        state.nextEpBgReadyKeys.add(bgKey);
+        updateSubStatusBadge(`✅ ${epLabel} đã sẵn Sub ${targetLang.badge} • Xem ngay không chờ`);
+        return;
+      }
+    }
+
+    // 4. Fallback: Quietly pre-transcribe first ~5 minutes (8 x 38s HLS windows, 2x parallel) of Next Episode!
+    if (nextEp.link_m3u8.includes('.m3u8')) {
+      const parsed = await parseHlsMediaSegments(nextEp.link_m3u8).catch(() => null);
+      const segs = parsed?.segments || [];
+      if (segs.length >= 2) {
+        const allWins = buildHlsAudioWindows(segs, 38000);
+        const firstWins = allWins.slice(0, 8); // ~5 minutes ahead!
+        const keyCache = new Map();
+        const collected = [];
+        let cursor = 0;
+        const runWorker = async () => {
+          while (cursor < firstWins.length) {
+            const win = firstWins[cursor++];
+            const extracted = await extractHlsWindowAdtsBase64(win, { keyCache }).catch(() => null);
+            if (!extracted?.audioBase64) continue;
+            const res = isCloudSignedIn()
+              ? await cloudTranscribeAudioChunk({
+                  audioBase64: extracted.audioBase64,
+                  mimeType: extracted.mimeType || 'audio/aac',
+                  chunkStartOffsetMs: win.startMs,
+                  chunkDurationMs: win.durationMs,
+                  targetLang: targetLang.code,
+                  model: state.prefs.geminiModel,
+                  movieContext: movieCtx,
+                }).catch(() => null)
+              : await transcribeAudioChunkDirect({
+                  audioBase64: extracted.audioBase64,
+                  mimeType: extracted.mimeType || 'audio/aac',
+                  chunkStartOffsetMs: win.startMs,
+                  chunkDurationMs: win.durationMs,
+                  targetLang: targetLang.code,
+                  apiKey: state.prefs.geminiApiKey,
+                  model: state.prefs.geminiModel,
+                }).catch(() => null);
+            if (Array.isArray(res?.cues) && res.cues.length) {
+              collected.push(...res.cues);
+            }
+          }
+        };
+        await Promise.all([runWorker(), runWorker()]);
+        if (collected.length >= 3) {
+          collected.sort((a, b) => (a.startMs || 0) - (b.startMs || 0));
+          const coveredUntilMs = firstWins[firstWins.length - 1]?.endMs || 300000;
+          const payload = {
+            primaryLangCode: targetLang.code,
+            secondaryLangCode: '',
+            sourceLangCode: 'auto',
+            trackLabel: `⚡ Pre-Translated Audio ${epLabel}`,
+            sourceCues: collected,
+            primaryCues: collected,
+            secondaryCues: [],
+            isFullyTranslated: firstWins.length >= allWins.length,
+            audioMode: true,
+            audioTranslatedUntilMs: coveredUntilMs,
+            translatedCount: collected.length,
+          };
+          await saveCachedEpisodeSub(bgKey, payload).catch(() => {});
+          if (isCloudSignedIn()) {
+            cloudSaveSubtitle({ movieSlug: movie.slug, episodeNameOrSlug: nextEp.name || nextEp.slug, ...payload }).catch(() => {});
+          }
+          state.nextEpBgReadyKeys.add(bgKey);
+          updateSubStatusBadge(`✅ ${epLabel} đã sẵn 5 phút đầu Sub ${targetLang.badge}`);
+        }
+      }
+    }
+  } catch {
+    // non-fatal background pre-translation
+  }
 }
 
 async function persistCurrentSubCache(isFullyTranslated, translatedCount, { skipCloudPush = false } = {}) {
@@ -4958,7 +5654,9 @@ function openSubModal() {
   $('secColorInput').value = state.prefs.secondaryColor;
   $('dualSubToggle').checked = state.prefs.dualSub;
   $('subEnableToggle').checked = state.prefs.subEnabled;
-  $('syncValLabel').textContent = `${(state.prefs.syncOffsetMs / 1000).toFixed(1)}s`;
+  const curSync = state.prefs.syncOffsetMs || 0;
+  $('syncValLabel').textContent = `${(curSync / 1000).toFixed(2).replace(/\.00$/, '.0')}s`;
+  if ($('syncRangeSlider')) $('syncRangeSlider').value = String(Math.max(-10000, Math.min(10000, curSync)));
   applyHardsubMaskUi();
   syncTtsUi();
   syncAudioSubUi();
@@ -5012,8 +5710,13 @@ function renderLanguagePickers() {
 function openMoreModal() {
   applyVolumeBoost(state.volumeScale);
   applyEqPreset(state.eqPreset);
+  applyNightAudioMode(state.prefs.nightAudio);
+  renderHlsQualityPicker(state.hls);
   syncSkipIntroSettingsUi();
   if ($('ambientGlowToggle')) $('ambientGlowToggle').checked = Boolean(state.prefs.ambientGlow);
+  if ($('moreQuickDubBtn')) $('moreQuickDubBtn').classList.toggle('active', Boolean(state.prefs.ttsDubbing));
+  if ($('moreQuickMaskBtn')) $('moreQuickMaskBtn').classList.toggle('active', Boolean(state.prefs.hardsubMask));
+  if ($('moreQuickPartyBtn')) $('moreQuickPartyBtn').classList.toggle('active', Boolean(state.party.roomCode));
   $('moreModal').classList.add('open');
 }
 
@@ -5046,27 +5749,40 @@ async function renderCloudCard() {
   const connWrap = $('cloudConnectedWrap');
   const adminDetails = $('adminVaultDetails');
 
+  // Show instant localized status from cached session (no English "Checking..." flicker!)
+  if (statusEl) {
+    if (session?.user) {
+      statusEl.textContent = session.serverAiReady ? tr('cloudActiveSub') : tr('cloudKeyPendingSub');
+    } else if (state.cloudHealth?.ok) {
+      statusEl.textContent = !state.cloudHealth.hasAdmin
+        ? '👑 Tài khoản đầu tiên tạo mới sẽ trở thành ADMIN'
+        : (state.cloudHealth.registrationMode === 'INVITE_ONLY'
+            ? '🔒 Đăng nhập hoặc đăng ký bằng Mã mời từ Admin'
+            : tr('cloudActiveSub'));
+    } else {
+      statusEl.textContent = tr('cloudChecking');
+    }
+  }
+
   // Check health in background to detect Bootstrap Admin / Server AI readiness
   fetchCloudHealth().then((h) => {
     state.cloudHealth = h;
     if (statusEl) {
       if (!h.ok) {
-        statusEl.textContent = '⚠️ Cloud server unreachable';
+        statusEl.textContent = '⚠️ ' + tr('cloudOfflineSub');
       } else if (session?.user) {
-        statusEl.textContent = h.serverAiReady
-          ? '🟢 Server Gemini AI Active • Auto-Sync Neon + Blob'
-          : '🟡 Cloud Sync Active • Admin needs to set Gemini API Key';
+        statusEl.textContent = h.serverAiReady ? tr('cloudActiveSub') : tr('cloudKeyPendingSub');
       } else if (!h.hasAdmin) {
-        statusEl.textContent = '👑 First user to create an account becomes ADMIN';
+        statusEl.textContent = '👑 Tài khoản đầu tiên tạo mới sẽ trở thành ADMIN';
       } else {
         statusEl.textContent = h.registrationMode === 'INVITE_ONLY'
-          ? '🔒 Sign in or register with an Admin Invite Code'
-          : '🟢 Sign in to auto-sync history, AI subs & centralized Gemini';
+          ? '🔒 Đăng nhập hoặc đăng ký bằng Mã mời từ Admin'
+          : tr('cloudActiveSub');
       }
     }
     syncCloudAuthFormFields();
   }).catch(() => {
-    if (statusEl) statusEl.textContent = 'Offline / Local Mode';
+    if (statusEl) statusEl.textContent = tr('cloudOfflineSub');
   });
 
   if (session?.user) {
@@ -5360,13 +6076,13 @@ function populateModelSelects() {
 
   if (statusEl) {
     if (state.modelsLoading) {
-      statusEl.textContent = '⏳ Loading live models from Google Gemini API...';
+      statusEl.textContent = tr('modelsLoadingText');
     } else if (state.liveModels.length) {
-      statusEl.textContent = `✅ Loaded ${state.liveModels.length} live models from Gemini API`;
+      statusEl.textContent = tr('modelsLoadedText', { n: state.liveModels.length });
     } else if (isCloudSignedIn() || state.prefs.geminiApiKey) {
-      statusEl.textContent = 'Click "🔄 Load Models" to fetch live models from Gemini API';
+      statusEl.textContent = tr('modelsClickLoadText');
     } else {
-      statusEl.textContent = 'Sign in to NKI Cloud (or enter personal key) to load live models';
+      statusEl.textContent = tr('modelsSignInHint');
     }
   }
 }
@@ -5444,6 +6160,132 @@ function showGestureToast(text) {
   g._t = setTimeout(() => { g.style.display = 'none'; }, 900);
 }
 
+function closeAllSearchDropdowns() {
+  $('searchDropdownDesktop')?.classList.remove('open');
+  $('searchDropdownMobile')?.classList.remove('open');
+}
+
+function setupInstantSearchDropdown(inputId, dropdownId) {
+  const input = $(inputId);
+  const dd = $(dropdownId);
+  if (!input || !dd) return;
+
+  let debounceTimer = null;
+  let fetchSeq = 0;
+
+  const renderHistoryInDropdown = () => {
+    const hist = loadSearchHistory();
+    if (!hist.length) {
+      dd.classList.remove('open');
+      return;
+    }
+    dd.innerHTML = `
+      <div class="sd-section-head">
+        <span>🕒 Tìm kiếm gần đây</span>
+        <button class="sd-clear-btn" type="button" data-sd-clear="1">Xóa</button>
+      </div>
+      <div class="sd-history-chips">
+        ${hist.map((term) => `<button class="sd-history-chip" type="button" data-sd-term="${escapeHtml(term)}">🔍 ${escapeHtml(term)}</button>`).join('')}
+      </div>
+    `;
+    dd.classList.add('open');
+    dd.querySelector('[data-sd-clear]')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      clearSearchHistory();
+      dd.classList.remove('open');
+    });
+    dd.querySelectorAll('[data-sd-term]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const term = btn.dataset.sdTerm || '';
+        input.value = term;
+        closeAllSearchDropdowns();
+        $('mobileSearchBar')?.classList.remove('open');
+        executeSearch(term);
+      };
+    });
+  };
+
+  const renderResultsInDropdown = (items, query) => {
+    if (!items.length) {
+      dd.innerHTML = `<div style="padding:12px 10px;font-size:12px;color:#9ca3af;text-align:center;">Không thấy ngay "${escapeHtml(query)}" — bấm Enter để tìm rộng hoặc <strong>✨ AI</strong></div>`;
+      dd.classList.add('open');
+      return;
+    }
+    dd.innerHTML = `
+      <div class="sd-section-head">
+        <span>🎬 Gợi ý nhanh</span>
+        <button class="sd-clear-btn" type="button" style="color:#86efac;" data-sd-all="1">Xem tất cả →</button>
+      </div>
+    ` + items.slice(0, 6).map((m, idx) => {
+      const title = getDisplayTitle(m);
+      const hasSub = Boolean(m.hasCloudSub || (m.slug && state.cloudSubSlugs.has(normalizeMovieSlug(m.slug))));
+      const poster = m.poster || './assets/icon-192.png?v=2';
+      return `
+        <button class="sd-movie-item" type="button" data-sd-idx="${idx}">
+          <img src="${escapeHtml(poster)}" alt="" onerror="this.src='./assets/icon-192.png?v=2'" />
+          <div style="min-width:0;flex:1;">
+            <div class="sd-movie-title">${escapeHtml(title)}</div>
+            <div class="sd-movie-meta">
+              <span>${escapeHtml(m.year || '')}</span>
+              <span>${escapeHtml(m.episode_current || m.quality || 'HD')}</span>
+              ${hasSub ? '<span class="sd-sub-pill">☁️ SUB AI</span>' : ''}
+            </div>
+          </div>
+        </button>
+      `;
+    }).join('');
+    dd.classList.add('open');
+    dd.querySelector('[data-sd-all]')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeAllSearchDropdowns();
+      $('mobileSearchBar')?.classList.remove('open');
+      executeSearch(query);
+    });
+    dd.querySelectorAll('[data-sd-idx]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const picked = items[Number(btn.dataset.sdIdx)];
+        if (picked) {
+          closeAllSearchDropdowns();
+          $('mobileSearchBar')?.classList.remove('open');
+          saveSearchHistory(query);
+          openMovieDetail(picked, false);
+        }
+      };
+    });
+  };
+
+  input.addEventListener('focus', () => {
+    const q = input.value.trim();
+    if (q.length < 2) renderHistoryInDropdown();
+  });
+
+  input.addEventListener('input', () => {
+    const q = input.value.trim();
+    clearTimeout(debounceTimer);
+    if (q.length < 2) {
+      renderHistoryInDropdown();
+      return;
+    }
+    const seq = ++fetchSeq;
+    debounceTimer = setTimeout(async () => {
+      try {
+        const data = await fetchCatalogBrowse({ q, limit: 6 });
+        if (seq !== fetchSeq) return;
+        const items = Array.isArray(data?.items) ? data.items : [];
+        renderResultsInDropdown(items, q);
+      } catch {
+        // ignore network hiccup on instant suggest
+      }
+    }, 260);
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeAllSearchDropdowns();
+  });
+}
+
 /* ==================== BOOTSTRAP & EVENT WIRING ==================== */
 function init() {
   applyUiTranslations();
@@ -5504,6 +6346,15 @@ function init() {
     $('advFilterToggleBtn')?.classList.remove('active');
     loadCategory('hot');
   });
+  $('clearAllHistoryBtn')?.addEventListener('click', clearAllHistory);
+  setupInstantSearchDropdown('searchInputDesktop', 'searchDropdownDesktop');
+  setupInstantSearchDropdown('searchInputMobile', 'searchDropdownMobile');
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest?.('#searchDesktopWrap') && !e.target.closest?.('#mobileSearchBar')) {
+      closeAllSearchDropdowns();
+    }
+  });
+
   $('searchBtnDesktop').onclick = () => executeSearch($('searchInputDesktop').value);
   $('searchInputDesktop').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') executeSearch(e.target.value);
@@ -5899,6 +6750,9 @@ function init() {
   video.addEventListener('ended', () => {
     clearStallWatchdog();
     stopTtsSpeech();
+    if (state.currentMovie && state.currentEpisode) {
+      markEpisodeWatched(state.currentMovie.slug, state.currentEpisode);
+    }
     const nextEp = getNextEpisode();
     if (nextEp && !state.autoNextCancelled) {
       startAutoNextCountdown(nextEp, 5);
@@ -5939,6 +6793,8 @@ function init() {
     if (Date.now() - state.lastLookaheadCheckTs >= 3000) {
       state.lastLookaheadCheckTs = Date.now();
       maybeRefillHlsLookahead(cur, { forceJump: false });
+      maybePreTranslateNextEpisode(cur, dur);
+      if ($('moreModal')?.classList.contains('open')) updateStreamStatsBadge();
     }
     if (!video.paused && cur > 2 && Date.now() - state.lastSavedPosTs >= 3000) {
       persistCurrentPlaybackProgress({ immediate: false });
@@ -5978,6 +6834,18 @@ function init() {
   }
   if ($('closePlayerDrawerBtn')) $('closePlayerDrawerBtn').onclick = closePlayerDrawer;
   if ($('playerDrawerBackdrop')) $('playerDrawerBackdrop').onclick = closePlayerDrawer;
+  if ($('drawerEpSearchInput')) {
+    $('drawerEpSearchInput').oninput = (e) => {
+      state.drawerEpQuery = e.target.value || '';
+      renderPlayerDrawer();
+    };
+  }
+  if ($('drawerEpSortBtn')) {
+    $('drawerEpSortBtn').onclick = () => {
+      state.drawerEpDesc = !state.drawerEpDesc;
+      renderPlayerDrawer();
+    };
+  }
 
   if ($('skipIntroBtn')) {
     $('skipIntroBtn').onclick = (e) => {
@@ -6055,12 +6923,36 @@ function init() {
     setControlsVisible(true);
   });
 
-  // Tap, Mouse Auto-Hide & Swipe Gestures on Player Stage
+  // Tap, Mouse Auto-Hide, Hold-to-2x Speed & Swipe Gestures on Player Stage
   const stage = $('playerStage');
   let lastTap = 0;
   let touchStart = null;
   let lastMouseX = -1;
   let lastMouseY = -1;
+  let hold2xTimer = null;
+  let hold2xEndedAt = 0;
+
+  const startHold2xTimer = () => {
+    clearTimeout(hold2xTimer);
+    if (state.isMinimized || state.isLocked || video.paused) return;
+    hold2xTimer = setTimeout(() => {
+      if (state.isMinimized || state.isLocked || video.paused) return;
+      state.hold2xActive = true;
+      video.playbackRate = 2.0;
+      if ($('hold2xPill')) $('hold2xPill').style.display = 'inline-flex';
+    }, 420);
+  };
+
+  const endHold2x = () => {
+    clearTimeout(hold2xTimer);
+    hold2xTimer = null;
+    if (state.hold2xActive) {
+      state.hold2xActive = false;
+      hold2xEndedAt = Date.now();
+      video.playbackRate = state.speed || 1.0;
+      if ($('hold2xPill')) $('hold2xPill').style.display = 'none';
+    }
+  };
 
   // Keep HUD steady while mouse is directly over interactive top/bottom bars, hide fast once mouse leaves!
   const bindHudHoverGuard = (el) => {
@@ -6094,7 +6986,16 @@ function init() {
       state.controlsTimer = setTimeout(() => setControlsVisible(false), 260);
     }
   });
+  stage.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || state.isMinimized || state.isLocked) return;
+    const hud = $('playerHud');
+    if (e.target !== stage && e.target !== video && e.target !== hud) return;
+    startHold2xTimer();
+  });
+  window.addEventListener('mouseup', endHold2x);
+
   stage.addEventListener('click', (e) => {
+    if (Date.now() - hold2xEndedAt < 260) return;
     if (e.target.closest?.('.mini-close-btn, .mini-ctrl-btn')) return;
     if (state.isMinimized) {
       // Prevent the same click that just clicked ← (#hudBackBtn) from immediately re-expanding!
@@ -6130,8 +7031,10 @@ function init() {
 
   stage.addEventListener('touchstart', (e) => {
     if (state.isMinimized || state.isLocked || e.touches.length !== 1) return;
+    if (e.target.closest?.('button, input, select, .hud-bottom, .hud-top, .player-drawer, .party-chat-panel')) return;
     const t = e.touches[0];
     touchStart = { x: t.clientX, y: t.clientY, vol: state.volumeScale, bright: state.brightness, time: video.currentTime, mode: null };
+    startHold2xTimer();
   }, { passive: true });
 
   stage.addEventListener('touchmove', (e) => {
@@ -6139,6 +7042,14 @@ function init() {
     const t = e.touches[0];
     const dx = t.clientX - touchStart.x;
     const dy = t.clientY - touchStart.y;
+    if (Math.abs(dx) > 12 || Math.abs(dy) > 12) {
+      if (!state.hold2xActive) {
+        clearTimeout(hold2xTimer);
+        hold2xTimer = null;
+      } else {
+        return; // keep 2x active smoothly while holding
+      }
+    }
     if (!touchStart.mode && (Math.abs(dx) > 18 || Math.abs(dy) > 18)) {
       touchStart.mode = Math.abs(dy) > Math.abs(dx)
         ? (touchStart.x < window.innerWidth * 0.5 ? 'bright' : 'vol')
@@ -6161,30 +7072,87 @@ function init() {
   }, { passive: true });
 
   stage.addEventListener('touchend', () => {
+    endHold2x();
     if (touchStart?.mode === 'seek' && typeof touchStart.targetSeek === 'number') {
       video.currentTime = touchStart.targetSeek;
     }
     touchStart = null;
   });
+  stage.addEventListener('touchcancel', () => {
+    endHold2x();
+    touchStart = null;
+  });
 
-  // PC Keyboard Shortcuts (Escape minimizes to pop-out instead of killing video!)
+  // PC Pro Keyboard Shortcuts (Space, Arrows/J/L, 0-9, G/H sub sync, </> speed, S skip intro, N next ep, B mask, V dub, ? help, Esc minimize)
+  const SPEED_STEPS = [0.5, 0.75, 1, 1.25, 1.5, 2];
+  const applySpeedValue = (nextSpeed) => {
+    state.speed = nextSpeed;
+    video.playbackRate = state.speed;
+    document.querySelectorAll('[data-speed]').forEach((x) => x.classList.toggle('active', Number(x.dataset.speed) === state.speed));
+    if ($('hudSpeedBoostBtn')) {
+      $('hudSpeedBoostBtn').textContent = state.volumeScale > 1.01 ? `🔊 ${Math.round(state.volumeScale * 100)}%` : `${state.speed}x`;
+    }
+    showGestureToast(`⏩ Tốc độ ${state.speed}x`);
+  };
+
   document.addEventListener('keydown', (e) => {
     if (!$('playerModal').classList.contains('open') || state.isMinimized) return;
     if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
+    const k = e.key.toLowerCase();
     if (e.code === 'Space') { e.preventDefault(); video.paused ? video.play() : video.pause(); }
-    else if (e.key === 'ArrowLeft') { video.currentTime = Math.max(0, video.currentTime - 10); showGestureToast('⏪ -10s'); }
-    else if (e.key === 'ArrowRight') { video.currentTime = Math.min(video.duration || 0, video.currentTime + 10); showGestureToast('+10s ⏩'); }
+    else if (e.key === 'ArrowLeft' || k === 'j') { video.currentTime = Math.max(0, video.currentTime - 10); showGestureToast('⏪ -10s'); }
+    else if (e.key === 'ArrowRight' || k === 'l') { video.currentTime = Math.min(video.duration || 0, video.currentTime + 10); showGestureToast('+10s ⏩'); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); ensureWebAudioDsp(video); applyVolumeBoost(state.volumeScale + 0.1); showGestureToast(`🔊 ${Math.round(state.volumeScale * 100)}%`); }
     else if (e.key === 'ArrowDown') { e.preventDefault(); ensureWebAudioDsp(video); applyVolumeBoost(state.volumeScale - 0.1); showGestureToast(`🔊 ${Math.round(state.volumeScale * 100)}%`); }
-    else if (e.key.toLowerCase() === 'f') { $('hudFsBtn').click(); }
-    else if (e.key.toLowerCase() === 'm') { toggleMute(); }
-    else if (e.key.toLowerCase() === 'e') {
+    else if (/^[0-9]$/.test(e.key) && video.duration > 10) {
+      const pct = Number(e.key) * 10;
+      video.currentTime = (pct / 100) * video.duration;
+      showGestureToast(`🎯 ${pct}% • ${formatTime(video.currentTime)}`);
+    }
+    else if (k === 'g') {
+      setMovieSyncOffsetMs(state.currentMovie?.slug, (state.prefs.syncOffsetMs || 0) - 250);
+      showGestureToast(`⏱️ Sub: ${(state.prefs.syncOffsetMs / 1000).toFixed(2)}s`);
+    }
+    else if (k === 'h') {
+      setMovieSyncOffsetMs(state.currentMovie?.slug, (state.prefs.syncOffsetMs || 0) + 250);
+      showGestureToast(`⏱️ Sub: ${(state.prefs.syncOffsetMs >= 0 ? '+' : '')}${(state.prefs.syncOffsetMs / 1000).toFixed(2)}s`);
+    }
+    else if (e.key === '<' || (e.shiftKey && e.key === ',')) {
+      const idx = SPEED_STEPS.indexOf(state.speed);
+      applySpeedValue(SPEED_STEPS[Math.max(0, (idx < 0 ? 2 : idx) - 1)]);
+    }
+    else if (e.key === '>' || (e.shiftKey && e.key === '.')) {
+      const idx = SPEED_STEPS.indexOf(state.speed);
+      applySpeedValue(SPEED_STEPS[Math.min(SPEED_STEPS.length - 1, (idx < 0 ? 2 : idx) + 1)]);
+    }
+    else if (k === 's') {
+      const skipSec = getSkipIntroSec();
+      const dur = video.duration || 0;
+      video.currentTime = dur > 10 ? Math.min(dur - 5, (video.currentTime || 0) + skipSec) : (video.currentTime || 0) + skipSec;
+      state.skipIntroDismissed = true;
+      if ($('skipIntroBtn')) $('skipIntroBtn').style.display = 'none';
+      showGestureToast(`⏭ +${skipSec}s`);
+    }
+    else if (k === 'n') {
+      const nxt = getNextEpisode();
+      if (nxt) playNextEpisodeNow();
+      else showGestureToast('Đây là tập cuối cùng');
+    }
+    else if (k === 'b') { $('hudMaskBtn')?.click(); }
+    else if (k === 'v') { $('hudTtsBtn')?.click(); }
+    else if (e.key === '?' || (e.shiftKey && e.key === '/')) {
+      $('shortcutsModal')?.classList.toggle('open');
+    }
+    else if (k === 'f') { $('hudFsBtn').click(); }
+    else if (k === 'm') { toggleMute(); }
+    else if (k === 'e') {
       if ($('playerDrawer')?.classList.contains('open')) closePlayerDrawer();
       else openPlayerDrawer();
     }
-    else if (e.key.toLowerCase() === 'c') { openSubModal(); }
+    else if (k === 'c') { openSubModal(); }
     else if (e.key === 'Escape') {
-      if ($('playerDrawer')?.classList.contains('open')) closePlayerDrawer();
+      if ($('shortcutsModal')?.classList.contains('open')) $('shortcutsModal').classList.remove('open');
+      else if ($('playerDrawer')?.classList.contains('open')) closePlayerDrawer();
       else minimizePlayer();
     }
   });
@@ -6226,9 +7194,36 @@ function init() {
   $('secSizeRange').oninput = (e) => { state.prefs.secondarySize = Number(e.target.value); $('secSizeLabel').textContent = `${state.prefs.secondarySize}px`; savePrefs(); renderActiveSubtitle(video.currentTime * 1000); };
   $('subColorInput').oninput = (e) => { state.prefs.primaryColor = e.target.value; savePrefs(); renderActiveSubtitle(video.currentTime * 1000); };
   $('secColorInput').oninput = (e) => { state.prefs.secondaryColor = e.target.value; savePrefs(); renderActiveSubtitle(video.currentTime * 1000); };
-  $('syncMinusBtn').onclick = () => { state.prefs.syncOffsetMs -= 500; $('syncValLabel').textContent = `${(state.prefs.syncOffsetMs / 1000).toFixed(1)}s`; savePrefs(); };
-  $('syncPlusBtn').onclick = () => { state.prefs.syncOffsetMs += 500; $('syncValLabel').textContent = `${(state.prefs.syncOffsetMs / 1000).toFixed(1)}s`; savePrefs(); };
-  $('syncResetBtn').onclick = () => { state.prefs.syncOffsetMs = 0; $('syncValLabel').textContent = '0.0s'; savePrefs(); };
+  $('syncMinusBtn').onclick = () => setMovieSyncOffsetMs(state.currentMovie?.slug, (state.prefs.syncOffsetMs || 0) - 500);
+  $('syncMinusFineBtn')?.addEventListener('click', () => setMovieSyncOffsetMs(state.currentMovie?.slug, (state.prefs.syncOffsetMs || 0) - 250));
+  $('syncPlusFineBtn')?.addEventListener('click', () => setMovieSyncOffsetMs(state.currentMovie?.slug, (state.prefs.syncOffsetMs || 0) + 250));
+  $('syncPlusBtn').onclick = () => setMovieSyncOffsetMs(state.currentMovie?.slug, (state.prefs.syncOffsetMs || 0) + 500);
+  $('syncResetBtn').onclick = () => setMovieSyncOffsetMs(state.currentMovie?.slug, 0);
+  $('syncRangeSlider')?.addEventListener('input', (e) => setMovieSyncOffsetMs(state.currentMovie?.slug, Number(e.target.value)));
+
+  // Night Audio Mode, Mobile Quick Strip & Shortcuts Modal
+  $('nightAudioToggle')?.addEventListener('change', (e) => {
+    ensureWebAudioDsp(video);
+    applyNightAudioMode(Boolean(e.target.checked));
+    savePrefs();
+    showGestureToast(state.prefs.nightAudio ? '🌙 Bật Chế Độ Xem Đêm' : 'Tắt Chế Độ Xem Đêm');
+  });
+  $('moreQuickDubBtn')?.addEventListener('click', () => {
+    $('hudTtsBtn')?.click();
+    $('moreQuickDubBtn').classList.toggle('active', Boolean(state.prefs.ttsDubbing));
+  });
+  $('moreQuickMaskBtn')?.addEventListener('click', () => {
+    $('hudMaskBtn')?.click();
+    $('moreQuickMaskBtn').classList.toggle('active', Boolean(state.prefs.hardsubMask));
+  });
+  $('moreQuickPartyBtn')?.addEventListener('click', () => {
+    $('moreModal')?.classList.remove('open');
+    $('hudPartyBtn')?.click();
+  });
+  $('openShortcutsBtn')?.addEventListener('click', () => {
+    $('moreModal')?.classList.remove('open');
+    $('shortcutsModal')?.classList.add('open');
+  });
 
   // Chill-Player More Menu (Speed, Boost 200%, EQ, Aspect, Sleep, PiP)
   document.querySelectorAll('[data-speed]').forEach((b) => {
@@ -6458,7 +7453,7 @@ function init() {
     loadLiveGeminiModels({ silent: true });
   }
 
-  // Auto-detect ?tvip=192.168.x.x QR Pairing deep-link & ?party=XXXXXX invite link on startup
+  // Auto-detect ?tvip=, ?party=, and ?movie=source:slug&sid=...&ep=...&play=1 deep-links on startup
   try {
     const params = new URLSearchParams(window.location.search);
     const pairIp = params.get('tvip');
@@ -6476,7 +7471,73 @@ function init() {
         openPartyJoinModal(code);
       }
     }
+    const movieParam = (params.get('movie') || '').trim();
+    if (movieParam) {
+      const colonIdx = movieParam.indexOf(':');
+      const source = colonIdx > 0 ? movieParam.slice(0, colonIdx) : 'phimapi';
+      const slug = colonIdx > 0 ? movieParam.slice(colonIdx + 1) : movieParam;
+      const sourceId = (params.get('sid') || '').trim();
+      const wantPlay = params.get('play') === '1';
+      const epParam = (params.get('ep') || '').trim();
+      if (slug) {
+        openMovieDetail({ source, slug, sourceId, epName: epParam }, wantPlay);
+      }
+    }
   } catch { /* ignore */ }
+
+  // Browser Back / Forward History Navigation (Player -> Detail -> Home smoothly!)
+  window.addEventListener('popstate', () => {
+    state.isPopstateNav = true;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const movieParam = (params.get('movie') || '').trim();
+      const wantPlay = params.get('play') === '1';
+      if (!wantPlay && $('playerModal')?.classList.contains('open') && !state.isMinimized) {
+        minimizePlayer();
+      }
+      if (!movieParam) {
+        if ($('detailView')?.classList.contains('active')) {
+          $('detailView').classList.remove('active');
+          $('homeView').style.display = 'block';
+          if ($('heroBox').style.display !== 'none') $('topbar')?.classList.remove('solid');
+        }
+      } else {
+        const colonIdx = movieParam.indexOf(':');
+        const source = colonIdx > 0 ? movieParam.slice(0, colonIdx) : 'phimapi';
+        const slug = colonIdx > 0 ? movieParam.slice(colonIdx + 1) : movieParam;
+        const sourceId = (params.get('sid') || '').trim();
+        if (!state.currentMovie || normalizeMovieSlug(state.currentMovie.slug) !== normalizeMovieSlug(slug) || !$('detailView')?.classList.contains('active')) {
+          openMovieDetail({ source, slug, sourceId }, wantPlay);
+        }
+      }
+    } finally {
+      setTimeout(() => { state.isPopstateNav = false; }, 120);
+    }
+  });
+
+  // PWA Service Worker Registration & Native Install Prompt (#8)
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  }
+  window.addEventListener('beforeinstallprompt', (ev) => {
+    ev.preventDefault();
+    state.deferredPwaPrompt = ev;
+    if ($('pwaInstallBtn')) $('pwaInstallBtn').style.display = 'inline-flex';
+  });
+  window.addEventListener('appinstalled', () => {
+    state.deferredPwaPrompt = null;
+    if ($('pwaInstallBtn')) $('pwaInstallBtn').style.display = 'none';
+    showToast('✅ Đã cài ChillFilm vào thiết bị của bạn!');
+  });
+  $('pwaInstallBtn')?.addEventListener('click', async () => {
+    if (!state.deferredPwaPrompt) return;
+    state.deferredPwaPrompt.prompt();
+    const res = await state.deferredPwaPrompt.userChoice.catch(() => null);
+    if (res?.outcome === 'accepted') {
+      $('pwaInstallBtn').style.display = 'none';
+    }
+    state.deferredPwaPrompt = null;
+  });
 
   // Silently auto-refresh Home live movie feed every 10 minutes so new/hot releases stay current!
   setInterval(() => {

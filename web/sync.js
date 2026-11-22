@@ -203,6 +203,7 @@ export async function cloudPullState(since = 0) {
 
 export async function cloudPushState({
   watchProgress = [],
+  watchProgressRemoved = [],
   myList = [],
   myListRemoved = [],
   prefs = null,
@@ -211,9 +212,10 @@ export async function cloudPushState({
 } = {}) {
   const session = getCloudSession();
   if (!session?.token) return null;
-  if (!watchProgress.length && !myList.length && !myListRemoved.length && !prefs) return null;
+  if (!watchProgress.length && !watchProgressRemoved.length && !myList.length && !myListRemoved.length && !prefs) return null;
 
   const payload = { watchProgress };
+  if (watchProgressRemoved.length) payload.watchProgressRemoved = watchProgressRemoved;
   if (myList.length) payload.myList = myList;
   if (myListRemoved.length) payload.myListRemoved = myListRemoved;
   if (prefs) {

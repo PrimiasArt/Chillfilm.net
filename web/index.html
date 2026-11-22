@@ -15,7 +15,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Sarabun:wght@500;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=14" />
+  <link rel="stylesheet" href="./styles.css?v=16" />
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js" defer></script>
 </head>
 <body>
@@ -34,12 +34,14 @@
     </div>
 
     <div class="top-actions">
-      <div class="search-desktop">
+      <div class="search-desktop" id="searchDesktopWrap">
         <svg class="ui-ico" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="opacity:.72;"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-        <input id="searchInputDesktop" type="search" placeholder="Search movies, series, or describe your vibe..." />
+        <input id="searchInputDesktop" type="search" autocomplete="off" placeholder="Search movies, series, or describe your vibe..." />
         <button class="btn-green-sm" id="searchBtnDesktop">Search</button>
         <button class="btn-ai-vibe-sm" id="aiVibeBtnDesktop" type="button" title="Tìm phim theo tâm trạng / mô tả tự nhiên bằng Gemini AI">✨ AI</button>
+        <div class="search-dropdown" id="searchDropdownDesktop" role="listbox" aria-label="Search suggestions"></div>
       </div>
+      <button class="pwa-install-btn" id="pwaInstallBtn" type="button" style="display:none;" title="Cài đặt ChillFilm ra màn hình chính">📲 Cài App</button>
       <div class="notif-wrap">
         <button class="icon-btn" id="notifBellBtn" title="Thông báo tập mới từ My List" aria-label="Notifications">
           <svg class="ui-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
@@ -85,9 +87,12 @@
 
   <!-- EXPANDABLE MOBILE SEARCH BAR -->
   <div class="mobile-search-bar" id="mobileSearchBar">
-    <input id="searchInputMobile" type="search" placeholder="Type movie title or describe your vibe..." />
-    <button class="btn-grad" id="searchBtnMobile">Search</button>
-    <button class="btn-ai-vibe-sm" id="aiVibeBtnMobile" type="button" style="padding:0 12px;height:38px;">✨ AI</button>
+    <div style="display:flex;gap:8px;width:100%;align-items:center;">
+      <input id="searchInputMobile" type="search" autocomplete="off" placeholder="Type movie title or describe your vibe..." />
+      <button class="btn-grad" id="searchBtnMobile">Search</button>
+      <button class="btn-ai-vibe-sm" id="aiVibeBtnMobile" type="button" style="padding:0 12px;height:38px;">✨ AI</button>
+    </div>
+    <div class="search-dropdown mobile-search-dropdown" id="searchDropdownMobile" role="listbox"></div>
   </div>
 
   <!-- MAIN CONTENT -->
@@ -106,7 +111,7 @@
             </select>
             <button class="filter-toggle-btn" id="advFilterToggleBtn" type="button" title="Advanced Filters (Genre, Year, Rating)">
               <svg class="ui-ico" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="7" y1="12" x2="17" y2="12"/><line x1="10" y1="18" x2="14" y2="18"/></svg>
-              <span>Filter</span>
+              <span id="advFilterLabelText">Filter</span>
             </button>
           </div>
         </div>
@@ -149,6 +154,7 @@
         <section id="historySection" style="display:none;" class="nf-row-section">
           <div class="section-head">
             <div class="section-title" id="continueSectionTitle">Continue Watching</div>
+            <button class="section-ghost-btn" id="clearAllHistoryBtn" type="button">Xóa hết</button>
           </div>
           <div class="row-rail-wrap">
             <div class="row-rail" id="historyGrid"></div>
@@ -157,8 +163,14 @@
 
         <!-- My List (Saved for Later — Local + Cloud Synced) -->
         <section id="myListSection" style="display:none;" class="nf-row-section">
-          <div class="section-head">
+          <div class="section-head mylist-head-wrap">
             <div class="section-title">❤️ <span id="myListSectionTitle">My List</span></div>
+            <div class="mylist-filter-bar" id="myListFilterBar">
+              <button class="mylist-tab active" data-mylist-tab="all" type="button">Tất cả</button>
+              <button class="mylist-tab" data-mylist-tab="new" type="button">🆕 Có tập mới</button>
+              <button class="mylist-tab" data-mylist-tab="watching" type="button">▶ Đang xem</button>
+              <button class="mylist-tab" data-mylist-tab="unwatched" type="button">📌 Chưa xem</button>
+            </div>
           </div>
           <div class="row-rail-wrap">
             <div class="row-rail" id="myListGrid"></div>
@@ -213,6 +225,8 @@
 
       <!-- Gesture Feedback -->
       <div class="gesture-toast" id="gestureToast"></div>
+      <!-- Hold-to-2x Fast Forward Pill (YouTube/TikTok style) -->
+      <div class="hold-2x-pill" id="hold2xPill" style="display:none;">⏩ 2.0x</div>
 
       <!-- Skip Intro Floating Pill (Customizable duration, default 85s) -->
       <button class="skip-intro-pill" id="skipIntroBtn" type="button" style="display:none;">
@@ -283,6 +297,10 @@
           </button>
         </div>
         <div class="drawer-servers-bar" id="drawerServersBar"></div>
+        <div class="drawer-ep-tools" id="drawerEpTools" style="display:none;">
+          <input class="drawer-ep-search" id="drawerEpSearchInput" type="search" placeholder="🔍 Tìm tập..." />
+          <button class="btn-glass" id="drawerEpSortBtn" type="button" style="padding:5px 9px;font-size:11px;white-space:nowrap;">⇅</button>
+        </div>
         <div class="drawer-ep-grid" id="drawerEpisodesGrid"></div>
       </aside>
 
@@ -325,9 +343,9 @@
             </div>
           </div>
           <div class="hud-right">
-            <button class="hud-party-pill" id="hudTtsBtn" title="Bật/Tắt AI Thuyết Minh Tự Động (tự giảm nhạc phim)">🗣️ Dub</button>
-            <button class="hud-party-pill" id="hudMaskBtn" title="Che phụ đề cứng gốc (Hardsub Blur)">🫥 Mask</button>
-            <button class="hud-party-pill" id="hudPartyBtn" title="Start or Toggle Watch Party">🍿 Party</button>
+            <button class="hud-party-pill hud-mobile-collapse" id="hudTtsBtn" title="Bật/Tắt AI Thuyết Minh Tự Động (tự giảm nhạc phim)">🗣️ Dub</button>
+            <button class="hud-party-pill hud-mobile-collapse" id="hudMaskBtn" title="Che phụ đề cứng gốc (Hardsub Blur)">🫥 Mask</button>
+            <button class="hud-party-pill hud-mobile-collapse" id="hudPartyBtn" title="Start or Toggle Watch Party">🍿 Party</button>
             <button class="hud-cc-pill" id="hudSubLangPill" title="AI Subtitles">CC • EN</button>
             <button class="icon-btn hud-glass-btn mobile-only" id="hudRotateBtn" title="Landscape Fullscreen" aria-label="Rotate">
               <svg class="ui-ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>
@@ -495,11 +513,15 @@
             <span class="field-label" id="syncLabel">SUBTITLE TIMING SYNC</span>
             <strong id="syncValLabel" style="color:#34d399;font-size:13px;">0.0s</strong>
           </div>
-          <div style="display:flex;gap:8px;">
-            <button class="btn-glass" style="flex:1;" id="syncMinusBtn">-0.5s</button>
-            <button class="btn-glass" style="flex:1;" id="syncResetBtn">Reset 0s</button>
-            <button class="btn-glass" style="flex:1;" id="syncPlusBtn">+0.5s</button>
+          <input type="range" id="syncRangeSlider" min="-10000" max="10000" step="250" value="0" style="accent-color:#10b981;" />
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button class="btn-glass" style="flex:1;padding:6px;" id="syncMinusBtn">-0.5s</button>
+            <button class="btn-glass" style="flex:1;padding:6px;" id="syncMinusFineBtn">-0.25s</button>
+            <button class="btn-glass" style="flex:1;padding:6px;" id="syncResetBtn">Reset 0s</button>
+            <button class="btn-glass" style="flex:1;padding:6px;" id="syncPlusFineBtn">+0.25s</button>
+            <button class="btn-glass" style="flex:1;padding:6px;" id="syncPlusBtn">+0.5s</button>
           </div>
+          <div style="font-size:10.5px;color:#9ca3af;">💾 Tự lưu riêng cho từng phim • Phím tắt nhanh trên PC: <strong>G</strong> (-0.25s) / <strong>H</strong> (+0.25s)</div>
         </div>
 
         <div class="field-group">
@@ -529,12 +551,34 @@
         <button class="icon-btn" data-close="moreModal" aria-label="Close"><svg class="ui-ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
       </div>
       <div class="modal-body">
+        <!-- Quick Mobile / Pro Toggles (Accessible on narrow screens & desktop) -->
+        <div class="more-quick-strip">
+          <button class="pill-choice" id="moreQuickDubBtn" type="button">🗣️ Dub</button>
+          <button class="pill-choice" id="moreQuickMaskBtn" type="button">🫥 Mask</button>
+          <button class="pill-choice" id="moreQuickPartyBtn" type="button">🍿 Party</button>
+        </div>
+
+        <!-- HLS Video Quality Picker (Auto / 1080p / 720p / 480p) + Live Stream Stats -->
+        <div class="field-group" id="qualityFieldGroup">
+          <div class="row-between">
+            <span class="field-label" id="qualityLabelText">🎬 VIDEO QUALITY (HLS)</span>
+            <span id="streamStatsBadge" style="font-size:11px;color:#86efac;font-weight:700;">Auto</span>
+          </div>
+          <div class="chip-wrap" id="qualityChipsWrap">
+            <button class="pill-choice active" data-quality="-1" type="button">Auto</button>
+          </div>
+        </div>
+
         <div class="field-group">
           <div class="row-between">
             <span class="field-label" id="boostLabelText">🔊 VOLUME &amp; AUDIO BOOST (UP TO 200%)</span>
             <strong id="boostValLabel" style="color:#fbbf24;font-size:13px;">100%</strong>
           </div>
           <input type="range" id="boostSlider" min="0" max="200" value="100" style="accent-color:#fbbf24;" />
+        </div>
+
+        <div class="row-between" style="background:rgba(139,92,246,0.08);border:1px solid rgba(167,139,250,0.28);border-radius:8px;padding:9px 12px;">
+          <label style="font-size:12.5px;font-weight:800;color:#ddd6fe;"><input type="checkbox" id="nightAudioToggle" /> <span id="nightAudioLabelText">🌙 Chế độ xem đêm (Rõ thoại, giảm tiếng nổ gắt)</span></label>
         </div>
 
         <div class="field-group">
@@ -572,7 +616,7 @@
 
         <div class="field-group">
           <div class="row-between">
-            <span class="field-label">⏭ SKIP INTRO DURATION</span>
+            <span class="field-label" id="skipIntroDurationLabel">⏭ SKIP INTRO DURATION</span>
             <strong id="skipIntroSettingLabel" style="color:#34d399;font-size:12.5px;">85s</strong>
           </div>
           <div class="chip-wrap">
@@ -604,7 +648,10 @@
           </div>
         </div>
 
-        <button class="btn-glass" id="pipBtn" style="width:100%;">🖼 Picture-in-Picture</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn-glass" id="pipBtn" style="flex:1;">🖼 Picture-in-Picture</button>
+          <button class="btn-glass" id="openShortcutsBtn" type="button" style="flex:1;">⌨️ Phím tắt (?)</button>
+        </div>
       </div>
     </div>
   </div>
@@ -928,8 +975,35 @@
     </div>
   </div>
 
+  <!-- KEYBOARD SHORTCUTS CHEAT-SHEET MODAL -->
+  <div class="backdrop" id="shortcutsModal">
+    <div class="modal-card" style="max-width:520px;">
+      <div class="modal-head">
+        <h3>⌨️ Phím tắt Chill-Player</h3>
+        <button class="icon-btn" data-close="shortcutsModal" aria-label="Close"><svg class="ui-ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <div class="shortcuts-grid">
+          <div class="sc-row"><kbd>Space</kbd><span>Phát / Tạm dừng</span></div>
+          <div class="sc-row"><kbd>←</kbd> / <kbd>→</kbd> hoặc <kbd>J</kbd> / <kbd>L</kbd><span>Tua lùi / Tua tới 10 giây</span></div>
+          <div class="sc-row"><kbd>↑</kbd> / <kbd>↓</kbd><span>Tăng / Giảm âm lượng (tới 200%)</span></div>
+          <div class="sc-row"><kbd>0</kbd> – <kbd>9</kbd><span>Nhảy nhanh tới 0% – 90% phim</span></div>
+          <div class="sc-row"><kbd>G</kbd> / <kbd>H</kbd><span>Đẩy phụ đề sớm / trễ ±0.25s (lưu riêng phim)</span></div>
+          <div class="sc-row"><kbd>&lt;</kbd> / <kbd>&gt;</kbd><span>Giảm / Tăng tốc độ phát (0.5x – 2.0x)</span></div>
+          <div class="sc-row"><kbd>S</kbd><span>Bỏ qua mở đầu (Skip Intro)</span></div>
+          <div class="sc-row"><kbd>N</kbd><span>Chuyển sang Tập tiếp theo</span></div>
+          <div class="sc-row"><kbd>E</kbd><span>Mở ngăn kéo Chọn Tập &amp; Server</span></div>
+          <div class="sc-row"><kbd>C</kbd><span>Mở cài đặt Phụ đề AI</span></div>
+          <div class="sc-row"><kbd>B</kbd> / <kbd>V</kbd><span>Bật/tắt Che Sub Cứng / AI Thuyết Minh</span></div>
+          <div class="sc-row"><kbd>M</kbd> / <kbd>F</kbd> / <kbd>Esc</kbd><span>Tắt tiếng / Toàn màn hình / Thu nhỏ</span></div>
+          <div class="sc-row"><kbd>Nhấn giữ màn hình</kbd><span>Tua nhanh 2.0x (thả tay về lại 1.0x)</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="toast" id="toast"></div>
 
-  <script type="module" src="./app.js?v=15"></script>
+  <script type="module" src="./app.js?v=16"></script>
 </body>
 </html>

@@ -27,12 +27,20 @@ import com.phyll.filmhub.model.MovieItem
 import com.phyll.filmhub.model.RemoteTvLiveState
 import com.phyll.filmhub.model.ServerGroup
 import com.phyll.filmhub.model.SubtitleColorChoice
+import com.phyll.filmhub.model.SubtitleCue
 import com.phyll.filmhub.model.SubtitleEdgeStyle
 import com.phyll.filmhub.model.SubtitleStyleConfig
+import com.phyll.filmhub.model.TranslationEngineMode
 import com.phyll.filmhub.model.VodProviderConfig
 import com.phyll.filmhub.model.VodProviderType
 import com.phyll.filmhub.model.WatchProgress
 import com.phyll.filmhub.subtitle.GeminiAudioSubtitleGenerator
+import com.phyll.filmhub.subtitle.OnlineSubtitleFetcher
+import com.phyll.filmhub.subtitle.SubtitleParser
+import com.phyll.filmhub.subtitle.SubtitleTranslator
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.util.concurrent.TimeUnit
 import com.phyll.filmhub.tvmanager.AdbTcpClient
 import com.phyll.filmhub.tvmanager.RemoteTvControllerClient
 import com.phyll.filmhub.ui.i18n.AppLanguage
@@ -56,6 +64,15 @@ data class ActivePlaybackSession(
     val movie: MovieItem,
     val episode: Episode,
     val startPositionMs: Long = 0L
+)
+
+data class DetailSubPreTranslateState(
+    val movieId: String = "",
+    val episodeId: String = "",
+    val isRunning: Boolean = false,
+    val percent: Int = 0,
+    val statusText: String = "",
+    val isReady: Boolean = false
 )
 
 sealed class AppScreen {
@@ -116,6 +133,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _isSearching = MutableStateFlow(false)
     val isSearching: StateFlow<Boolean> = _isSearching.asStateFlow()
+
+    private val _aiVibeSummary = MutableStateFlow("")
+    val aiVibeSummary: StateFlow<String> = _aiVibeSummary.asStateFlow()
+
+    private val _detailSubState = MutableStateFlow(DetailSubPreTranslateState())
+    val detailSubState: StateFlow<DetailSubPreTranslateState> = _detailSubState.asStateFlow()
+
+    private var detailSubJob: Job? = null
+    private val onlineSubFetcher = OnlineSubtitleFetcher()
+    private val detailSubTranslator by lazy {
+        SubtitleTranslator(File(getApplication<Application>().cacheDir, "detail_sub_trans"))
+    }
+    private val detailSubHttp by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(12, TimeUnit.SECONDS)
+            .readTimeout(22, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .build()
+    }
 
     private val _showQrCompanionDialog = MutableStateFlow(false)
     val showQrCompanionDialog: StateFlow<Boolean> = _showQrCompanionDialog.asStateFlow()
@@ -254,7 +290,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun cloudRegister(username: String, password: String, displayName: String, inviteCode: String) {
         if (username.isBlank() || password.length < 6) {
-            showBanner("Username required & password min 6 characters")
+            showBanner("Nhập tên đăng nhập và mật khẩu tối thiểu 6 ký tự")
+            return
+        }
+        if (displayName.trim().isNotBlank() && displayName.trim() == password) {
+            showBanner("⚠️ Tên hiển thị không được trùng với mật khẩu!")
             return
         }
         viewModelScope.launch {
@@ -273,6 +313,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .onFailure { err ->
                     showBanner("Registration failed: ${err.message.orEmpty()}")
                 }
+            _cloudSyncBusy.value = false
+        }
+    }
+
+    fun cloudUpdateProfile(
+        displayName: String? = null,
+        currentPassword: String? = null,
+        newPassword: String? = null,
+        revokeOtherSessions: Boolean = false
+    ) {
+        val cleanName = displayName?.trim()?.takeIf { it.isNotBlank() }
+        if (!newPassword.isNullOrBlank()) {
+            if (newPassword.length < 6) {
+                showBanner("Mật khẩu mới phải có ít nhất 6 ký tự")
+                return
+            }
+            if (cleanName != null && cleanName == newPassword) {
+                showBanner("⚠️ Tên hiển thị không được trùng với mật khẩu!")
+                return
+            }
+        }
+        viewModelScope.launch {
+            _cloudSyncBusy.value = true
+            CloudSyncClient.updateProfile(
+                displayName = cleanName,
+                currentPassword = currentPassword,
+                newPassword = newPassword,
+                revokeOtherSessions = revokeOtherSessions
+            ).onSuccess { updated ->
+                prefs.saveCloudSession(updated)
+                val msg = when {
+                    !newPassword.isNullOrBlank() -> "🔑 Đã đổi mật khẩu & bảo vệ tài khoản thành công!"
+                    revokeOtherSessions -> "🛡️ Đã đăng xuất tất cả thiết bị khác!"
+                    cleanName != null -> "✅ Đã đổi tên hiển thị thành \"${updated.displayName}\"!"
+                    else -> "✅ Đã cập nhật hồ sơ NKI Cloud!"
+                }
+                showBanner(msg)
+            }.onFailure { err ->
+                showBanner("Cập nhật hồ sơ thất bại: ${err.message.orEmpty()}")
+            }
             _cloudSyncBusy.value = false
         }
     }
@@ -536,6 +616,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _searchQuery.value = query
         if (query.isBlank()) {
             _searchResults.value = emptyList()
+            _aiVibeSummary.value = ""
             _isSearching.value = false
             return
         }
@@ -544,6 +625,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun executeSearch(query: String = _searchQuery.value) {
         val trimmed = query.trim()
         _searchQuery.value = trimmed
+        _aiVibeSummary.value = ""
         if (trimmed.isEmpty()) {
             _searchResults.value = emptyList()
             return
@@ -557,7 +639,189 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun executeAiVibeSearch(query: String = _searchQuery.value) {
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) {
+            showBanner("✨ Nhập hoặc nói mô tả phim bạn muốn xem (vd: phim tiên hiệp đánh nhau cháy)!")
+            return
+        }
+        _searchQuery.value = trimmed
+        searchJob?.cancel()
+        searchJob = viewModelScope.launch {
+            _isSearching.value = true
+            _aiVibeSummary.value = "✨ Gemini AI đang phân tích gu phim: \"$trimmed\"..."
+            val (summary, items) = CloudSyncClient.searchAiVibe(trimmed)
+            if (items.isNotEmpty()) {
+                _aiVibeSummary.value = summary.ifBlank { "✨ Đã tìm thấy ${items.size} phim hợp gu!" }
+                _searchResults.value = items
+            } else {
+                _aiVibeSummary.value = ""
+                _searchResults.value = repository.searchAll(trimmed, prefs.customProviders.value)
+            }
+            _isSearching.value = false
+        }
+    }
+
+    fun removeContinueWatchingItem(movieId: String) {
+        prefs.removeWatchHistoryItem(movieId)
+        viewModelScope.launch {
+            CloudSyncClient.removeWatchProgress(listOf(movieId))
+        }
+        showBanner("🗑️ Đã xóa khỏi Tiếp tục xem")
+    }
+
+    fun preTranslateDetailEpisode(movie: MovieItem, episode: Episode) {
+        val targetLang = prefs.subtitleConfig.value.resolvedPrimaryLanguage().code.ifBlank { "vi" }
+        detailSubJob?.cancel()
+        detailSubJob = viewModelScope.launch {
+            _detailSubState.value = DetailSubPreTranslateState(
+                movieId = movie.id,
+                episodeId = episode.id,
+                isRunning = true,
+                percent = 8,
+                statusText = "☁️ Đang kiểm tra kho Sub NKI Cloud ($targetLang)...",
+                isReady = false
+            )
+            val slug = CloudSyncClient.normalizeMovieSlug(movie.id)
+            CloudSyncClient.activeMovieSlug = slug
+
+            // 1. Instant Cloud Cache Hit
+            val cloudHit = CloudSyncClient.fetchCloudSubtitle(movie.id, episode.name.ifBlank { episode.id }, targetLang)
+            if (cloudHit != null && cloudHit.primaryCues.size >= 3) {
+                _detailSubState.value = DetailSubPreTranslateState(
+                    movieId = movie.id,
+                    episodeId = episode.id,
+                    isRunning = false,
+                    percent = 100,
+                    statusText = "☁️ Đã có sẵn Sub ${targetLang.uppercase()} trên NKI Cloud (${cloudHit.primaryCues.size} câu) — Bấm Xem ngay!",
+                    isReady = true
+                )
+                return@launch
+            }
+
+            // 2. Discover online SRT & download
+            _detailSubState.value = _detailSubState.value.copy(
+                percent = 20,
+                statusText = "🔍 Đang tìm phụ đề online cho ${episode.name}..."
+            )
+            val tracks = onlineSubFetcher.discoverSubtitles(movie, episode, targetLang)
+            val picked = tracks.firstOrNull { it.languageCode.equals(targetLang, ignoreCase = true) }
+                ?: tracks.firstOrNull { it.languageCode.equals("en", ignoreCase = true) }
+                ?: tracks.firstOrNull()
+
+            if (picked == null) {
+                _detailSubState.value = DetailSubPreTranslateState(
+                    movieId = movie.id,
+                    episodeId = episode.id,
+                    isRunning = false,
+                    percent = 0,
+                    statusText = "🎙 Chưa có file SRT rời — Mở phát phim để AI tự nghe Audio dịch trước 10 phút!",
+                    isReady = false
+                )
+                return@launch
+            }
+
+            _detailSubState.value = _detailSubState.value.copy(
+                percent = 32,
+                statusText = "⬇️ Đang tải bản Sub (${picked.label})..."
+            )
+            val cues = withContext(Dispatchers.IO) {
+                runCatching {
+                    if (picked.isRawContent) {
+                        SubtitleParser.parse(picked.urlOrContent)
+                    } else {
+                        val req = Request.Builder().url(picked.urlOrContent).build()
+                        detailSubHttp.newCall(req).execute().use { resp ->
+                            if (!resp.isSuccessful) emptyList()
+                            else SubtitleParser.parseBytes(resp.body?.bytes() ?: ByteArray(0))
+                        }
+                    }
+                }.getOrDefault(emptyList())
+            }
+
+            if (cues.size < 3) {
+                _detailSubState.value = DetailSubPreTranslateState(
+                    movieId = movie.id,
+                    episodeId = episode.id,
+                    isRunning = false,
+                    percent = 0,
+                    statusText = "⚠️ Không đọc được bản Sub online — Mở phim để bật AI Audio Sub.",
+                    isReady = false
+                )
+                return@launch
+            }
+
+            // 3. Translate in batches with real 0-100% progress & upload to Shared NKI Cloud!
+            val needTranslate = !picked.languageCode.equals(targetLang, ignoreCase = true)
+            val finalCues = ArrayList<SubtitleCue>(cues.size)
+            if (!needTranslate) {
+                finalCues.addAll(cues)
+            } else {
+                val cfg = prefs.subtitleConfig.value
+                val apiKey = prefs.geminiApiKey.value
+                val mode = if (CloudSyncClient.canUseServerAi() || apiKey.isNotBlank()) {
+                    TranslationEngineMode.GEMINI_AI
+                } else {
+                    TranslationEngineMode.FAST_FREE
+                }
+                val batchSize = 45
+                val totalBatches = ((cues.size + batchSize - 1) / batchSize).coerceAtLeast(1)
+                for (bIdx in 0 until totalBatches) {
+                    val start = bIdx * batchSize
+                    val end = (start + batchSize).coerceAtMost(cues.size)
+                    val pct = 35 + ((bIdx * 58) / totalBatches)
+                    _detailSubState.value = _detailSubState.value.copy(
+                        percent = pct.coerceIn(35, 95),
+                        statusText = "✨ AI đang dịch sang ${targetLang.uppercase()} ($end/${cues.size} câu)..."
+                    )
+                    val translated = detailSubTranslator.translateCueBatch(
+                        cues = cues.subList(start, end),
+                        targetLang = targetLang,
+                        mode = mode,
+                        geminiApiKey = apiKey,
+                        geminiModelId = cfg.geminiModelId
+                    )
+                    finalCues.addAll(translated)
+                }
+            }
+
+            if (CloudSyncClient.isSignedIn()) {
+                _detailSubState.value = _detailSubState.value.copy(
+                    percent = 97,
+                    statusText = "☁️ Đang lưu phụ đề lên NKI Cloud Pool..."
+                )
+                CloudSyncClient.uploadCloudSubtitle(
+                    rawMovieSlug = movie.id,
+                    rawEpisodeNameOrId = episode.name.ifBlank { episode.id },
+                    primaryLangCode = targetLang,
+                    secondaryLangCode = "",
+                    sourceLangCode = picked.languageCode,
+                    sourcePlatform = picked.sourcePlatform,
+                    isAiAudio = false,
+                    isFullyTranslated = true,
+                    completedAudioSlots = emptySet(),
+                    sourceCues = cues,
+                    primaryCues = finalCues,
+                    secondaryCues = emptyList()
+                )
+            }
+
+            _detailSubState.value = DetailSubPreTranslateState(
+                movieId = movie.id,
+                episodeId = episode.id,
+                isRunning = false,
+                percent = 100,
+                statusText = "✅ Đã dịch xong 100% Sub ${targetLang.uppercase()} (${finalCues.size} câu) • Bấm Xem ngay!",
+                isReady = true
+            )
+            showBanner("✅ Đã dịch xong Sub ${targetLang.uppercase()} cho ${episode.name}!")
+        }
+    }
+
     fun openMovieDetail(movie: MovieItem) {
+        if (_detailSubState.value.movieId != movie.id) {
+            _detailSubState.value = DetailSubPreTranslateState(movieId = movie.id)
+        }
         navigateTo(AppScreen.Detail(movie = movie, isResolving = movie.servers.isEmpty()))
         if (movie.servers.isEmpty()) {
             viewModelScope.launch {

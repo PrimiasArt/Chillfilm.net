@@ -227,6 +227,17 @@ export async function POST(request) {
       }
     }
 
+    if (Array.isArray(body.watchProgressRemoved) && body.watchProgressRemoved.length > 0) {
+      const removedSlugs = body.watchProgressRemoved
+        .map((s) => normalizeMovieSlug(s))
+        .filter((s) => s && s !== 'unknown')
+        .slice(0, 100);
+      if (removedSlugs.length) {
+        await sql`DELETE FROM nki_watch_progress WHERE user_id = ${user.id} AND movie_slug = ANY(${removedSlugs})`;
+        metric('sync.state.removed_history', removedSlugs.length, { outcome: 'success' });
+      }
+    }
+
     await sql`UPDATE nki_users SET last_seen_at = ${now} WHERE id = ${user.id}`;
     metric('sync.state', 1, { direction: 'push', outcome: 'success' });
     return jsonResponse({

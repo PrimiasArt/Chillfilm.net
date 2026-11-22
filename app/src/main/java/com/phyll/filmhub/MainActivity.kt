@@ -72,6 +72,8 @@ class MainActivity : ComponentActivity() {
             val searchQuery by viewModel.searchQuery.collectAsState()
             val searchResults by viewModel.searchResults.collectAsState()
             val isSearching by viewModel.isSearching.collectAsState()
+            val aiVibeSummary by viewModel.aiVibeSummary.collectAsState()
+            val detailSubState by viewModel.detailSubState.collectAsState()
 
             val subtitleConfig by viewModel.prefs.subtitleConfig.collectAsState()
             val geminiApiKey by viewModel.prefs.geminiApiKey.collectAsState()
@@ -149,6 +151,7 @@ class MainActivity : ComponentActivity() {
                                 searchQuery = searchQuery,
                                 searchResults = searchResults,
                                 isSearching = isSearching,
+                                aiVibeSummary = aiVibeSummary,
                                 hasSessionGeminiKey = geminiApiKey.isNotBlank() || cloudSession?.serverAiReady == true,
                                 activeGeminiModel = subtitleConfig.geminiModelId,
                                 companionLanUrl = companionLanUrl,
@@ -161,9 +164,11 @@ class MainActivity : ComponentActivity() {
                                 onSelectCountry = viewModel::selectCountry,
                                 onSearchQueryChange = viewModel::updateSearchQuery,
                                 onExecuteSearch = viewModel::executeSearch,
+                                onExecuteAiVibeSearch = viewModel::executeAiVibeSearch,
                                 onMovieClick = viewModel::openMovieDetail,
                                 onQuickPlayMovie = viewModel::quickPlayMovie,
                                 onResumeHistory = viewModel::resumeFromWatchHistory,
+                                onRemoveContinueWatching = viewModel::removeContinueWatchingItem,
                                 onToggleControlTargetMode = viewModel::toggleControlTargetMode,
                                 onOpenTvManager = viewModel::openTvManager,
                                 onOpenQrCompanion = { viewModel.setQrDialogVisible(true) },
@@ -188,6 +193,9 @@ class MainActivity : ComponentActivity() {
                                 selectedTvName = selectedTvDevice?.displayTitle.orEmpty(),
                                 savedWatchProgress = watchHistory.firstOrNull { it.movieId == screen.movie.id }
                                     ?: viewModel.prefs.getLatestMovieWatchProgress(screen.movie.id),
+                                detailSubState = detailSubState,
+                                isEpisodeWatched = { ep -> viewModel.prefs.isEpisodeWatched(screen.movie.id, ep.id) },
+                                onPreTranslateEpisode = { ep -> viewModel.preTranslateDetailEpisode(screen.movie, ep) },
                                 onPlayEpisode = { ep -> viewModel.startTargetAwarePlayback(screen.movie, ep) },
                                 onPlayOnPhone = { ep -> viewModel.startPlayback(screen.movie, ep) },
                                 onPlayOnTv = { ep -> viewModel.playMovieOnSelectedTv(screen.movie, ep) },
@@ -217,6 +225,7 @@ class MainActivity : ComponentActivity() {
                                 adminVaultSnapshot = adminVaultSnapshot,
                                 onCloudLogin = viewModel::cloudLogin,
                                 onCloudRegister = viewModel::cloudRegister,
+                                onCloudUpdateProfile = viewModel::cloudUpdateProfile,
                                 onCloudLogout = viewModel::cloudLogout,
                                 onCloudSyncNow = { viewModel.pullCloudState(silent = false, force = true) },
                                 onLoadAdminVault = viewModel::loadAdminVault,

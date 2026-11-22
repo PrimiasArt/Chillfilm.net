@@ -504,6 +504,22 @@ class PreferencesManager(context: Context) {
             .apply()
     }
 
+    fun removeWatchHistoryItem(movieId: String) {
+        val updated = _watchHistory.value.filterNot { it.movieId == movieId }
+        _watchHistory.value = updated
+        val keysToRemove = episodeResumeCache.keys.filter { it.startsWith("$movieId::") }
+        keysToRemove.forEach { episodeResumeCache.remove(it) }
+        prefs.edit()
+            .putString(KEY_WATCH_HISTORY, gson.toJson(updated))
+            .putString(KEY_EPISODE_RESUME_MAP, gson.toJson(episodeResumeCache.values.toList()))
+            .apply()
+    }
+
+    fun isEpisodeWatched(movieId: String, episodeId: String): Boolean {
+        val p = episodeResumeCache["$movieId::$episodeId"] ?: return false
+        return p.durationMs > 30_000L && (p.positionMs.toFloat() / p.durationMs.toFloat()) >= 0.85f
+    }
+
     fun toggleFavorite(movieId: String) {
         val updated = _favoriteIds.value.toMutableSet()
         if (!updated.add(movieId)) {

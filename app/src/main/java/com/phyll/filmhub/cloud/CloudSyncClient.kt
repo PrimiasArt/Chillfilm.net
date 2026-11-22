@@ -279,6 +279,39 @@ object CloudSyncClient {
         }
     }
 
+    suspend fun updateProfile(
+        displayName: String? = null,
+        currentPassword: String? = null,
+        newPassword: String? = null,
+        revokeOtherSessions: Boolean = false
+    ): Result<CloudSession> = withContext(Dispatchers.IO) {
+        runCatching {
+            if (activeToken.isBlank()) error("Bạn chưa đăng nhập NKI Cloud")
+            val payload = JSONObject()
+            if (!displayName.isNullOrBlank()) payload.put("displayName", displayName.trim())
+            if (!newPassword.isNullOrBlank()) {
+                payload.put("currentPassword", currentPassword.orEmpty())
+                payload.put("newPassword", newPassword)
+            }
+            if (revokeOtherSessions) payload.put("revokeOtherSessions", true)
+            val obj = postJson("/api/auth/profile", payload, requireAuth = true)
+            val u = obj.optJSONObject("user") ?: error("Invalid profile response")
+            val usage = u.optJSONObject("todayUsage")
+            val nextToken = obj.optString("token", activeToken).ifBlank { activeToken }
+            CloudSession(
+                token = nextToken,
+                userId = u.optString("id"),
+                username = u.optString("username"),
+                displayName = u.optString("displayName", u.optString("username")),
+                role = u.optString("role", "MEMBER"),
+                dailyAiLimit = u.optInt("dailyAiLimit", 150),
+                todayAiRequests = usage?.optInt("requests", 0) ?: 0,
+                serverAiReady = obj.optBoolean("serverAiReady", serverAiReady),
+                defaultModel = obj.optString("defaultModel", "gemini-2.5-flash")
+            ).also { applySession(it) }
+        }
+    }
+
     suspend fun fetchAdminConfig(): Result<AdminVaultSnapshot> = withContext(Dispatchers.IO) {
         runCatching {
             val obj = getJson("/api/admin/config")
@@ -791,6 +824,20 @@ object CloudSyncClient {
             }
             if (arr.length() == 0) return@runCatching false
             postJson("/api/sync/state", JSONObject().put("watchProgress", arr), requireAuth = true)
+            true
+        }.getOrDefault(false)
+    }
+
+    suspend fun removeWatchProgress(movieIds: List<String>): Boolean = withContext(Dispatchers.IO) {
+        if (!isSignedIn() || movieIds.isEmpty()) return@withContext false
+        runCatching {
+            val arr = JSONArray()
+            movieIds.take(100).forEach { id ->
+                val slug = normalizeMovieSlug(id)
+                if (slug.isNotBlank() && slug != "unknown") arr.put(slug)
+            }
+            if (arr.length() == 0) return@runCatching false
+            postJson("/api/sync/state", JSONObject().put("watchProgressRemoved", arr), requireAuth = true)
             true
         }.getOrDefault(false)
     }

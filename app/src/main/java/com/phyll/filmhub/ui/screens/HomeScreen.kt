@@ -117,6 +117,7 @@ fun HomeScreen(
     searchQuery: String,
     searchResults: List<MovieItem>,
     isSearching: Boolean,
+    aiVibeSummary: String = "",
     hasSessionGeminiKey: Boolean,
     activeGeminiModel: String,
     companionLanUrl: String? = null,
@@ -129,9 +130,11 @@ fun HomeScreen(
     onSelectCountry: (CountryCategory) -> Unit,
     onSearchQueryChange: (String) -> Unit,
     onExecuteSearch: (String) -> Unit,
+    onExecuteAiVibeSearch: (String) -> Unit = onExecuteSearch,
     onMovieClick: (MovieItem) -> Unit,
     onQuickPlayMovie: (MovieItem) -> Unit,
     onResumeHistory: (WatchProgress) -> Unit,
+    onRemoveContinueWatching: (String) -> Unit = {},
     onToggleControlTargetMode: () -> Unit = {},
     onOpenTvManager: () -> Unit = {},
     onOpenQrCompanion: () -> Unit,
@@ -484,7 +487,7 @@ fun HomeScreen(
                                 }
                             )
                             .background(BrandEmeraldVioletBrush)
-                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                            .padding(horizontal = 14.dp, vertical = 14.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
@@ -492,6 +495,30 @@ fun HomeScreen(
                             color = Color.White,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.ExtraBold
+                        )
+                    }
+
+                    // ✨ AI Vibe Natural-Language Search Button (Touch & TV D-Pad)
+                    Box(
+                        modifier = Modifier
+                            .tvFocusableClickable(
+                                shape = RoundedCornerShape(14.dp),
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = VioletSoft.copy(alpha = 0.65f),
+                                onClick = {
+                                    focusManager.clearFocus()
+                                    onExecuteAiVibeSearch(searchQuery)
+                                }
+                            )
+                            .background(VioletPrimary.copy(alpha = 0.34f))
+                            .padding(horizontal = 12.dp, vertical = 14.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "✨ AI",
+                            color = EmeraldNeon,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Black
                         )
                     }
                 }
@@ -537,6 +564,7 @@ fun HomeScreen(
                 SearchResultsBody(
                     query = searchQuery,
                     isSearching = isSearching,
+                    aiVibeSummary = aiVibeSummary,
                     results = searchResults,
                     horizPad = horizPad,
                     onClearSearch = { onSearchQueryChange("") },
@@ -565,7 +593,8 @@ fun HomeScreen(
                             ContinueWatchingRow(
                                 history = watchHistory,
                                 horizPad = horizPad,
-                                onResume = onResumeHistory
+                                onResume = onResumeHistory,
+                                onRemove = onRemoveContinueWatching
                             )
                         }
                     }
@@ -1001,7 +1030,8 @@ private fun HeroSpotlightBanner(
 private fun ContinueWatchingRow(
     history: List<WatchProgress>,
     horizPad: androidx.compose.ui.unit.Dp,
-    onResume: (WatchProgress) -> Unit
+    onResume: (WatchProgress) -> Unit,
+    onRemove: (String) -> Unit = {}
 ) {
     val s = LocalAppStrings.current
     Column {
@@ -1040,11 +1070,34 @@ private fun ContinueWatchingRow(
                     posterUrl = item.posterUrl,
                     providerName = s.resumeLabel
                 )
-                MovieCard(
-                    movie = pseudoMovie,
-                    progressFraction = item.progressFraction,
-                    onClick = { onResume(item) }
-                )
+                Box {
+                    MovieCard(
+                        movie = pseudoMovie,
+                        progressFraction = item.progressFraction,
+                        onClick = { onResume(item) }
+                    )
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(6.dp)
+                            .size(24.dp)
+                            .tvFocusableClickable(
+                                shape = CircleShape,
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = CinemaGlassBorder,
+                                onClick = { onRemove(item.movieId) }
+                            )
+                            .background(Color(0xCC0A0A0E)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Clear,
+                            contentDescription = "Xóa khỏi Tiếp tục xem",
+                            tint = Color.White,
+                            modifier = Modifier.size(13.dp)
+                        )
+                    }
+                }
             }
         }
     }
@@ -1123,6 +1176,7 @@ private fun CatalogSectionRow(
 private fun SearchResultsBody(
     query: String,
     isSearching: Boolean,
+    aiVibeSummary: String = "",
     results: List<MovieItem>,
     horizPad: androidx.compose.ui.unit.Dp,
     onClearSearch: () -> Unit,
@@ -1134,6 +1188,24 @@ private fun SearchResultsBody(
             .fillMaxSize()
             .padding(horizontal = horizPad)
     ) {
+        if (aiVibeSummary.isNotBlank()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp, bottom = 4.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(VioletPrimary.copy(alpha = 0.2f))
+                    .border(1.dp, EmeraldNeon.copy(alpha = 0.42f), RoundedCornerShape(10.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    text = aiVibeSummary,
+                    color = EmeraldNeon,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
