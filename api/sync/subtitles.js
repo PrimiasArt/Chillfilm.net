@@ -54,6 +54,52 @@ function normalizeCues(raw) {
   return out;
 }
 
+function normalizeRanges(raw) {
+  if (!Array.isArray(raw)) return [];
+  const pairs = [];
+  for (const r of raw) {
+    if (Array.isArray(r) && r.length >= 2) {
+      const s = Math.max(0, Math.round(Number(r[0]) || 0));
+      const e = Math.max(0, Math.round(Number(r[1]) || 0));
+      if (e > s) pairs.push([s, e]);
+    } else if (r && typeof r === 'object') {
+      const s = Math.max(0, Math.round(Number(r.startMs ?? r.s ?? 0) || 0));
+      const e = Math.max(0, Math.round(Number(r.endMs ?? r.e ?? 0) || 0));
+      if (e > s) pairs.push([s, e]);
+    }
+  }
+  if (!pairs.length) return [];
+  pairs.sort((a, b) => a[0] - b[0]);
+  const merged = [pairs[0]];
+  for (let i = 1; i < pairs.length; i++) {
+    const prev = merged[merged.length - 1];
+    if (pairs[i][0] <= prev[1] + 2500) {
+      prev[1] = Math.max(prev[1], pairs[i][1]);
+    } else {
+      merged.push(pairs[i]);
+    }
+  }
+  return merged.slice(0, 400);
+}
+
+function mergeCuesMonotonic(a, b) {
+  const combined = [...(a || []), ...(b || [])]
+    .filter((c) => c && c.text && Number.isFinite(c.startMs))
+    .sort((x, y) => x.startMs - y.startMs);
+  const out = [];
+  for (const c of combined) {
+    const prev = out[out.length - 1];
+    if (prev && Math.abs(prev.startMs - c.startMs) < 900 && prev.text === c.text) continue;
+    out.push({
+      id: out.length + 1,
+      startMs: Math.max(0, Math.round(c.startMs)),
+      endMs: Math.max(Math.round(c.endMs || c.startMs + 2500), Math.round(c.startMs) + 450),
+      text: String(c.text).trim(),
+    });
+  }
+  return out;
+}
+
 export async function GET(request) {
   const startedAt = performance.now();
   try {
@@ -100,6 +146,25 @@ export async function GET(request) {
       return jsonResponse({ ok: true, hit: false, cacheKey, rejectedWrongScript: true });
     }
 
+    // Normalize audio progress metadata so Web & Android resume from exact translated frontier!
+    const audioMode = Boolean(bundle.audioMode || bundle.isAiAudio || row.is_ai_audio);
+    const translatedWindows = Array.isArray(bundle.translatedWindows)
+      ? bundle.translatedWindows
+      : Array.isArray(bundle.completedAudioSlots)
+        ? bundle.completedAudioSlots
+        : [];
+    const translatedRanges = normalizeRanges(bundle.translatedRanges);
+    const normalizedBundle = {
+      ...bundle,
+      isAiAudio: audioMode,
+      audioMode,
+      completedAudioSlots: translatedWindows,
+      translatedWindows,
+      translatedRanges,
+      audioTranslatedUntilMs: Number(bundle.audioTranslatedUntilMs || 0),
+      totalDurationMs: Number(bundle.totalDurationMs || 0),
+    };
+
     metric('sync.subtitles', 1, { action: 'get', outcome: 'hit' });
     return jsonResponse({
       ok: true,
@@ -109,7 +174,7 @@ export async function GET(request) {
       episodeKey,
       lang,
       updatedAt: Number(row.updated_at || 0),
-      bundle,
+      bundle: normalizedBundle,
     });
   } catch (err) {
     console.error('[api/sync/subtitles GET] error:', err);
@@ -138,7 +203,7 @@ async function handleSaveSubtitle(request) {
       return jsonResponse({ ok: false, skipped: 'Non-catalog local stream' }, 200);
     }
 
-    const primaryCues = normalizeCues(body.primaryCues);
+    let primaryCues = normalizeCues(body.primaryCues);
     if (primaryCues.length < 3) {
       return jsonResponse({ error: 'At least 3 translated cues are required' }, 400);
     }
@@ -146,31 +211,40 @@ async function handleSaveSubtitle(request) {
       metric('sync.subtitles', 1, { action: 'put', outcome: 'rejected_wrong_script' });
       return jsonResponse({ ok: false, skipped: `Subtitle text does not match target language (${lang})` }, 200);
     }
-    const sourceCues = normalizeCues(body.sourceCues);
+    let sourceCues = normalizeCues(body.sourceCues);
     const secondaryCues = normalizeCues(body.secondaryCues);
-    const isFullyTranslated = Boolean(body.isFullyTranslated);
-    const isAiAudio = Boolean(body.isAiAudio);
+    let isFullyTranslated = Boolean(body.isFullyTranslated);
+    let isAiAudio = Boolean(body.isAiAudio || body.audioMode);
+    let completedAudioSlots = Array.isArray(body.completedAudioSlots)
+      ? body.completedAudioSlots.slice(0, 500)
+      : Array.isArray(body.translatedWindows)
+        ? body.translatedWindows.slice(0, 500)
+        : [];
+    let translatedRanges = normalizeRanges(body.translatedRanges);
+    let audioTranslatedUntilMs = Math.max(0, Math.round(Number(body.audioTranslatedUntilMs || 0)));
+    let totalDurationMs = Math.max(0, Math.round(Number(body.totalDurationMs || 0)));
     const forceOverwrite = Boolean(body.forceOverwrite);
 
     await ensureSchema();
     const sql = getSql();
     const cacheKey = makeSubPoolKey(movieSlug, episodeKey, lang);
 
-    // Protect complete community subtitles from being overwritten by a smaller/incomplete session
-    // (unless explicitly force-overwriting or replacing a previously poisoned wrong-script blob!)
+    // Protect & monotonically merge existing Cloud subtitles so a partial/older client
+    // NEVER shrinks a 20-minute translated Cloud subtitle back to 5 minutes!
     const existing = await sql`
-      SELECT blob_pathname, cue_count, is_fully_translated
+      SELECT blob_pathname, cue_count, is_fully_translated, is_ai_audio
       FROM nki_subtitle_pool
       WHERE cache_key = ${cacheKey}
       LIMIT 1
     `;
     if (existing.length && !forceOverwrite) {
+      let oldBundle = null;
       let existingPoisoned = false;
       try {
         const oldBlob = await get(existing[0].blob_pathname, { access: 'private' });
         if (oldBlob?.statusCode === 200 && oldBlob.stream) {
           const oldBuf = Buffer.from(await new Response(oldBlob.stream).arrayBuffer());
-          const oldBundle = JSON.parse(zlib.gunzipSync(oldBuf).toString('utf8'));
+          oldBundle = JSON.parse(zlib.gunzipSync(oldBuf).toString('utf8'));
           if (hasWrongScriptForTarget(oldBundle?.primaryCues, lang)) {
             existingPoisoned = true;
           }
@@ -187,12 +261,31 @@ async function handleSaveSubtitle(request) {
         if (exFull && isFullyTranslated && primaryCues.length < exCount * 0.8) {
           return jsonResponse({ ok: true, skipped: 'Cloud already has a richer complete subtitle', cacheKey });
         }
+        // Monotonic merge for partial/incremental AI Audio subtitles
+        if (oldBundle && (isAiAudio || oldBundle.isAiAudio || oldBundle.audioMode)) {
+          const oldPrimary = normalizeCues(oldBundle.primaryCues);
+          if (oldPrimary.length) {
+            primaryCues = mergeCuesMonotonic(oldPrimary, primaryCues);
+            sourceCues = sourceCues.length ? mergeCuesMonotonic(normalizeCues(oldBundle.sourceCues), sourceCues) : primaryCues;
+          }
+          const oldSlots = Array.isArray(oldBundle.translatedWindows)
+            ? oldBundle.translatedWindows
+            : Array.isArray(oldBundle.completedAudioSlots)
+              ? oldBundle.completedAudioSlots
+              : [];
+          completedAudioSlots = [...new Set([...oldSlots, ...completedAudioSlots])].slice(0, 500);
+          translatedRanges = normalizeRanges([...(oldBundle.translatedRanges || []), ...translatedRanges]);
+          audioTranslatedUntilMs = Math.max(audioTranslatedUntilMs, Math.round(Number(oldBundle.audioTranslatedUntilMs || 0)));
+          totalDurationMs = Math.max(totalDurationMs, Math.round(Number(oldBundle.totalDurationMs || 0)));
+          isAiAudio = Boolean(isAiAudio || oldBundle.isAiAudio || oldBundle.audioMode);
+          isFullyTranslated = Boolean(isFullyTranslated || oldBundle.isFullyTranslated);
+        }
       }
     }
 
     const now = Date.now();
     const bundle = {
-      v: 1,
+      v: 2,
       movieSlug,
       episodeKey,
       primaryLangCode: lang,
@@ -200,8 +293,13 @@ async function handleSaveSubtitle(request) {
       sourceLangCode: String(body.sourceLangCode || 'auto').slice(0, 20),
       sourcePlatform: String(body.sourcePlatform || body.trackLabel || 'NKI Cloud').slice(0, 80),
       isAiAudio,
+      audioMode: isAiAudio,
       isFullyTranslated,
-      completedAudioSlots: Array.isArray(body.completedAudioSlots) ? body.completedAudioSlots.slice(0, 500) : [],
+      completedAudioSlots,
+      translatedWindows: completedAudioSlots,
+      translatedRanges,
+      audioTranslatedUntilMs,
+      totalDurationMs,
       sourceCues: sourceCues.length ? sourceCues : primaryCues,
       primaryCues,
       secondaryCues,

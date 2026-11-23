@@ -7,14 +7,16 @@ import {
   translateCueBatch,
   transcribeAudioChunkDirect,
   buildSubCacheKey,
+  buildLegacySubCacheKey,
   loadCachedEpisodeSub,
   saveCachedEpisodeSub,
   hasWrongScriptForLang,
+  mergeTimeRanges,
   parseHlsMediaSegments,
   buildHlsAudioWindows,
   extractHlsWindowAdtsBase64,
   downloadSrtFile,
-} from './subtitles.js?v=19';
+} from './subtitles.js?v=21';
 import { UI_LANGUAGES, resolveUiLang, t } from './i18n.js?v=16';
 import {
   normalizeMovieSlug,
@@ -58,7 +60,7 @@ import {
   fetchMovieGlossary,
   saveMovieGlossary,
   fetchAiVibeSearch,
-} from './sync.js?v=19';
+} from './sync.js?v=21';
 
 const PHIM_API = 'https://phimapi.com';
 const PHIM_CDN = 'https://phimimg.com';
@@ -3568,9 +3570,98 @@ function updateMediaSession(movie, episode) {
 const HLS_LOOKAHEAD_TARGET_MS = 10 * 60 * 1000; // Minimum 10 minutes pre-translated ahead of playhead
 const HLS_LOOKAHEAD_REFILL_MS = 7 * 60 * 1000;  // Refill back to 10 min whenever ahead-buffer drops < 7 min
 const HLS_AUDIO_WINDOW_SEC = 38;                // ~38s ADTS AAC (~380-520KB) -> fast 3-5s Gemini latency, zero 504s
-const HLS_AUDIO_CONCURRENCY = 3;                // 3 parallel audio windows -> 10 min buffered in ~20-28s!
+const HLS_AUDIO_CONCURRENCY = 2;                // 2 steady parallel workers -> prevents Gemini burst 429/504 holes!
 const SRT_BATCH_SIZE = 55;                      // Within /api/ai/translate 80-line limit
 const SRT_CONCURRENCY = 3;                      // 3 parallel SRT batches -> full 1,200-line film in ~10-15s!
+
+function loadCachedSubSmart(movieSlug, episode, langCode) {
+  const key = buildSubCacheKey(movieSlug, episode, langCode);
+  const legacyKey = buildLegacySubCacheKey(movieSlug, episode, langCode);
+  return loadCachedEpisodeSub(key, legacyKey);
+}
+
+function normalizeCloudSubBundle(cloudBundle, targetLang) {
+  if (!cloudBundle || !Array.isArray(cloudBundle.primaryCues) || cloudBundle.primaryCues.length < 3) return null;
+  const audioMode = Boolean(cloudBundle.audioMode || cloudBundle.isAiAudio);
+  const translatedWindows = Array.isArray(cloudBundle.translatedWindows)
+    ? cloudBundle.translatedWindows
+    : Array.isArray(cloudBundle.completedAudioSlots)
+      ? cloudBundle.completedAudioSlots
+      : [];
+  const translatedRanges = mergeTimeRanges(cloudBundle.translatedRanges);
+  const maxCueEnd = cloudBundle.primaryCues[cloudBundle.primaryCues.length - 1]?.endMs || 0;
+  const maxRangeEnd = translatedRanges.length ? translatedRanges[translatedRanges.length - 1][1] : 0;
+  return {
+    ...cloudBundle,
+    audioMode,
+    isAiAudio: audioMode,
+    translatedWindows,
+    translatedRanges,
+    audioTranslatedUntilMs: Math.max(Number(cloudBundle.audioTranslatedUntilMs || 0), maxRangeEnd, audioMode ? maxCueEnd : 0),
+    totalDurationMs: Number(cloudBundle.totalDurationMs || 0),
+    trackLabel: cloudBundle.sourcePlatform || `☁️ NKI Cloud ${targetLang.badge}`,
+    translatedCount: cloudBundle.primaryCues.length,
+  };
+}
+
+function reconstructDoneWindowsFromCache(windows, cachedEntry) {
+  const doneSet = new Set();
+  const baseRanges = mergeTimeRanges(cachedEntry?.translatedRanges || []);
+  const legacyIndices = Array.isArray(cachedEntry?.translatedWindows)
+    ? cachedEntry.translatedWindows
+    : Array.isArray(cachedEntry?.completedAudioSlots)
+      ? cachedEntry.completedAudioSlots
+      : [];
+  const cues = Array.isArray(cachedEntry?.primaryCues) ? cachedEntry.primaryCues : [];
+
+  for (const w of windows) {
+    const winDur = Math.max(1000, w.endMs - w.startMs);
+    // 1. Time-range coverage (100% immune to server switching & segment boundary shifts!)
+    let overlapMs = 0;
+    for (const [rs, re] of baseRanges) {
+      if (re <= w.startMs) continue;
+      if (rs >= w.endMs) break;
+      overlapMs += Math.max(0, Math.min(w.endMs, re) - Math.max(w.startMs, rs));
+    }
+    if (overlapMs >= winDur * 0.55) {
+      doneSet.add(w.index);
+      continue;
+    }
+    // 2. Legacy index match (for entries saved before v21 time-ranges)
+    if (legacyIndices.includes(w.index)) {
+      doneSet.add(w.index);
+      continue;
+    }
+    // 3. Actual cue timestamp coverage (never re-translate windows that already have translated dialogue!)
+    if (cues.length) {
+      const innerStart = w.startMs + 1500;
+      const innerEnd = Math.max(innerStart + 500, w.endMs - 1500);
+      const hasCueInside = cues.some((c) => {
+        const mid = ((c.startMs || 0) + (c.endMs || c.startMs || 0)) / 2;
+        return mid >= innerStart && mid <= innerEnd;
+      });
+      if (hasCueInside) {
+        doneSet.add(w.index);
+      }
+    }
+  }
+
+  const rebuiltRanges = mergeTimeRanges([
+    ...baseRanges,
+    ...windows.filter((w) => doneSet.has(w.index)).map((w) => [w.startMs, w.endMs]),
+  ]);
+  return { doneSet, doneRanges: rebuiltRanges };
+}
+
+function computeTotalCoveredMs(windows, doneSet, doneRanges = [], cues = []) {
+  let maxMs = 0;
+  for (const w of windows) {
+    if (doneSet.has(w.index)) maxMs = Math.max(maxMs, w.endMs);
+  }
+  if (doneRanges.length) maxMs = Math.max(maxMs, doneRanges[doneRanges.length - 1][1]);
+  if (cues.length) maxMs = Math.max(maxMs, cues[cues.length - 1].endMs || 0);
+  return maxMs;
+}
 
 function blobToBase64(blob) {
   return new Promise((resolve, reject) => {
@@ -3824,24 +3915,21 @@ async function refreshDetailSubCardForSelection(detail, episode) {
   });
 
   const cacheKey = buildSubCacheKey(detail.slug, episode, lang.code);
-  let cached = await loadCachedEpisodeSub(cacheKey);
+  let cached = await loadCachedSubSmart(detail.slug, episode, lang.code);
   let fromCloud = false;
 
-  if ((!cached || (cached.primaryCues?.length || 0) < 3) && isCloudSignedIn()) {
+  if ((!cached || !cached.isFullyTranslated) && isCloudSignedIn()) {
     const cloudBundle = await cloudFetchSubtitle(detail.slug, episode.name || episode.slug, lang.code);
-    if (
-      cloudBundle
-      && Array.isArray(cloudBundle.primaryCues)
-      && cloudBundle.primaryCues.length >= 3
-      && !hasWrongScriptForLang(cloudBundle.primaryCues, lang.code)
-    ) {
-      cached = {
-        ...cloudBundle,
-        trackLabel: cloudBundle.sourcePlatform || `☁️ NKI Cloud ${lang.badge}`,
-        translatedCount: cloudBundle.primaryCues.length,
-      };
-      fromCloud = true;
-      saveCachedEpisodeSub(cacheKey, cached).catch(() => {});
+    const normCloud = cloudBundle && !hasWrongScriptForLang(cloudBundle.primaryCues, lang.code)
+      ? normalizeCloudSubBundle(cloudBundle, lang)
+      : null;
+    if (normCloud) {
+      const localCount = cached?.primaryCues?.length || 0;
+      if (!cached || normCloud.isFullyTranslated || normCloud.primaryCues.length > localCount) {
+        cached = normCloud;
+        fromCloud = true;
+        saveCachedEpisodeSub(cacheKey, normCloud).catch(() => {});
+      }
     }
   }
 
@@ -3897,6 +3985,32 @@ async function refreshDetailSubCardForSelection(detail, episode) {
 function stopActiveSubJob(silent = false, keepCues = true) {
   const j = state.subJob;
   const wasActive = j.active;
+  // Flush any in-progress translated audio/SRT cues to IndexedDB & Cloud BEFORE aborting so closing never loses work!
+  if (j.movie && j.episode && Array.isArray(j.cues) && j.cues.length >= 3) {
+    const snapDoneWins = j.hlsDoneWindowSet ? [...j.hlsDoneWindowSet] : [];
+    const snapRanges = Array.isArray(j.hlsDoneRanges) ? j.hlsDoneRanges.slice() : [];
+    const snapAllDone = Boolean(j.audioMode && j.hlsWindows?.length && j.hlsDoneWindowSet?.size >= j.hlsWindows.length);
+    const snapCovered = j.audioMode
+      ? computeTotalCoveredMs(j.hlsWindows || [], j.hlsDoneWindowSet || new Set(), snapRanges, j.cues)
+      : 0;
+    persistJobSubCache({
+      movie: j.movie,
+      episode: j.episode,
+      langCode: j.langCode || state.prefs.primaryLang,
+      sourceLangCode: 'auto',
+      trackLabel: j.audioMode ? `🎙 AI Audio (${resolveLanguage(j.langCode || state.prefs.primaryLang).badge})` : (state.lastSubTrackLabel || 'AI Sub'),
+      sourceCues: j.cues.slice(),
+      primaryCues: j.cues.slice(),
+      isFullyTranslated: snapAllDone,
+      translatedCount: j.cues.length,
+      audioMode: Boolean(j.audioMode),
+      audioTranslatedUntilMs: snapCovered,
+      totalDurationMs: Number(j.totalDurationMs || 0),
+      translatedWindows: snapDoneWins,
+      translatedRanges: snapRanges,
+      pushCloud: true,
+    }).catch(() => {});
+  }
   j.id += 1;
   j.active = false;
   j.hlsFilling = false;
@@ -3921,12 +4035,13 @@ function stopActiveSubJob(silent = false, keepCues = true) {
   if (!silent && wasActive) showToast('⏹ Đã dừng dịch Sub AI (đã lưu các câu đã dịch)');
 }
 
-async function persistJobSubCache({ movie, episode, langCode, sourceLangCode, trackLabel, sourceCues, primaryCues, secondaryCues = [], isFullyTranslated = false, translatedCount = 0, audioMode = false, audioTranslatedUntilMs = 0, totalDurationMs = 0, translatedWindows = [], pushCloud = false, forceOverwrite = false }) {
+async function persistJobSubCache({ movie, episode, langCode, sourceLangCode, trackLabel, sourceCues, primaryCues, secondaryCues = [], isFullyTranslated = false, translatedCount = 0, audioMode = false, audioTranslatedUntilMs = 0, totalDurationMs = 0, translatedWindows = [], translatedRanges = [], pushCloud = false, forceOverwrite = false }) {
   if (!movie || !episode || !Array.isArray(primaryCues) || primaryCues.length < 3) return;
   const lang = resolveLanguage(langCode || state.prefs.primaryLang);
   // Never pollute local cache or Shared NKI Cloud Pool with wrong-script text (e.g. Chinese Hanzi under 'vi')!
   if (hasWrongScriptForLang(primaryCues, lang.code)) return;
   const key = buildSubCacheKey(movie.slug, episode, lang.code);
+  const cleanRanges = mergeTimeRanges(translatedRanges);
   const payload = {
     primaryLangCode: lang.code,
     secondaryLangCode: state.prefs.dualSub ? state.prefs.secondaryLang : '',
@@ -3941,8 +4056,9 @@ async function persistJobSubCache({ movie, episode, langCode, sourceLangCode, tr
     audioTranslatedUntilMs: Number(audioTranslatedUntilMs || 0),
     totalDurationMs: Number(totalDurationMs || 0),
     translatedWindows: Array.isArray(translatedWindows) ? translatedWindows : [],
+    translatedRanges: cleanRanges,
   };
-  await saveCachedEpisodeSub(key, payload);
+  await saveCachedEpisodeSub(key, payload, { forceOverwrite: Boolean(forceOverwrite) });
 
   if (pushCloud && isCloudSignedIn()) {
     state.lastCloudSubPushBatch = Date.now();
@@ -4117,16 +4233,25 @@ async function transcribeSingleHlsAudioWindow({ win, job, targetLang, movieCtx, 
     });
   };
 
-  try {
-    return await attemptCall();
-  } catch (err) {
-    const status = Number(err?.status || 0);
-    // Do NOT retry hard auth/quota/config errors
-    if ([401, 403, 429, 503].includes(status)) throw err;
-    // One clean retry on transient 502/504/network hiccup
-    await new Promise((r) => setTimeout(r, 900));
-    return attemptCall();
+  const backoffs = [1200, 2600];
+  let lastErr = null;
+  for (let attempt = 0; attempt <= backoffs.length; attempt++) {
+    try {
+      return await attemptCall();
+    } catch (err) {
+      lastErr = err;
+      if (err?.name === 'AbortError' || signal?.aborted) throw err;
+      const status = Number(err?.status || 0);
+      const msgLow = String(err?.message || '').toLowerCase();
+      // Only stop immediately on auth failure, missing server key, or real daily user quota limit
+      const isHardQuota = status === 429 && msgLow.includes('quota exceeded');
+      if (status === 401 || status === 403 || status === 503 || isHardQuota) throw err;
+      if (attempt < backoffs.length) {
+        await new Promise((r) => setTimeout(r, backoffs[attempt]));
+      }
+    }
   }
+  throw lastErr || new Error('Audio chunk transcription failed');
 }
 
 async function fillHlsAudioRange({ job, jobId, anchorMs, targetEndMs, isFullEpisode = false }) {
@@ -4136,6 +4261,7 @@ async function fillHlsAudioRange({ job, jobId, anchorMs, targetEndMs, isFullEpis
   job.phase = 'translating';
   job.hlsAnchorMs = anchorMs;
   job.targetMs = targetEndMs;
+  if (!Array.isArray(job.hlsDoneRanges)) job.hlsDoneRanges = [];
 
   const targetLang = resolveLanguage(job.langCode);
   const movie = job.movie;
@@ -4160,16 +4286,18 @@ async function fillHlsAudioRange({ job, jobId, anchorMs, targetEndMs, isFullEpis
   let doneInThisPass = 0;
   let fatalError = null;
   let cursor = 0;
+  const failedWins = [];
   const startedAt = Date.now();
 
   const updateProgressText = () => {
-    const covered = computeContiguousAheadMs(job.hlsWindows, job.hlsDoneWindowSet, anchorMs);
-    job.coveredMs = covered;
+    const contiguous = computeContiguousAheadMs(job.hlsWindows, job.hlsDoneWindowSet, anchorMs);
+    const totalCov = computeTotalCoveredMs(job.hlsWindows, job.hlsDoneWindowSet, job.hlsDoneRanges, job.cues);
+    job.coveredMs = Math.max(contiguous, totalCov);
     const completedTotal = isFullEpisode ? job.hlsDoneWindowSet.size : (alreadyInRange + doneInThisPass);
     const pct = Math.min(99, Math.max(5, Math.round((completedTotal / totalRangeWindows) * 100)));
     job.percent = pct;
-    const covStr = formatTime(Math.floor(covered / 1000));
-    const tgtStr = formatTime(Math.floor(targetEndMs / 1000));
+    const covStr = formatTime(Math.floor(job.coveredMs / 1000));
+    const tgtStr = formatTime(Math.floor(Math.max(targetEndMs, job.coveredMs) / 1000));
     const elapsedSec = Math.max(1, (Date.now() - startedAt) / 1000);
     const leftWin = Math.max(0, pending.length - doneInThisPass);
     const etaSec = doneInThisPass > 0 ? Math.max(1, Math.round((elapsedSec / doneInThisPass) * leftWin)) : 0;
@@ -4178,7 +4306,9 @@ async function fillHlsAudioRange({ job, jobId, anchorMs, targetEndMs, isFullEpis
   };
 
   if (!pending.length) {
-    const covered = computeContiguousAheadMs(job.hlsWindows, job.hlsDoneWindowSet, anchorMs);
+    const contiguous = computeContiguousAheadMs(job.hlsWindows, job.hlsDoneWindowSet, anchorMs);
+    const totalCov = computeTotalCoveredMs(job.hlsWindows, job.hlsDoneWindowSet, job.hlsDoneRanges, job.cues);
+    const covered = Math.max(contiguous, totalCov);
     job.coveredMs = covered;
     const allDone = job.hlsDoneWindowSet.size >= job.hlsWindows.length;
     job.active = false;
@@ -4194,55 +4324,63 @@ async function fillHlsAudioRange({ job, jobId, anchorMs, targetEndMs, isFullEpis
 
   updateProgressText();
 
+  const processWindow = async (win, isRepair = false) => {
+    const newCues = await transcribeSingleHlsAudioWindow({ win, job, targetLang, movieCtx, signal });
+    if (job.id !== jobId || !job.active) return;
+
+    job.hlsDoneWindowSet.add(win.index);
+    job.hlsDoneRanges = mergeTimeRanges([...(job.hlsDoneRanges || []), [win.startMs, win.endMs]]);
+    if (!isRepair) doneInThisPass += 1;
+    if (newCues.length) {
+      job.cues = mergeCuesChronological(job.cues, newCues);
+    }
+    job.doneCount = job.cues.length;
+
+    // Immediately surface translated cues to Player if playing!
+    if (isCurrentPlayerMatch(movie, episode, targetLang.code)) {
+      state.primaryCues = job.cues;
+      state.sourceCues = job.cues;
+      state.lastSubTrackLabel = `🎙 AI Audio (${targetLang.badge})`;
+      renderActiveSubtitle(($('videoEl')?.currentTime || 0) * 1000);
+      if ($('hudAudioSubPrompt') && job.cues.length >= 3) {
+        $('hudAudioSubPrompt').style.display = 'none';
+      }
+    }
+    updateProgressText();
+
+    // Persist incremental cache monotonically every window so closing/refreshing NEVER loses progress!
+    const allDoneNow = job.hlsDoneWindowSet.size >= job.hlsWindows.length;
+    const shouldPushCloud = allDoneNow || (doneInThisPass % 4 === 0 && job.cues.length >= 6);
+    await persistJobSubCache({
+      movie, episode, langCode: targetLang.code, sourceLangCode: 'auto',
+      trackLabel: `🎙 AI Audio (${targetLang.badge})`,
+      sourceCues: job.cues, primaryCues: job.cues,
+      isFullyTranslated: allDoneNow, translatedCount: job.cues.length,
+      audioMode: true, audioTranslatedUntilMs: job.coveredMs,
+      totalDurationMs: job.totalDurationMs,
+      translatedWindows: [...job.hlsDoneWindowSet],
+      translatedRanges: job.hlsDoneRanges,
+      pushCloud: shouldPushCloud,
+    });
+  };
+
   const workerFn = async () => {
     while (cursor < pending.length) {
       if (job.id !== jobId || !job.active || fatalError) return;
       const win = pending[cursor++];
       try {
-        const newCues = await transcribeSingleHlsAudioWindow({ win, job, targetLang, movieCtx, signal });
-        if (job.id !== jobId || !job.active) return;
-
-        job.hlsDoneWindowSet.add(win.index);
-        doneInThisPass += 1;
-        if (newCues.length) {
-          job.cues = mergeCuesChronological(job.cues, newCues);
-        }
-        job.doneCount = job.cues.length;
-
-        // Immediately surface translated cues to Player if playing!
-        if (isCurrentPlayerMatch(movie, episode, targetLang.code)) {
-          state.primaryCues = job.cues;
-          state.sourceCues = job.cues;
-          state.lastSubTrackLabel = `🎙 AI Audio (${targetLang.badge})`;
-          renderActiveSubtitle(($('videoEl')?.currentTime || 0) * 1000);
-          if ($('hudAudioSubPrompt') && job.cues.length >= 3) {
-            $('hudAudioSubPrompt').style.display = 'none';
-          }
-        }
-        updateProgressText();
-
-        // Persist incremental cache every chunk so closing or refreshing never loses progress!
-        const allDoneNow = job.hlsDoneWindowSet.size >= job.hlsWindows.length;
-        const shouldPushCloud = allDoneNow || (doneInThisPass % 6 === 0 && job.cues.length >= 10);
-        await persistJobSubCache({
-          movie, episode, langCode: targetLang.code, sourceLangCode: 'auto',
-          trackLabel: `🎙 AI Audio (${targetLang.badge})`,
-          sourceCues: job.cues, primaryCues: job.cues,
-          isFullyTranslated: allDoneNow, translatedCount: job.cues.length,
-          audioMode: true, audioTranslatedUntilMs: job.coveredMs,
-          totalDurationMs: job.totalDurationMs,
-          translatedWindows: [...job.hlsDoneWindowSet],
-          pushCloud: shouldPushCloud,
-        });
+        await processWindow(win, false);
       } catch (err) {
         if (err?.name === 'AbortError' || job.id !== jobId) return;
         const status = Number(err?.status || 0);
-        console.warn('[HLS Audio AI] window failed:', win.index, err?.message || err);
-        if ([401, 403, 429, 503].includes(status)) {
+        const msgLow = String(err?.message || '').toLowerCase();
+        const isHardQuota = status === 429 && msgLow.includes('quota exceeded');
+        console.warn('[HLS Audio AI] window failed (queued for gap-repair):', win.index, err?.message || err);
+        if (status === 401 || status === 403 || status === 503 || isHardQuota) {
           fatalError = err?.message || `AI HTTP ${status}`;
           return;
         }
-        // Transient single-window error: mark skipped for now and keep translating remaining windows!
+        failedWins.push(win);
         doneInThisPass += 1;
         updateProgressText();
       }
@@ -4252,19 +4390,51 @@ async function fillHlsAudioRange({ job, jobId, anchorMs, targetEndMs, isFullEpis
   await Promise.all(Array.from({ length: Math.min(HLS_AUDIO_CONCURRENCY, pending.length) }, () => workerFn()));
   if (job.id !== jobId) return;
 
+  // Dedicated sequential 1-by-1 gap-repair pass so transient hiccups NEVER leave missing 38s holes!
+  if (!fatalError && failedWins.length > 0 && job.active) {
+    for (const win of failedWins) {
+      if (job.id !== jobId || !job.active || fatalError) break;
+      if (job.hlsDoneWindowSet.has(win.index)) continue;
+      await new Promise((r) => setTimeout(r, 1200));
+      if (job.id !== jobId || !job.active) break;
+      try {
+        await processWindow(win, true);
+      } catch (err) {
+        if (err?.name === 'AbortError' || job.id !== jobId) return;
+        console.warn('[HLS Audio AI] gap-repair skipped:', win.index, err?.message || err);
+      }
+    }
+  }
+  if (job.id !== jobId) return;
+
   job.hlsFilling = false;
   job.active = false;
 
   if (fatalError) {
     job.phase = job.cues.length >= 3 ? 'partial_ready' : 'error';
     job.errorMsg = `Lỗi AI: ${String(fatalError).slice(0, 95)}`;
+    if (job.cues.length >= 3) {
+      await persistJobSubCache({
+        movie, episode, langCode: targetLang.code, sourceLangCode: 'auto',
+        trackLabel: `🎙 AI Audio (${targetLang.badge})`,
+        sourceCues: job.cues, primaryCues: job.cues,
+        isFullyTranslated: false, translatedCount: job.cues.length,
+        audioMode: true, audioTranslatedUntilMs: job.coveredMs,
+        totalDurationMs: job.totalDurationMs,
+        translatedWindows: [...job.hlsDoneWindowSet],
+        translatedRanges: job.hlsDoneRanges,
+        pushCloud: true,
+      });
+    }
     syncAllSubProgressUi();
     showToast(`⚠️ ${job.errorMsg}`);
     return;
   }
 
   const allDone = job.hlsDoneWindowSet.size >= job.hlsWindows.length;
-  const covered = computeContiguousAheadMs(job.hlsWindows, job.hlsDoneWindowSet, anchorMs);
+  const contiguous = computeContiguousAheadMs(job.hlsWindows, job.hlsDoneWindowSet, anchorMs);
+  const totalCov = computeTotalCoveredMs(job.hlsWindows, job.hlsDoneWindowSet, job.hlsDoneRanges, job.cues);
+  const covered = Math.max(contiguous, totalCov);
   job.coveredMs = covered;
   job.phase = allDone ? 'ready' : 'partial_ready';
   job.percent = allDone ? 100 : (isFullEpisode ? Math.round((job.hlsDoneWindowSet.size / Math.max(1, job.hlsWindows.length)) * 100) : 100);
@@ -4282,6 +4452,7 @@ async function fillHlsAudioRange({ job, jobId, anchorMs, targetEndMs, isFullEpis
     audioMode: true, audioTranslatedUntilMs: covered,
     totalDurationMs: job.totalDurationMs,
     translatedWindows: [...job.hlsDoneWindowSet],
+    translatedRanges: job.hlsDoneRanges,
     pushCloud: job.cues.length >= 3,
   });
   syncAllSubProgressUi();
@@ -4294,7 +4465,7 @@ async function fillHlsAudioRange({ job, jobId, anchorMs, targetEndMs, isFullEpis
   }
 }
 
-async function runHlsLookaheadAudioJob({ job, jobId, movie, episode, targetLang, startSec = 0, scope = 'lookahead10', cachedEntry = null }) {
+async function runHlsLookaheadAudioJob({ job, jobId, movie, episode, targetLang, startSec = 0, scope = 'lookahead10', cachedEntry = null, initiatedFrom = 'player' }) {
   job.mode = 'hls-audio';
   job.audioMode = true;
   job.phase = 'discovering';
@@ -4309,13 +4480,25 @@ async function runHlsLookaheadAudioJob({ job, jobId, movie, episode, targetLang,
   job.hlsWindows = windows;
   job.totalDurationMs = totalDurationMs;
   job.hlsKeyCache = new Map();
-  job.hlsDoneWindowSet = new Set(Array.isArray(cachedEntry?.translatedWindows) ? cachedEntry.translatedWindows : []);
+  // Reconstruct already-translated windows from BOTH saved time-ranges, window indices, AND actual cue timestamps
+  // so already-translated minutes (e.g. 00:00 -> 20:00) are NEVER re-translated on re-entry!
+  const { doneSet, doneRanges } = reconstructDoneWindowsFromCache(windows, cachedEntry);
+  job.hlsDoneWindowSet = doneSet;
+  job.hlsDoneRanges = doneRanges;
   if (cachedEntry?.primaryCues?.length) {
     job.cues = mergeCuesChronological(job.cues, cachedEntry.primaryCues);
   }
 
-  const anchorMs = Math.max(0, Math.round((startSec || 0) * 1000));
+  let anchorMs = Math.max(0, Math.round((startSec || 0) * 1000));
   const isFull = scope === 'full';
+  // If user clicked "Tiếp tục dịch" on Detail Page and the initial 10-min block is already done,
+  // advance anchor directly to the first untranslated window so it extends 10 MORE minutes forward!
+  if (!isFull && initiatedFrom === 'detail' && doneSet.size > 0) {
+    const firstMissing = windows.find((w) => !doneSet.has(w.index) && w.endMs > anchorMs);
+    if (firstMissing) {
+      anchorMs = firstMissing.startMs;
+    }
+  }
   const targetEndMs = isFull
     ? totalDurationMs
     : Math.min(totalDurationMs, anchorMs + HLS_LOOKAHEAD_TARGET_MS);
@@ -4415,6 +4598,7 @@ async function startUnifiedAiSubJob({
   j.cues = [];
   j.hlsWindows = [];
   j.hlsDoneWindowSet = new Set();
+  j.hlsDoneRanges = [];
   j.hlsKeyCache = new Map();
   j.hlsAnchorMs = Math.max(0, Math.round((startSec || 0) * 1000));
   j.hlsFilling = false;
@@ -4452,27 +4636,38 @@ async function startUnifiedAiSubJob({
 
     // 1. Check local IndexedDB + Shared NKI Cloud Pool first (instant <150ms, 0 Gemini tokens!)
     const cacheKey = buildSubCacheKey(movie.slug, episode, targetLang.code);
-    let cached = !forceRetranslate ? await loadCachedEpisodeSub(cacheKey) : null;
+    let cached = !forceRetranslate ? await loadCachedSubSmart(movie.slug, episode, targetLang.code) : null;
     let fromCloud = false;
     if (j.id !== jobId) return;
 
-    if (!forceRetranslate && (!cached || (cached.primaryCues?.length || 0) < 3) && isCloudSignedIn()) {
+    if (!forceRetranslate && (!cached || !cached.isFullyTranslated) && isCloudSignedIn()) {
       j.message = `☁️ Đang kiểm tra kho Sub NKI Cloud (${targetLang.badge})...`;
       syncAllSubProgressUi();
       const cloudBundle = await cloudFetchSubtitle(movie.slug, episode.name || episode.slug, targetLang.code);
       if (j.id !== jobId) return;
-      if (
-        cloudBundle
-        && Array.isArray(cloudBundle.primaryCues)
-        && cloudBundle.primaryCues.length >= 3
-        && !hasWrongScriptForLang(cloudBundle.primaryCues, targetLang.code)
-      ) {
-        cached = {
-          ...cloudBundle,
-          trackLabel: cloudBundle.sourcePlatform || `☁️ NKI Cloud ${targetLang.badge}`,
-          translatedCount: cloudBundle.primaryCues.length,
-        };
-        fromCloud = true;
+      const normCloud = cloudBundle && !hasWrongScriptForLang(cloudBundle.primaryCues, targetLang.code)
+        ? normalizeCloudSubBundle(cloudBundle, targetLang)
+        : null;
+      if (normCloud) {
+        if (!cached) {
+          cached = normCloud;
+          fromCloud = true;
+        } else {
+          // Merge local + Cloud monotonically so whichever device translated further is preserved!
+          cached = {
+            ...cached,
+            ...normCloud,
+            audioMode: Boolean(cached.audioMode || normCloud.audioMode),
+            isFullyTranslated: Boolean(cached.isFullyTranslated || normCloud.isFullyTranslated),
+            primaryCues: mergeCuesChronological(cached.primaryCues, normCloud.primaryCues),
+            sourceCues: mergeCuesChronological(cached.sourceCues || cached.primaryCues, normCloud.sourceCues || normCloud.primaryCues),
+            translatedWindows: [...new Set([...(cached.translatedWindows || []), ...(normCloud.translatedWindows || [])])],
+            translatedRanges: mergeTimeRanges([...(cached.translatedRanges || []), ...(normCloud.translatedRanges || [])]),
+            audioTranslatedUntilMs: Math.max(Number(cached.audioTranslatedUntilMs || 0), Number(normCloud.audioTranslatedUntilMs || 0)),
+            totalDurationMs: Math.max(Number(cached.totalDurationMs || 0), Number(normCloud.totalDurationMs || 0)),
+          };
+          fromCloud = normCloud.primaryCues.length > (cached.translatedCount || 0);
+        }
         saveCachedEpisodeSub(cacheKey, cached).catch(() => {});
       }
     }
@@ -4510,7 +4705,7 @@ async function startUnifiedAiSubJob({
       }
       if (hasAiAudioCredentials()) {
         await runHlsLookaheadAudioJob({
-          job: j, jobId, movie, episode, targetLang, startSec, scope, cachedEntry: cached,
+          job: j, jobId, movie, episode, targetLang, startSec, scope, cachedEntry: cached, initiatedFrom,
         });
         return;
       }
@@ -6294,15 +6489,17 @@ async function maybePreTranslateNextEpisode(curSec, durSec) {
       const parsed = await parseHlsMediaSegments(nextEp.link_m3u8).catch(() => null);
       const segs = parsed?.segments || [];
       if (segs.length >= 2) {
-        const allWins = buildHlsAudioWindows(segs, 38000);
+        const allWins = buildHlsAudioWindows(segs, HLS_AUDIO_WINDOW_SEC);
         const firstWins = allWins.slice(0, 8); // ~5 minutes ahead!
         const keyCache = new Map();
         const collected = [];
+        const doneWinIdx = [];
+        const doneRanges = [];
         let cursor = 0;
         const runWorker = async () => {
           while (cursor < firstWins.length) {
             const win = firstWins[cursor++];
-            const extracted = await extractHlsWindowAdtsBase64(win, { keyCache }).catch(() => null);
+            const extracted = await extractHlsWindowAdtsBase64(win, keyCache).catch(() => null);
             if (!extracted?.audioBase64) continue;
             const res = isCloudSignedIn()
               ? await cloudTranscribeAudioChunk({
@@ -6321,17 +6518,20 @@ async function maybePreTranslateNextEpisode(curSec, durSec) {
                   chunkDurationMs: win.durationMs,
                   targetLang: targetLang.code,
                   apiKey: state.prefs.geminiApiKey,
-                  model: state.prefs.geminiModel,
+                  modelId: state.prefs.geminiModel,
                 }).catch(() => null);
-            if (Array.isArray(res?.cues) && res.cues.length) {
-              collected.push(...res.cues);
+            if (res && Array.isArray(res.cues)) {
+              doneWinIdx.push(win.index);
+              doneRanges.push([win.startMs, win.endMs]);
+              if (res.cues.length) collected.push(...res.cues);
             }
           }
         };
         await Promise.all([runWorker(), runWorker()]);
         if (collected.length >= 3) {
           collected.sort((a, b) => (a.startMs || 0) - (b.startMs || 0));
-          const coveredUntilMs = firstWins[firstWins.length - 1]?.endMs || 300000;
+          const mergedRanges = mergeTimeRanges(doneRanges);
+          const coveredUntilMs = mergedRanges.length ? mergedRanges[mergedRanges.length - 1][1] : (firstWins[firstWins.length - 1]?.endMs || 300000);
           const payload = {
             primaryLangCode: targetLang.code,
             secondaryLangCode: '',
@@ -6340,9 +6540,12 @@ async function maybePreTranslateNextEpisode(curSec, durSec) {
             sourceCues: collected,
             primaryCues: collected,
             secondaryCues: [],
-            isFullyTranslated: firstWins.length >= allWins.length,
+            isFullyTranslated: doneWinIdx.length >= allWins.length,
             audioMode: true,
             audioTranslatedUntilMs: coveredUntilMs,
+            totalDurationMs: parsed?.totalDurationMs || 0,
+            translatedWindows: doneWinIdx,
+            translatedRanges: mergedRanges,
             translatedCount: collected.length,
           };
           await saveCachedEpisodeSub(bgKey, payload).catch(() => {});
@@ -6419,28 +6622,37 @@ async function autoLoadSubtitlesForMovie(movie, episode, startSec = 0) {
 
   const cacheKey = buildSubCacheKey(movie.slug, episode, targetLang.code);
 
-  // STEP 0A: INSTANT RESTORE FROM LOCAL INDEXEDDB (<10ms)
-  let cached = await loadCachedEpisodeSub(cacheKey);
+  // STEP 0A: INSTANT RESTORE FROM LOCAL INDEXEDDB (<10ms, checks canonical + legacy keys)
+  let cached = await loadCachedSubSmart(movie.slug, episode, targetLang.code);
   let fromCloud = false;
   if (runId !== state.subTranslationRunId) return;
 
   // STEP 0B: SHARED NKI CLOUD SUBTITLE POOL ON VERCEL BLOB (<150ms, 0 GEMINI TOKENS!)
-  if ((!cached || (cached.primaryCues?.length || 0) < 3) && isCloudSignedIn()) {
-    updateSubStatusBadge(`☁️ Đang kiểm tra kho Sub NKI Cloud (${targetLang.badge})...`);
+  if ((!cached || !cached.isFullyTranslated) && isCloudSignedIn()) {
+    if (!cached) updateSubStatusBadge(`☁️ Đang kiểm tra kho Sub NKI Cloud (${targetLang.badge})...`);
     const cloudBundle = await cloudFetchSubtitle(movie.slug, episode.name || episode.slug, targetLang.code);
     if (runId !== state.subTranslationRunId) return;
-    if (
-      cloudBundle
-      && Array.isArray(cloudBundle.primaryCues)
-      && cloudBundle.primaryCues.length >= 3
-      && !hasWrongScriptForLang(cloudBundle.primaryCues, targetLang.code)
-    ) {
-      cached = {
-        ...cloudBundle,
-        trackLabel: cloudBundle.sourcePlatform || `☁️ NKI Cloud ${targetLang.badge}`,
-        translatedCount: cloudBundle.primaryCues.length,
-      };
-      fromCloud = true;
+    const normCloud = cloudBundle && !hasWrongScriptForLang(cloudBundle.primaryCues, targetLang.code)
+      ? normalizeCloudSubBundle(cloudBundle, targetLang)
+      : null;
+    if (normCloud) {
+      if (!cached) {
+        cached = normCloud;
+        fromCloud = true;
+      } else {
+        cached = {
+          ...cached,
+          ...normCloud,
+          audioMode: Boolean(cached.audioMode || normCloud.audioMode),
+          isFullyTranslated: Boolean(cached.isFullyTranslated || normCloud.isFullyTranslated),
+          primaryCues: mergeCuesChronological(cached.primaryCues, normCloud.primaryCues),
+          sourceCues: mergeCuesChronological(cached.sourceCues || cached.primaryCues, normCloud.sourceCues || normCloud.primaryCues),
+          translatedWindows: [...new Set([...(cached.translatedWindows || []), ...(normCloud.translatedWindows || [])])],
+          translatedRanges: mergeTimeRanges([...(cached.translatedRanges || []), ...(normCloud.translatedRanges || [])]),
+          audioTranslatedUntilMs: Math.max(Number(cached.audioTranslatedUntilMs || 0), Number(normCloud.audioTranslatedUntilMs || 0)),
+          totalDurationMs: Math.max(Number(cached.totalDurationMs || 0), Number(normCloud.totalDurationMs || 0)),
+        };
+      }
       saveCachedEpisodeSub(cacheKey, cached).catch(() => {});
     }
   }

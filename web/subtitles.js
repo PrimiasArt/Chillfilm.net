@@ -341,13 +341,97 @@ export async function transcribeAudioChunkDirect({
   return out;
 }
 
-/* ==================== PERSISTENT TRANSLATED SUBTITLE CACHE (INDEXEDDB) ==================== */
+/* ==================== PERSISTENT TRANSLATED SUBTITLE CACHE (INDEXEDDB — ATOMIC MONOTONIC MERGE) ==================== */
 const SUB_DB_NAME = 'chillfilm_nki_sub_cache_v1';
 const SUB_STORE_NAME = 'episode_subs';
 const MAX_CACHED_EPISODES = 160;
 let subDbPromise = null;
 
+function canonicalSubSlug(raw) {
+  const s = String(raw || 'unknown')
+    .trim()
+    .toLowerCase()
+    .replace(/^(modern|ophim|kkphim|phimapi|curated|custom)_+/i, '')
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return (s || 'unknown').slice(0, 120);
+}
+
+function canonicalSubEpKey(episode) {
+  const raw = String(episode?.name || episode?.slug || '').trim();
+  const ascii = raw
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/Đ/g, 'd')
+    .trim()
+    .toLowerCase();
+  if (!ascii || ascii === 'full' || ascii === 'full hd' || ascii === 'hd') return 'full';
+  const tapMatch = ascii.match(/(?:tap|ep|episode)\s*[-_:]?\s*0*(\d+)([a-z]?)/);
+  if (tapMatch) return `tap-${tapMatch[1]}${tapMatch[2] || ''}`;
+  const numOnly = ascii.match(/^0*(\d+)([a-z]?)$/);
+  if (numOnly) return `tap-${numOnly[1]}${numOnly[2] || ''}`;
+  const slug = ascii.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return (slug || 'full').slice(0, 64);
+}
+
+export function mergeTimeRanges(ranges) {
+  if (!Array.isArray(ranges) || !ranges.length) return [];
+  const pairs = [];
+  for (const r of ranges) {
+    if (Array.isArray(r) && r.length >= 2) {
+      const s = Math.max(0, Math.round(Number(r[0]) || 0));
+      const e = Math.max(0, Math.round(Number(r[1]) || 0));
+      if (e > s) pairs.push([s, e]);
+    } else if (r && typeof r === 'object') {
+      const s = Math.max(0, Math.round(Number(r.startMs ?? r.s ?? 0) || 0));
+      const e = Math.max(0, Math.round(Number(r.endMs ?? r.e ?? 0) || 0));
+      if (e > s) pairs.push([s, e]);
+    }
+  }
+  if (!pairs.length) return [];
+  pairs.sort((a, b) => a[0] - b[0]);
+  const out = [pairs[0]];
+  for (let i = 1; i < pairs.length; i++) {
+    const prev = out[out.length - 1];
+    if (pairs[i][0] <= prev[1] + 2500) {
+      prev[1] = Math.max(prev[1], pairs[i][1]);
+    } else {
+      out.push(pairs[i]);
+    }
+  }
+  return out.slice(0, 400);
+}
+
+function mergeCuesMonotonicLocal(a, b) {
+  const combined = [...(a || []), ...(b || [])]
+    .filter((c) => c && c.text && Number.isFinite(c.startMs))
+    .sort((x, y) => x.startMs - y.startMs);
+  const out = [];
+  for (const c of combined) {
+    const prev = out[out.length - 1];
+    if (prev && Math.abs(prev.startMs - c.startMs) < 900 && prev.text === c.text) continue;
+    out.push({
+      id: out.length + 1,
+      startMs: Math.max(0, Math.round(c.startMs)),
+      endMs: Math.max(Math.round(c.endMs || c.startMs + 2500), Math.round(c.startMs) + 450),
+      text: String(c.text).trim(),
+    });
+  }
+  return out;
+}
+
 export function buildSubCacheKey(movieSlug, episode, primaryLangCode) {
+  const m = canonicalSubSlug(movieSlug);
+  const epName = canonicalSubEpKey(episode);
+  const urlPart = (m === 'direct' || m === 'local')
+    ? String(episode?.link_m3u8 || '').split('?')[0].trim().toLowerCase()
+    : '';
+  const lang = String(primaryLangCode || 'vi').trim().toLowerCase();
+  return `${m}|${epName}|${urlPart}|${lang}`;
+}
+
+export function buildLegacySubCacheKey(movieSlug, episode, primaryLangCode) {
   const m = String(movieSlug || 'unknown').trim().toLowerCase();
   const epName = String(episode?.slug || episode?.name || '').trim().toLowerCase();
   const urlPart = (m === 'direct' || m === 'local')
@@ -399,51 +483,64 @@ export async function deleteCachedEpisodeSub(cacheKey) {
   try { localStorage.removeItem(`cf_sub_${cacheKey}`); } catch { /* ignore */ }
 }
 
-export async function loadCachedEpisodeSub(cacheKey) {
+export async function loadCachedEpisodeSub(cacheKey, fallbackKey = '') {
   if (!cacheKey) return null;
-  const keyLang = String(cacheKey).split('|').pop() || 'vi';
-  const validateEntry = (entry) => {
-    if (!entry || !Array.isArray(entry.primaryCues) || entry.primaryCues.length < 3) return null;
-    const targetLang = entry.primaryLangCode || keyLang;
-    if (hasWrongScriptForLang(entry.primaryCues, targetLang)) {
-      deleteCachedEpisodeSub(cacheKey).catch(() => {});
-      return null;
+  const keysToTry = fallbackKey && fallbackKey !== cacheKey ? [cacheKey, fallbackKey] : [cacheKey];
+  for (const k of keysToTry) {
+    const keyLang = String(k).split('|').pop() || 'vi';
+    const validateEntry = (entry) => {
+      if (!entry || !Array.isArray(entry.primaryCues) || entry.primaryCues.length < 3) return null;
+      const targetLang = entry.primaryLangCode || keyLang;
+      if (hasWrongScriptForLang(entry.primaryCues, targetLang)) {
+        deleteCachedEpisodeSub(k).catch(() => {});
+        return null;
+      }
+      return {
+        ...entry,
+        audioMode: Boolean(entry.audioMode || entry.isAiAudio),
+        translatedWindows: Array.isArray(entry.translatedWindows)
+          ? entry.translatedWindows
+          : Array.isArray(entry.completedAudioSlots)
+            ? entry.completedAudioSlots
+            : [],
+        translatedRanges: mergeTimeRanges(entry.translatedRanges),
+      };
+    };
+    try {
+      const db = await openSubCacheDb();
+      if (db) {
+        const entry = await new Promise((resolve) => {
+          try {
+            const tx = db.transaction(SUB_STORE_NAME, 'readonly');
+            const req = tx.objectStore(SUB_STORE_NAME).get(k);
+            req.onsuccess = () => resolve(req.result || null);
+            req.onerror = () => resolve(null);
+          } catch {
+            resolve(null);
+          }
+        });
+        const ok = validateEntry(entry);
+        if (ok) return ok;
+      }
+    } catch {
+      // Fall through to localStorage fallback
     }
-    return entry;
-  };
-  try {
-    const db = await openSubCacheDb();
-    if (db) {
-      const entry = await new Promise((resolve) => {
-        try {
-          const tx = db.transaction(SUB_STORE_NAME, 'readonly');
-          const req = tx.objectStore(SUB_STORE_NAME).get(cacheKey);
-          req.onsuccess = () => resolve(req.result || null);
-          req.onerror = () => resolve(null);
-        } catch {
-          resolve(null);
-        }
-      });
-      const ok = validateEntry(entry);
-      if (ok) return ok;
-    }
-  } catch {
-    // Fall through to localStorage fallback
-  }
 
-  try {
-    const raw = localStorage.getItem(`cf_sub_${cacheKey}`);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    const ok = validateEntry(parsed);
-    if (ok) return ok;
-  } catch {
-    // Ignore
+    try {
+      const raw = localStorage.getItem(`cf_sub_${k}`);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        const ok = validateEntry(parsed);
+        if (ok) return ok;
+      }
+    } catch {
+      // Ignore
+    }
   }
   return null;
 }
 
-export async function saveCachedEpisodeSub(cacheKey, payload) {
+export async function saveCachedEpisodeSub(cacheKey, payload, { forceOverwrite = false } = {}) {
   if (!cacheKey || !payload || !Array.isArray(payload.primaryCues) || payload.primaryCues.length < 3) {
     return false;
   }
@@ -451,22 +548,82 @@ export async function saveCachedEpisodeSub(cacheKey, payload) {
   if (hasWrongScriptForLang(payload.primaryCues, targetLang)) {
     return false;
   }
-  const record = {
-    key: cacheKey,
-    primaryLangCode: payload.primaryLangCode || 'vi',
-    secondaryLangCode: payload.secondaryLangCode || '',
-    sourceLangCode: payload.sourceLangCode || 'auto',
-    trackLabel: payload.trackLabel || 'Đã lưu',
-    sourceCues: payload.sourceCues || payload.primaryCues,
-    primaryCues: payload.primaryCues,
-    secondaryCues: payload.secondaryCues || [],
-    isFullyTranslated: Boolean(payload.isFullyTranslated),
-    translatedCount: Number(payload.translatedCount || payload.primaryCues.length),
-    audioMode: Boolean(payload.audioMode),
-    audioTranslatedUntilMs: Number(payload.audioTranslatedUntilMs || 0),
-    totalDurationMs: Number(payload.totalDurationMs || 0),
-    translatedWindows: Array.isArray(payload.translatedWindows) ? payload.translatedWindows : [],
-    savedAt: Date.now(),
+
+  const buildMergedRecord = (existing) => {
+    const canMerge = Boolean(
+      !forceOverwrite
+      && existing
+      && Array.isArray(existing.primaryCues)
+      && existing.primaryCues.length >= 3
+      && !hasWrongScriptForLang(existing.primaryCues, targetLang)
+    );
+    const incomingAudio = Boolean(payload.audioMode || payload.isAiAudio);
+    const existingAudio = Boolean(existing?.audioMode || existing?.isAiAudio);
+
+    if (canMerge && (incomingAudio || existingAudio)) {
+      const mergedPrimary = mergeCuesMonotonicLocal(existing.primaryCues, payload.primaryCues);
+      const mergedSource = payload.sourceCues?.length
+        ? mergeCuesMonotonicLocal(existing.sourceCues || existing.primaryCues, payload.sourceCues)
+        : mergedPrimary;
+      const mergedWins = [...new Set([
+        ...(Array.isArray(existing.translatedWindows) ? existing.translatedWindows : []),
+        ...(Array.isArray(payload.translatedWindows) ? payload.translatedWindows : []),
+      ])];
+      const mergedRanges = mergeTimeRanges([
+        ...(Array.isArray(existing.translatedRanges) ? existing.translatedRanges : []),
+        ...(Array.isArray(payload.translatedRanges) ? payload.translatedRanges : []),
+      ]);
+      const maxRangeEnd = mergedRanges.length ? mergedRanges[mergedRanges.length - 1][1] : 0;
+      const maxCueEnd = mergedPrimary.length ? (mergedPrimary[mergedPrimary.length - 1].endMs || 0) : 0;
+      return {
+        key: cacheKey,
+        primaryLangCode: targetLang,
+        secondaryLangCode: payload.secondaryLangCode || existing.secondaryLangCode || '',
+        sourceLangCode: payload.sourceLangCode || existing.sourceLangCode || 'auto',
+        trackLabel: payload.trackLabel || existing.trackLabel || 'Đã lưu',
+        sourceCues: mergedSource,
+        primaryCues: mergedPrimary,
+        secondaryCues: payload.secondaryCues?.length ? payload.secondaryCues : (existing.secondaryCues || []),
+        isFullyTranslated: Boolean(existing.isFullyTranslated || payload.isFullyTranslated),
+        translatedCount: Math.max(Number(existing.translatedCount || 0), Number(payload.translatedCount || 0), mergedPrimary.length),
+        audioMode: true,
+        audioTranslatedUntilMs: Math.max(
+          Number(existing.audioTranslatedUntilMs || 0),
+          Number(payload.audioTranslatedUntilMs || 0),
+          maxRangeEnd,
+          maxCueEnd
+        ),
+        totalDurationMs: Math.max(Number(existing.totalDurationMs || 0), Number(payload.totalDurationMs || 0)),
+        translatedWindows: mergedWins,
+        translatedRanges: mergedRanges,
+        savedAt: Date.now(),
+      };
+    }
+
+    // For non-audio SRT cache, never overwrite a complete cache with an incomplete/smaller one
+    if (canMerge && existing.isFullyTranslated && !payload.isFullyTranslated && payload.primaryCues.length <= existing.primaryCues.length) {
+      return { ...existing, savedAt: Date.now() };
+    }
+
+    const ranges = mergeTimeRanges(payload.translatedRanges);
+    return {
+      key: cacheKey,
+      primaryLangCode: targetLang,
+      secondaryLangCode: payload.secondaryLangCode || '',
+      sourceLangCode: payload.sourceLangCode || 'auto',
+      trackLabel: payload.trackLabel || 'Đã lưu',
+      sourceCues: payload.sourceCues || payload.primaryCues,
+      primaryCues: payload.primaryCues,
+      secondaryCues: payload.secondaryCues || [],
+      isFullyTranslated: Boolean(payload.isFullyTranslated),
+      translatedCount: Number(payload.translatedCount || payload.primaryCues.length),
+      audioMode: incomingAudio,
+      audioTranslatedUntilMs: Number(payload.audioTranslatedUntilMs || 0),
+      totalDurationMs: Number(payload.totalDurationMs || 0),
+      translatedWindows: Array.isArray(payload.translatedWindows) ? payload.translatedWindows : [],
+      translatedRanges: ranges,
+      savedAt: Date.now(),
+    };
   };
 
   try {
@@ -476,22 +633,26 @@ export async function saveCachedEpisodeSub(cacheKey, payload) {
         try {
           const tx = db.transaction(SUB_STORE_NAME, 'readwrite');
           const store = tx.objectStore(SUB_STORE_NAME);
-          store.put(record);
-          // Prune oldest records if cache exceeds MAX_CACHED_EPISODES
-          const countReq = store.count();
-          countReq.onsuccess = () => {
-            if (countReq.result > MAX_CACHED_EPISODES) {
-              const idx = store.index('savedAt');
-              let toDelete = countReq.result - MAX_CACHED_EPISODES;
-              idx.openCursor().onsuccess = (ev) => {
-                const cursor = ev.target.result;
-                if (cursor && toDelete > 0) {
-                  cursor.delete();
-                  toDelete--;
-                  cursor.continue();
-                }
-              };
-            }
+          const getReq = store.get(cacheKey);
+          getReq.onsuccess = () => {
+            const record = buildMergedRecord(getReq.result || null);
+            store.put(record);
+            // Prune oldest records if cache exceeds MAX_CACHED_EPISODES
+            const countReq = store.count();
+            countReq.onsuccess = () => {
+              if (countReq.result > MAX_CACHED_EPISODES) {
+                const idx = store.index('savedAt');
+                let toDelete = countReq.result - MAX_CACHED_EPISODES;
+                idx.openCursor().onsuccess = (ev) => {
+                  const cursor = ev.target.result;
+                  if (cursor && toDelete > 0) {
+                    cursor.delete();
+                    toDelete--;
+                    cursor.continue();
+                  }
+                };
+              }
+            };
           };
           tx.oncomplete = () => resolve(true);
           tx.onerror = () => resolve(false);
@@ -506,6 +667,9 @@ export async function saveCachedEpisodeSub(cacheKey, payload) {
   }
 
   try {
+    let existing = null;
+    try { existing = JSON.parse(localStorage.getItem(`cf_sub_${cacheKey}`) || 'null'); } catch {}
+    const record = buildMergedRecord(existing);
     localStorage.setItem(`cf_sub_${cacheKey}`, JSON.stringify(record));
     return true;
   } catch {

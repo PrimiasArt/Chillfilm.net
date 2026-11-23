@@ -278,12 +278,19 @@ export async function cloudSaveSubtitle({
   primaryCues = [],
   secondaryCues = [],
   isFullyTranslated = true,
+  audioMode = false,
+  isAiAudio = false,
+  translatedWindows = [],
+  translatedRanges = [],
+  audioTranslatedUntilMs = 0,
+  totalDurationMs = 0,
   forceOverwrite = false,
 }) {
   if (!isCloudSignedIn()) return false;
   const m = normalizeMovieSlug(movieSlug);
   if (!m || m === 'unknown' || m === 'direct' || m === 'local' || primaryCues.length < 3) return false;
   const ep = normalizeEpisodeKey(episodeNameOrSlug);
+  const aiFlag = Boolean(audioMode || isAiAudio);
   try {
     await apiFetch('/api/sync/subtitles', {
       method: 'PUT',
@@ -295,7 +302,14 @@ export async function cloudSaveSubtitle({
         secondaryLangCode,
         sourceLangCode,
         sourcePlatform: trackLabel,
-        isFullyTranslated,
+        isFullyTranslated: Boolean(isFullyTranslated),
+        isAiAudio: aiFlag,
+        audioMode: aiFlag,
+        completedAudioSlots: Array.isArray(translatedWindows) ? translatedWindows.slice(0, 500) : [],
+        translatedWindows: Array.isArray(translatedWindows) ? translatedWindows.slice(0, 500) : [],
+        translatedRanges: Array.isArray(translatedRanges) ? translatedRanges.slice(0, 400) : [],
+        audioTranslatedUntilMs: Math.max(0, Math.round(Number(audioTranslatedUntilMs || 0))),
+        totalDurationMs: Math.max(0, Math.round(Number(totalDurationMs || 0))),
         forceOverwrite: Boolean(forceOverwrite),
         sourceCues: sourceCues.map((c, idx) => [c.id || idx + 1, c.startMs || 0, c.endMs || 0, c.text || '']),
         primaryCues: primaryCues.map((c, idx) => [c.id || idx + 1, c.startMs || 0, c.endMs || 0, c.text || '']),
