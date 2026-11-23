@@ -14,6 +14,7 @@ import {
   readJsonBody,
   requireAuth,
 } from '../_lib/auth.js';
+import { hasWrongScriptForTarget } from '../_lib/gemini.js';
 
 export async function OPTIONS() {
   return optionsResponse();
@@ -93,6 +94,12 @@ export async function GET(request) {
     const jsonText = zlib.gunzipSync(buf).toString('utf8');
     const bundle = JSON.parse(jsonText);
 
+    // Self-heal poisoned Cloud cache (e.g. Chinese Hanzi accidentally saved under lang='vi')
+    if (Array.isArray(bundle?.primaryCues) && hasWrongScriptForTarget(bundle.primaryCues, lang)) {
+      metric('sync.subtitles', 1, { action: 'get', outcome: 'rejected_wrong_script' });
+      return jsonResponse({ ok: true, hit: false, cacheKey, rejectedWrongScript: true });
+    }
+
     metric('sync.subtitles', 1, { action: 'get', outcome: 'hit' });
     return jsonResponse({
       ok: true,
@@ -135,30 +142,51 @@ async function handleSaveSubtitle(request) {
     if (primaryCues.length < 3) {
       return jsonResponse({ error: 'At least 3 translated cues are required' }, 400);
     }
+    if (hasWrongScriptForTarget(primaryCues, lang)) {
+      metric('sync.subtitles', 1, { action: 'put', outcome: 'rejected_wrong_script' });
+      return jsonResponse({ ok: false, skipped: `Subtitle text does not match target language (${lang})` }, 200);
+    }
     const sourceCues = normalizeCues(body.sourceCues);
     const secondaryCues = normalizeCues(body.secondaryCues);
     const isFullyTranslated = Boolean(body.isFullyTranslated);
     const isAiAudio = Boolean(body.isAiAudio);
+    const forceOverwrite = Boolean(body.forceOverwrite);
 
     await ensureSchema();
     const sql = getSql();
     const cacheKey = makeSubPoolKey(movieSlug, episodeKey, lang);
 
-    // Protect complete community subtitles from being overwritten by a smaller/incomplete session!
+    // Protect complete community subtitles from being overwritten by a smaller/incomplete session
+    // (unless explicitly force-overwriting or replacing a previously poisoned wrong-script blob!)
     const existing = await sql`
-      SELECT cue_count, is_fully_translated
+      SELECT blob_pathname, cue_count, is_fully_translated
       FROM nki_subtitle_pool
       WHERE cache_key = ${cacheKey}
       LIMIT 1
     `;
-    if (existing.length) {
-      const exFull = Boolean(existing[0].is_fully_translated);
-      const exCount = Number(existing[0].cue_count || 0);
-      if (exFull && !isFullyTranslated) {
-        return jsonResponse({ ok: true, skipped: 'Cloud already has a complete subtitle', cacheKey });
+    if (existing.length && !forceOverwrite) {
+      let existingPoisoned = false;
+      try {
+        const oldBlob = await get(existing[0].blob_pathname, { access: 'private' });
+        if (oldBlob?.statusCode === 200 && oldBlob.stream) {
+          const oldBuf = Buffer.from(await new Response(oldBlob.stream).arrayBuffer());
+          const oldBundle = JSON.parse(zlib.gunzipSync(oldBuf).toString('utf8'));
+          if (hasWrongScriptForTarget(oldBundle?.primaryCues, lang)) {
+            existingPoisoned = true;
+          }
+        }
+      } catch {
+        // ignore check failure
       }
-      if (exFull && isFullyTranslated && primaryCues.length < exCount * 0.8) {
-        return jsonResponse({ ok: true, skipped: 'Cloud already has a richer complete subtitle', cacheKey });
+      if (!existingPoisoned) {
+        const exFull = Boolean(existing[0].is_fully_translated);
+        const exCount = Number(existing[0].cue_count || 0);
+        if (exFull && !isFullyTranslated) {
+          return jsonResponse({ ok: true, skipped: 'Cloud already has a complete subtitle', cacheKey });
+        }
+        if (exFull && isFullyTranslated && primaryCues.length < exCount * 0.8) {
+          return jsonResponse({ ok: true, skipped: 'Cloud already has a richer complete subtitle', cacheKey });
+        }
       }
     }
 

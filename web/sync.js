@@ -278,6 +278,7 @@ export async function cloudSaveSubtitle({
   primaryCues = [],
   secondaryCues = [],
   isFullyTranslated = true,
+  forceOverwrite = false,
 }) {
   if (!isCloudSignedIn()) return false;
   const m = normalizeMovieSlug(movieSlug);
@@ -295,6 +296,7 @@ export async function cloudSaveSubtitle({
         sourceLangCode,
         sourcePlatform: trackLabel,
         isFullyTranslated,
+        forceOverwrite: Boolean(forceOverwrite),
         sourceCues: sourceCues.map((c, idx) => [c.id || idx + 1, c.startMs || 0, c.endMs || 0, c.text || '']),
         primaryCues: primaryCues.map((c, idx) => [c.id || idx + 1, c.startMs || 0, c.endMs || 0, c.text || '']),
         secondaryCues: secondaryCues.map((c, idx) => [c.id || idx + 1, c.startMs || 0, c.endMs || 0, c.text || '']),

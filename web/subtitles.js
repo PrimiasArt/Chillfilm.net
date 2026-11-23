@@ -45,6 +45,56 @@ export function resolveLanguage(codeOrName) {
   };
 }
 
+const RE_HAN_WEB = /[\u4e00-\u9fff\u3400-\u4dbf]/g;
+const RE_KANA_WEB = /[\u3040-\u30ff]/g;
+const RE_HANGUL_WEB = /[\uac00-\ud7af]/g;
+const RE_LETTERS_WEB = /[\p{L}]/gu;
+
+function countForbiddenScriptWeb(text, langKey) {
+  const s = String(text || '');
+  if (!s) return { forbidden: 0, letters: 0 };
+  const letters = (s.match(RE_LETTERS_WEB) || []).length;
+  if (!letters) return { forbidden: 0, letters: 0 };
+  const han = (s.match(RE_HAN_WEB) || []).length;
+  const kana = (s.match(RE_KANA_WEB) || []).length;
+  const hangul = (s.match(RE_HANGUL_WEB) || []).length;
+  if (langKey === 'zh' || langKey === 'zh-tw' || langKey === 'zh-cn') {
+    return { forbidden: kana + hangul, letters };
+  }
+  if (langKey === 'ja') return { forbidden: hangul, letters };
+  if (langKey === 'ko') return { forbidden: hangul === 0 ? han + kana : kana, letters };
+  return { forbidden: han + kana + hangul, letters };
+}
+
+export function isSingleLineWrongScript(text, targetLang = 'vi') {
+  const key = String(targetLang || 'vi').trim().toLowerCase();
+  const { forbidden, letters } = countForbiddenScriptWeb(text, key);
+  return forbidden >= 2 && letters > 0 && forbidden / letters >= 0.3;
+}
+
+export function hasWrongScriptForLang(cuesOrTexts, targetLang = 'vi') {
+  if (!Array.isArray(cuesOrTexts) || !cuesOrTexts.length) return false;
+  const key = String(targetLang || 'vi').trim().toLowerCase();
+  let nonEmpty = 0;
+  let badCues = 0;
+  let totalForbidden = 0;
+  let totalLetters = 0;
+  for (const item of cuesOrTexts) {
+    const txt = typeof item === 'string' ? item : String(item?.text ?? item?.t ?? '');
+    const { forbidden, letters } = countForbiddenScriptWeb(txt, key);
+    if (!letters) continue;
+    nonEmpty += 1;
+    totalForbidden += forbidden;
+    totalLetters += letters;
+    if (forbidden >= 2 && forbidden / letters >= 0.3) badCues += 1;
+  }
+  if (!nonEmpty || !totalLetters) return false;
+  if (nonEmpty <= 5) {
+    return badCues >= 1 && totalForbidden >= 4 && totalForbidden / totalLetters >= 0.22;
+  }
+  return badCues / nonEmpty >= 0.18 || totalForbidden / totalLetters >= 0.2;
+}
+
 function parseTimestampMs(raw) {
   const clean = raw.trim().replace(',', '.');
   const parts = clean.split(':');
@@ -185,7 +235,7 @@ export async function translateCueBatch({
         model: geminiModel || 'gemini-3-flash-preview',
         movieContext,
       });
-      if (cloudTranslated && cloudTranslated.length === cues.length) {
+      if (cloudTranslated && cloudTranslated.length === cues.length && !hasWrongScriptForLang(cloudTranslated, langSpec.code)) {
         onEngine?.('cloud-gemini');
         return cloudTranslated;
       }
@@ -198,7 +248,7 @@ export async function translateCueBatch({
   if (geminiApiKey && geminiApiKey.trim().length > 10) {
     try {
       const translated = await translateWithGemini(cues, langSpec, geminiApiKey.trim(), geminiModel || 'gemini-3-flash-preview', movieContext);
-      if (translated && translated.length === cues.length) {
+      if (translated && translated.length === cues.length && !hasWrongScriptForLang(translated, langSpec.code)) {
         onEngine?.('local-gemini');
         return translated;
       }
@@ -229,7 +279,8 @@ export async function transcribeAudioChunkDirect({
   const ctxHint = movieContext?.title
     ? `Movie context: "${movieContext.title}"${movieContext.genres?.length ? ` [${movieContext.genres.join(', ')}]` : ''} — adapt tone and pronouns naturally.\n`
     : '';
-  const prompt = `Universal cinema subtitle creator: listen to this ${durationSec}-second movie audio clip (starts at 0.0s).\nTranscribe ALL spoken dialogue directly into ${langSpec.prompt}.\n${ctxHint}Rules:\n- "s" and "e" = float seconds relative to 0.0 (0.0 <= s < e <= ${durationSec}), 1.2s-4.8s per cue.\n- Skip music/silence; if no speech, return [].\nReturn ONLY JSON array: [{"s":1.2,"e":3.6,"t":"translated subtitle text"}]`;
+  const systemText = `You are a professional movie subtitle translator. Listen to spoken dialogue in ANY language and output subtitles WRITTEN STRICTLY IN ${langSpec.name} (${langSpec.native}). NEVER transcribe or output in the original spoken language or Chinese characters unless the target language itself is Chinese.`;
+  const prompt = `Listen to this ${durationSec}-second movie audio clip (starts at 0.0s).\nTRANSLATE ALL spoken dialogue directly into ${langSpec.prompt}.\nCRITICAL RULE: Every "t" MUST be 100% in ${langSpec.name} (${langSpec.native}). NEVER output the original spoken language (e.g. NEVER output Chinese characters when translating into Vietnamese).\n${ctxHint}Rules:\n- "s" and "e" = float seconds relative to 0.0 (0.0 <= s < e <= ${durationSec}), 1.2s-4.8s per cue.\n- Skip music/silence; if no speech, return [].\nReturn ONLY JSON array: [{"s":1.2,"e":3.6,"t":"subtitle in ${langSpec.name}"}]`;
 
   const genConfig = { temperature: 0.15, responseMimeType: 'application/json' };
   const lower = cleanModel.toLowerCase();
@@ -241,6 +292,7 @@ export async function transcribeAudioChunkDirect({
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
+      systemInstruction: { parts: [{ text: systemText }] },
       contents: [
         {
           parts: [
@@ -273,6 +325,18 @@ export async function transcribeAudioChunkDirect({
     const relStart = Math.max(0, Math.min(chunkDurationMs + 4000, Math.round(sSec * 1000)));
     const relEnd = Math.max(relStart + 500, Math.min(chunkDurationMs + 5000, Math.round(eSec * 1000)));
     out.push({ id: i + 1, startMs: chunkStartOffsetMs + relStart, endMs: chunkStartOffsetMs + relEnd, text: txt });
+  }
+  // Safety net: if direct Gemini audio slipped into wrong script (e.g. Chinese Hanzi for Vietnamese), repair via text translation!
+  if (out.length && (hasWrongScriptForLang(out, langSpec.code) || out.some((c) => isSingleLineWrongScript(c.text, langSpec.code)))) {
+    try {
+      const repaired = await translateWithGemini(out, langSpec, apiKey.trim(), cleanModel, movieContext);
+      if (repaired.length === out.length && !hasWrongScriptForLang(repaired, langSpec.code)) {
+        return repaired;
+      }
+      return await translateWithGoogleFree(out, langSpec.code);
+    } catch {
+      return await translateWithGoogleFree(out, langSpec.code);
+    }
   }
   return out;
 }
@@ -315,8 +379,38 @@ function openSubCacheDb() {
   return subDbPromise;
 }
 
+export async function deleteCachedEpisodeSub(cacheKey) {
+  if (!cacheKey) return;
+  try {
+    const db = await openSubCacheDb();
+    if (db) {
+      await new Promise((resolve) => {
+        try {
+          const tx = db.transaction(SUB_STORE_NAME, 'readwrite');
+          tx.objectStore(SUB_STORE_NAME).delete(cacheKey);
+          tx.oncomplete = () => resolve(true);
+          tx.onerror = () => resolve(false);
+        } catch {
+          resolve(false);
+        }
+      });
+    }
+  } catch { /* ignore */ }
+  try { localStorage.removeItem(`cf_sub_${cacheKey}`); } catch { /* ignore */ }
+}
+
 export async function loadCachedEpisodeSub(cacheKey) {
   if (!cacheKey) return null;
+  const keyLang = String(cacheKey).split('|').pop() || 'vi';
+  const validateEntry = (entry) => {
+    if (!entry || !Array.isArray(entry.primaryCues) || entry.primaryCues.length < 3) return null;
+    const targetLang = entry.primaryLangCode || keyLang;
+    if (hasWrongScriptForLang(entry.primaryCues, targetLang)) {
+      deleteCachedEpisodeSub(cacheKey).catch(() => {});
+      return null;
+    }
+    return entry;
+  };
   try {
     const db = await openSubCacheDb();
     if (db) {
@@ -330,9 +424,8 @@ export async function loadCachedEpisodeSub(cacheKey) {
           resolve(null);
         }
       });
-      if (entry && Array.isArray(entry.primaryCues) && entry.primaryCues.length >= 3) {
-        return entry;
-      }
+      const ok = validateEntry(entry);
+      if (ok) return ok;
     }
   } catch {
     // Fall through to localStorage fallback
@@ -342,9 +435,8 @@ export async function loadCachedEpisodeSub(cacheKey) {
     const raw = localStorage.getItem(`cf_sub_${cacheKey}`);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    if (parsed && Array.isArray(parsed.primaryCues) && parsed.primaryCues.length >= 3) {
-      return parsed;
-    }
+    const ok = validateEntry(parsed);
+    if (ok) return ok;
   } catch {
     // Ignore
   }
@@ -353,6 +445,10 @@ export async function loadCachedEpisodeSub(cacheKey) {
 
 export async function saveCachedEpisodeSub(cacheKey, payload) {
   if (!cacheKey || !payload || !Array.isArray(payload.primaryCues) || payload.primaryCues.length < 3) {
+    return false;
+  }
+  const targetLang = payload.primaryLangCode || String(cacheKey).split('|').pop() || 'vi';
+  if (hasWrongScriptForLang(payload.primaryCues, targetLang)) {
     return false;
   }
   const record = {
@@ -423,7 +519,8 @@ async function translateWithGemini(cues, langSpec, apiKey, modelId, movieContext
   const ctxHint = movieContext?.title
     ? `Movie context: "${movieContext.title}"${movieContext.genres?.length ? ` [${movieContext.genres.join(', ')}]` : ''} — adapt pronouns & tone naturally.\n`
     : '';
-  const prompt = `Cinema subtitle translator: translate each line into ${langSpec.prompt}.\n${ctxHint}Keep concise, natural, idiomatic.\nReturn ONLY JSON array: [{"i":0,"t":"..."}]\nInput:\n${JSON.stringify(inputPayload)}`;
+  const systemText = `You are a professional cinema subtitle translator. EVERY translated line MUST be written strictly in ${langSpec.name} (${langSpec.native}). Never leave source text untranslated or output Chinese characters unless target language is Chinese.`;
+  const prompt = `Translate EVERY line into ${langSpec.prompt}.\nSTRICT RULE: Output MUST be 100% in ${langSpec.name} (${langSpec.native}).\n${ctxHint}Keep concise, natural, idiomatic.\nReturn ONLY JSON array: [{"i":0,"t":"..."}]\nInput:\n${JSON.stringify(inputPayload)}`;
 
   const genConfig = { temperature: 0.15, responseMimeType: 'application/json' };
   const lower = cleanModel.toLowerCase();
@@ -438,6 +535,7 @@ async function translateWithGemini(cues, langSpec, apiKey, modelId, movieContext
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
+      systemInstruction: { parts: [{ text: systemText }] },
       contents: [{ parts: [{ text: prompt }] }],
       generationConfig: genConfig,
     }),

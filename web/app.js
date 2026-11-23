@@ -9,11 +9,12 @@ import {
   buildSubCacheKey,
   loadCachedEpisodeSub,
   saveCachedEpisodeSub,
+  hasWrongScriptForLang,
   parseHlsMediaSegments,
   buildHlsAudioWindows,
   extractHlsWindowAdtsBase64,
   downloadSrtFile,
-} from './subtitles.js?v=14';
+} from './subtitles.js?v=19';
 import { UI_LANGUAGES, resolveUiLang, t } from './i18n.js?v=16';
 import {
   normalizeMovieSlug,
@@ -57,7 +58,7 @@ import {
   fetchMovieGlossary,
   saveMovieGlossary,
   fetchAiVibeSearch,
-} from './sync.js?v=18';
+} from './sync.js?v=19';
 
 const PHIM_API = 'https://phimapi.com';
 const PHIM_CDN = 'https://phimimg.com';
@@ -1071,11 +1072,11 @@ function loadPrefs() {
   }
 }
 
-function savePrefs(skipCloudPush = false) {
+function savePrefs(skipCloudPush = false, immediateCloud = false) {
   localStorage.setItem('chillfilm_nki_prefs_v1', JSON.stringify(state.prefs));
   if (!skipCloudPush && isCloudSignedIn()) {
     clearTimeout(state.prefsPushTimer);
-    state.prefsPushTimer = setTimeout(() => {
+    const pushNow = () => {
       const syncablePrefs = {
         uiLang: state.prefs.uiLang,
         primaryLang: state.prefs.primaryLang,
@@ -1091,7 +1092,9 @@ function savePrefs(skipCloudPush = false) {
         geminiModel: state.prefs.geminiModel,
       };
       cloudPushState({ prefs: syncablePrefs, prefsUpdatedAt: Date.now() }).catch(() => {});
-    }, 1800);
+    };
+    if (immediateCloud) pushNow();
+    else state.prefsPushTimer = setTimeout(pushNow, 1800);
   }
 }
 
@@ -2382,6 +2385,7 @@ function renderDetailView(detail) {
           scope,
           startSec: epStartSec,
           initiatedFrom: 'detail',
+          forceRetranslate: $('detailAutoSubBtn')?.dataset?.retranslate === '1',
         });
       };
     }
@@ -2678,16 +2682,107 @@ function closeDetailView() {
   syncBrowserUrl({}, { push: true });
 }
 
-/* ==================== CHILL-PLAYER ENGINE (HLS + WEB AUDIO 200% BOOST + EQ) ==================== */
-function ensureWebAudioDsp(videoEl) {
+/* ==================== CHILL-PLAYER ENGINE (LAZY WEB AUDIO 200% BOOST + EQ + TRUE BYPASS + ANTI-CLIP LIMITER) ==================== */
+function needsWebAudioDsp() {
+  return Boolean(
+    state.volumeScale > 1.01
+    || (state.eqPreset && state.eqPreset !== 'FLAT')
+    || state.prefs.nightAudio
+    || state.audioSubActive
+  );
+}
+
+function disconnectAudioCaptureTap() {
+  if (!state.audioCaptureConnected) return;
+  try {
+    state.audioSourceNode?.disconnect(state.audioCaptureDest);
+  } catch { /* ignore */ }
+  state.audioCaptureConnected = false;
+}
+
+function connectAudioCaptureTap(videoEl) {
+  ensureWebAudioDsp(videoEl || $('videoEl'), { force: true });
+  if (!state.audioCtx || !state.audioSourceNode) return null;
+  if (!state.audioCaptureDest) {
+    try {
+      state.audioCaptureDest = state.audioCtx.createMediaStreamDestination();
+    } catch {
+      state.audioCaptureDest = null;
+      return null;
+    }
+  }
+  if (!state.audioCaptureConnected && state.audioCaptureDest) {
+    try {
+      state.audioSourceNode.connect(state.audioCaptureDest);
+      state.audioCaptureConnected = true;
+    } catch { /* ignore */ }
+  }
+  return state.audioCaptureDest;
+}
+
+function rewireWebAudioChain() {
+  const ctx = state.audioCtx;
+  const src = state.audioSourceNode;
+  const gain = state.gainNode;
+  if (!ctx || !src || !gain) return;
+  const { low, mid, high } = state.eqNodes || {};
+  const nightComp = state.compressorNode;
+  const nightMakeup = state.nightMakeupNode;
+  const limiter = state.limiterNode;
+
+  // Disconnect internal signal nodes safely (keep optional audioCaptureDest tap intact if live recording)
+  [src, low, mid, high, nightComp, nightMakeup, gain, limiter].forEach((n) => {
+    try { n?.disconnect(); } catch { /* ignore */ }
+  });
+
+  const needEq = Boolean(state.eqPreset && state.eqPreset !== 'FLAT' && low && mid && high);
+  const needNight = Boolean(state.prefs.nightAudio && nightComp && nightMakeup);
+  const needLimiter = Boolean((state.volumeScale > 1.01 || needEq || needNight) && limiter);
+
+  let cursor = src;
+  if (needEq) {
+    cursor.connect(low);
+    low.connect(mid);
+    mid.connect(high);
+    cursor = high;
+  }
+  if (needNight) {
+    cursor.connect(nightComp);
+    nightComp.connect(nightMakeup);
+    cursor = nightMakeup;
+  }
+  cursor.connect(gain);
+  if (needLimiter) {
+    gain.connect(limiter);
+    limiter.connect(ctx.destination);
+  } else {
+    // True bit-clean transparent path (zero compressor/EQ coloration!)
+    gain.connect(ctx.destination);
+  }
+  if (state.audioCaptureConnected && state.audioCaptureDest) {
+    try { src.connect(state.audioCaptureDest); } catch { /* ignore */ }
+  }
+}
+
+function ensureWebAudioDsp(videoEl, { force = false } = {}) {
+  if (!videoEl) return;
   if (state.audioCtx) {
     if (state.audioCtx.state === 'suspended') state.audioCtx.resume().catch(() => {});
     return;
   }
+  // Keep normal playback 100% on native browser/OS <video> audio pipeline to avoid Chromium
+  // MediaElementAudioSourceNode + MSE clock-drift / crackle / muffled audio over long episodes!
+  if (!force && !needsWebAudioDsp()) return;
   try {
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return;
-    const ctx = new AC();
+    // Use 'playback' latencyHint for large glitch-free movie buffer instead of tiny 'interactive' buffer!
+    let ctx;
+    try {
+      ctx = new AC({ latencyHint: 'playback' });
+    } catch {
+      ctx = new AC();
+    }
     const src = ctx.createMediaElementSource(videoEl);
     const low = ctx.createBiquadFilter();
     low.type = 'lowshelf';
@@ -2699,28 +2794,41 @@ function ensureWebAudioDsp(videoEl) {
     const high = ctx.createBiquadFilter();
     high.type = 'highshelf';
     high.frequency.value = 4500;
+
+    // Musical Night Audio compressor (only wired into graph when Night Mode is ON!)
     const compressor = ctx.createDynamicsCompressor();
+    compressor.threshold.value = -20;
+    compressor.knee.value = 18;
+    compressor.ratio.value = 4.5;
+    compressor.attack.value = 0.012;
+    compressor.release.value = 0.25;
+    const nightMakeup = ctx.createGain();
+    nightMakeup.gain.value = 1.22;
+
     const gain = ctx.createGain();
     gain.gain.value = state.volumeScale;
-    src.connect(low);
-    low.connect(mid);
-    mid.connect(high);
-    high.connect(compressor);
-    compressor.connect(gain);
-    gain.connect(ctx.destination);
-    // Tap pre-gain clean audio into a MediaStreamDestination for Web AI Live Audio Subtitling
-    try {
-      const captureDest = ctx.createMediaStreamDestination();
-      high.connect(captureDest);
-      state.audioCaptureDest = captureDest;
-    } catch {
-      state.audioCaptureDest = null;
-    }
+
+    // Post-gain Safety Output Limiter prevents digital clipping/crackling at 120%-200% boost or EQ boost!
+    const limiter = ctx.createDynamicsCompressor();
+    limiter.threshold.value = -1.5;
+    limiter.knee.value = 4;
+    limiter.ratio.value = 14;
+    limiter.attack.value = 0.002;
+    limiter.release.value = 0.08;
+
     state.audioCtx = ctx;
+    state.audioSourceNode = src;
     state.gainNode = gain;
     state.compressorNode = compressor;
+    state.nightMakeupNode = nightMakeup;
+    state.limiterNode = limiter;
     state.eqNodes = { low, mid, high };
+    state.audioCaptureDest = null;
+    state.audioCaptureConnected = false;
+
+    applyEqPreset(state.eqPreset);
     applyNightAudioMode(state.prefs.nightAudio);
+    rewireWebAudioChain();
   } catch {
     // Graceful fallback if browser blocks Web Audio on opaque media
   }
@@ -2728,22 +2836,11 @@ function ensureWebAudioDsp(videoEl) {
 
 function applyNightAudioMode(enabled) {
   state.prefs.nightAudio = Boolean(enabled);
-  const c = state.compressorNode;
-  if (c && state.audioCtx) {
-    const t = state.audioCtx.currentTime;
-    if (state.prefs.nightAudio) {
-      c.threshold.setValueAtTime(-28, t);
-      c.knee.setValueAtTime(24, t);
-      c.ratio.setValueAtTime(10, t);
-      c.attack.setValueAtTime(0.005, t);
-      c.release.setValueAtTime(0.22, t);
-    } else {
-      c.threshold.setValueAtTime(0, t);
-      c.knee.setValueAtTime(0, t);
-      c.ratio.setValueAtTime(1, t);
-      c.attack.setValueAtTime(0.003, t);
-      c.release.setValueAtTime(0.25, t);
-    }
+  if (state.prefs.nightAudio) {
+    ensureWebAudioDsp($('videoEl'), { force: true });
+  }
+  if (state.audioCtx) {
+    rewireWebAudioChain();
   }
   if ($('nightAudioToggle')) $('nightAudioToggle').checked = state.prefs.nightAudio;
 }
@@ -2841,16 +2938,28 @@ function syncPlayIcons(isPaused) {
 }
 
 function applyVolumeBoost(scale) {
+  const prevBoosted = state.volumeScale > 1.01;
   state.volumeScale = Math.max(0, Math.min(2.0, scale));
+  const nowBoosted = state.volumeScale > 1.01;
   if (state.volumeScale > 0.02) {
     state.lastNonZeroVolume = state.volumeScale;
   }
   const video = $('videoEl');
-  if (state.gainNode) {
+  if (nowBoosted && !state.gainNode) {
+    ensureWebAudioDsp(video, { force: true });
+  }
+  if (state.gainNode && state.audioCtx) {
     video.volume = 1.0;
     video.muted = state.volumeScale <= 0.001;
-    state.gainNode.gain.value = state.volumeScale;
-  } else {
+    try {
+      state.gainNode.gain.setTargetAtTime(state.volumeScale, state.audioCtx.currentTime, 0.015);
+    } catch {
+      state.gainNode.gain.value = state.volumeScale;
+    }
+    if (prevBoosted !== nowBoosted) {
+      rewireWebAudioChain();
+    }
+  } else if (video) {
     video.muted = state.volumeScale <= 0.001;
     video.volume = Math.min(1.0, state.volumeScale);
   }
@@ -2879,7 +2988,6 @@ function applyVolumeBoost(scale) {
 }
 
 function toggleMute() {
-  ensureWebAudioDsp($('videoEl'));
   if (state.volumeScale > 0.01) {
     state.lastNonZeroVolume = state.volumeScale;
     applyVolumeBoost(0);
@@ -2892,21 +3000,25 @@ function toggleMute() {
 }
 
 function applyEqPreset(preset) {
-  state.eqPreset = preset;
+  state.eqPreset = preset || 'FLAT';
+  if (state.eqPreset !== 'FLAT' && !state.eqNodes) {
+    ensureWebAudioDsp($('videoEl'), { force: true });
+  }
   if (state.eqNodes) {
     const map = {
       FLAT: [0, 0, 0],
-      BASS: [8, 1, 0],
-      VOCAL: [-3, 7, 2],
-      MOVIE: [5, 2, 5],
+      BASS: [5, 0, 0],
+      VOCAL: [-2, 4.5, 1.5],
+      MOVIE: [3.5, 1.5, 3.5],
     };
-    const [l, m, h] = map[preset] || [0, 0, 0];
+    const [l, m, h] = map[state.eqPreset] || [0, 0, 0];
     state.eqNodes.low.gain.value = l;
     state.eqNodes.mid.gain.value = m;
     state.eqNodes.high.gain.value = h;
+    rewireWebAudioChain();
   }
   document.querySelectorAll('[data-eq]').forEach((b) => {
-    b.classList.toggle('active', b.dataset.eq === preset);
+    b.classList.toggle('active', b.dataset.eq === state.eqPreset);
   });
 }
 
@@ -3480,6 +3592,7 @@ function applyDetailSubCardVisualState({
   if (btn) {
     btn.textContent = buttonLabel;
     btn.classList.toggle('stop-mode', isRunning);
+    btn.dataset.retranslate = phase === 'ready' && !isRunning ? '1' : '0';
   }
   if (watchBtn) {
     watchBtn.style.display = canWatchNow ? 'inline-flex' : 'none';
@@ -3515,7 +3628,12 @@ async function refreshDetailSubCardForSelection(detail, episode) {
 
   if ((!cached || (cached.primaryCues?.length || 0) < 3) && isCloudSignedIn()) {
     const cloudBundle = await cloudFetchSubtitle(detail.slug, episode.name || episode.slug, lang.code);
-    if (cloudBundle && Array.isArray(cloudBundle.primaryCues) && cloudBundle.primaryCues.length >= 3) {
+    if (
+      cloudBundle
+      && Array.isArray(cloudBundle.primaryCues)
+      && cloudBundle.primaryCues.length >= 3
+      && !hasWrongScriptForLang(cloudBundle.primaryCues, lang.code)
+    ) {
       cached = {
         ...cloudBundle,
         trackLabel: cloudBundle.sourcePlatform || `☁️ NKI Cloud ${lang.badge}`,
@@ -3602,9 +3720,11 @@ function stopActiveSubJob(silent = false, keepCues = true) {
   if (!silent && wasActive) showToast('⏹ Đã dừng dịch Sub AI (đã lưu các câu đã dịch)');
 }
 
-async function persistJobSubCache({ movie, episode, langCode, sourceLangCode, trackLabel, sourceCues, primaryCues, secondaryCues = [], isFullyTranslated = false, translatedCount = 0, audioMode = false, audioTranslatedUntilMs = 0, totalDurationMs = 0, translatedWindows = [], pushCloud = false }) {
+async function persistJobSubCache({ movie, episode, langCode, sourceLangCode, trackLabel, sourceCues, primaryCues, secondaryCues = [], isFullyTranslated = false, translatedCount = 0, audioMode = false, audioTranslatedUntilMs = 0, totalDurationMs = 0, translatedWindows = [], pushCloud = false, forceOverwrite = false }) {
   if (!movie || !episode || !Array.isArray(primaryCues) || primaryCues.length < 3) return;
   const lang = resolveLanguage(langCode || state.prefs.primaryLang);
+  // Never pollute local cache or Shared NKI Cloud Pool with wrong-script text (e.g. Chinese Hanzi under 'vi')!
+  if (hasWrongScriptForLang(primaryCues, lang.code)) return;
   const key = buildSubCacheKey(movie.slug, episode, lang.code);
   const payload = {
     primaryLangCode: lang.code,
@@ -3629,6 +3749,7 @@ async function persistJobSubCache({ movie, episode, langCode, sourceLangCode, tr
     cloudSaveSubtitle({
       movieSlug: movie.slug,
       episodeNameOrSlug: episode.name || episode.slug,
+      forceOverwrite: Boolean(forceOverwrite || state.subJob?.forceRetranslate),
       ...payload,
     }).catch(() => {});
   }
@@ -3642,7 +3763,8 @@ async function runParallelSrtTranslation({ job, jobId, movie, episode, cues, sou
   job.doneCount = 0;
   job.engineLabel = isCloudSignedIn() || (state.prefs.geminiApiKey || '').length > 10 ? 'Gemini AI' : 'Free Neural';
 
-  if (sourceLangCode === targetLang.code) {
+  // Only skip translation if track metadata matches targetLang AND actual text is not wrong-script (catches mislabeled OpenSubtitles files!)
+  if (sourceLangCode === targetLang.code && !hasWrongScriptForLang(cues, targetLang.code)) {
     job.cues = cues;
     job.doneCount = cues.length;
     job.percent = 100;
@@ -4097,6 +4219,7 @@ async function startUnifiedAiSubJob({
   j.hlsFilling = false;
   j.audioMode = false;
   j.notifiedReady = false;
+  j.forceRetranslate = Boolean(forceRetranslate);
   syncAllSubProgressUi();
 
   // #2 Auto-prepare AI Character & Terminology Glossary in background (non-blocking) for consistent series translation!
@@ -4137,7 +4260,12 @@ async function startUnifiedAiSubJob({
       syncAllSubProgressUi();
       const cloudBundle = await cloudFetchSubtitle(movie.slug, episode.name || episode.slug, targetLang.code);
       if (j.id !== jobId) return;
-      if (cloudBundle && Array.isArray(cloudBundle.primaryCues) && cloudBundle.primaryCues.length >= 3) {
+      if (
+        cloudBundle
+        && Array.isArray(cloudBundle.primaryCues)
+        && cloudBundle.primaryCues.length >= 3
+        && !hasWrongScriptForLang(cloudBundle.primaryCues, targetLang.code)
+      ) {
         cached = {
           ...cloudBundle,
           trackLabel: cloudBundle.sourcePlatform || `☁️ NKI Cloud ${targetLang.badge}`,
@@ -4336,6 +4464,7 @@ function stopWebAiAudioSub(silent = false) {
     try { state.audioSubRecorder.stop(); } catch { /* ignore */ }
   }
   state.audioSubRecorder = null;
+  disconnectAudioCaptureTap();
   if ($('hudAudioSubPrompt')) {
     $('hudAudioSubPrompt').classList.remove('recording');
     if (state.primaryCues.length >= 3) {
@@ -4365,8 +4494,8 @@ async function captureNextAudioSubChunk(sessionId) {
     return;
   }
 
-  ensureWebAudioDsp(video);
-  const stream = state.audioCaptureDest?.stream || (typeof video.captureStream === 'function' ? video.captureStream() : null);
+  const captureDest = connectAudioCaptureTap(video);
+  const stream = captureDest?.stream || (typeof video.captureStream === 'function' ? video.captureStream() : null);
   const audioTracks = stream?.getAudioTracks?.() || [];
   if (!stream || !audioTracks.length || typeof MediaRecorder === 'undefined') {
     stopWebAiAudioSub(true);
@@ -4451,7 +4580,7 @@ async function captureNextAudioSubChunk(sessionId) {
 
 function startLiveMediaRecorderFallback() {
   const video = $('videoEl');
-  ensureWebAudioDsp(video);
+  connectAudioCaptureTap(video);
   if (video.paused) video.play().catch(() => {});
   state.audioSubActive = true;
   state.audioSubChunksDone = 0;
@@ -5627,12 +5756,20 @@ function openPlayer(movie, episode, startSec = 0, { preserveFailover = false, pr
 
   const startPlayback = () => {
     applyPendingResumeSeek();
+    try {
+      video.preservesPitch = true;
+      video.mozPreservesPitch = true;
+      video.webkitPreservesPitch = true;
+    } catch { /* ignore */ }
     video.playbackRate = state.speed;
+    if (state.audioCtx && state.audioCtx.state === 'suspended') {
+      state.audioCtx.resume().catch(() => {});
+    }
     video.play().catch(() => {});
   };
 
   video.onloadedmetadata = () => {
-    ensureWebAudioDsp(video);
+    if (needsWebAudioDsp()) ensureWebAudioDsp(video);
     applyPendingResumeSeek();
   };
   video.oncanplay = () => {
@@ -5646,6 +5783,8 @@ function openPlayer(movie, episode, startSec = 0, { preserveFailover = false, pr
       startFragPrefetch: true,
       maxBufferLength: 24,
       maxMaxBufferLength: 45,
+      backBufferLength: 30,
+      maxAudioFramesDrift: 4,
       abrEwmaDefaultEstimate: 2_500_000,
       manifestLoadingTimeOut: 10000,
       fragLoadingTimeOut: 12000,
@@ -5655,7 +5794,7 @@ function openPlayer(movie, episode, startSec = 0, { preserveFailover = false, pr
     hls.loadSource(streamUrl);
     hls.attachMedia(video);
     hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
-      ensureWebAudioDsp(video);
+      if (needsWebAudioDsp()) ensureWebAudioDsp(video);
       applyVolumeBoost(state.volumeScale);
       applyEqPreset(state.eqPreset);
       applyNightAudioMode(state.prefs.nightAudio);
@@ -5670,8 +5809,11 @@ function openPlayer(movie, episode, startSec = 0, { preserveFailover = false, pr
         if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR && state.hlsNetworkRetries < 1) {
           state.hlsNetworkRetries += 1;
           hls.startLoad();
-        } else if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR && state.hlsNetworkRetries < 1) {
+        } else if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR && state.hlsNetworkRetries < 2) {
           state.hlsNetworkRetries += 1;
+          if (state.hlsNetworkRetries === 2) {
+            try { hls.swapAudioCodec(); } catch { /* ignore */ }
+          }
           hls.recoverMediaError();
         } else {
           triggerAutoFailover('HLS stream error');
@@ -5682,7 +5824,7 @@ function openPlayer(movie, episode, startSec = 0, { preserveFailover = false, pr
   } else {
     video.src = streamUrl;
     video.onloadedmetadata = () => {
-      ensureWebAudioDsp(video);
+      if (needsWebAudioDsp()) ensureWebAudioDsp(video);
       startPlayback();
     };
   }
@@ -5794,6 +5936,10 @@ function closePlayer(e) {
   }
   video.pause();
   video.removeAttribute('src');
+  disconnectAudioCaptureTap();
+  if (state.audioCtx && state.audioCtx.state === 'running') {
+    state.audioCtx.suspend().catch(() => {});
+  }
   if (state.hls) {
     state.hls.destroy();
     state.hls = null;
@@ -5861,7 +6007,7 @@ async function maybePreTranslateNextEpisode(curSec, durSec) {
     // 2. Check NKI Cloud Pool first (0 Gemini tokens!)
     if (isCloudSignedIn()) {
       const cloudHit = await cloudFetchSubtitle(movie.slug, nextEp.name || nextEp.slug, targetLang.code);
-      if (cloudHit && cloudHit.primaryCues?.length >= 5) {
+      if (cloudHit && cloudHit.primaryCues?.length >= 5 && !hasWrongScriptForLang(cloudHit.primaryCues, targetLang.code)) {
         await saveCachedEpisodeSub(bgKey, {
           ...cloudHit,
           trackLabel: cloudHit.sourcePlatform || `☁️ NKI Cloud ${targetLang.badge}`,
@@ -6015,6 +6161,7 @@ async function maybePreTranslateNextEpisode(curSec, durSec) {
 async function persistCurrentSubCache(isFullyTranslated, translatedCount, { skipCloudPush = false } = {}) {
   if (!state.currentMovie || !state.currentEpisode || state.primaryCues.length < 3) return;
   const targetLang = resolveLanguage(state.prefs.primaryLang);
+  if (hasWrongScriptForLang(state.primaryCues, targetLang.code)) return;
   const key = buildSubCacheKey(state.currentMovie.slug, state.currentEpisode, targetLang.code);
   const payload = {
     primaryLangCode: targetLang.code,
@@ -6081,7 +6228,12 @@ async function autoLoadSubtitlesForMovie(movie, episode, startSec = 0) {
     updateSubStatusBadge(`☁️ Đang kiểm tra kho Sub NKI Cloud (${targetLang.badge})...`);
     const cloudBundle = await cloudFetchSubtitle(movie.slug, episode.name || episode.slug, targetLang.code);
     if (runId !== state.subTranslationRunId) return;
-    if (cloudBundle && Array.isArray(cloudBundle.primaryCues) && cloudBundle.primaryCues.length >= 3) {
+    if (
+      cloudBundle
+      && Array.isArray(cloudBundle.primaryCues)
+      && cloudBundle.primaryCues.length >= 3
+      && !hasWrongScriptForLang(cloudBundle.primaryCues, targetLang.code)
+    ) {
       cached = {
         ...cloudBundle,
         trackLabel: cloudBundle.sourcePlatform || `☁️ NKI Cloud ${targetLang.badge}`,
@@ -7798,7 +7950,7 @@ function init() {
   $('miniExpandBtn').onclick = (e) => restorePlayer(e);
   $('miniPlayBtn').onclick = (e) => {
     e.stopPropagation();
-    ensureWebAudioDsp(video);
+    if (state.audioCtx && state.audioCtx.state === 'suspended') state.audioCtx.resume().catch(() => {});
     if (video.paused) video.play().catch(() => {});
     else video.pause();
   };
@@ -7813,7 +7965,7 @@ function init() {
   };
 
   const togglePlayPause = () => {
-    ensureWebAudioDsp(video);
+    if (state.audioCtx && state.audioCtx.state === 'suspended') state.audioCtx.resume().catch(() => {});
     if (video.paused) video.play().catch(() => {});
     else video.pause();
     setControlsVisible(true);
@@ -7844,7 +7996,6 @@ function init() {
   }
   if ($('hudVolSlider')) {
     $('hudVolSlider').addEventListener('input', (e) => {
-      ensureWebAudioDsp(video);
       applyVolumeBoost(Number(e.target.value) / 100);
       setControlsVisible(true);
     });
@@ -8216,7 +8367,6 @@ function init() {
       video.style.filter = `brightness(${state.brightness})`;
       showGestureToast(`☀ Độ sáng ${Math.round(state.brightness * 100)}%`);
     } else if (touchStart.mode === 'vol') {
-      ensureWebAudioDsp(video);
       applyVolumeBoost(touchStart.vol - (dy / 240) * 2.0);
       const pct = Math.round(state.volumeScale * 100);
       showGestureToast(pct > 100 ? `🔊 ${pct}% BOOST` : `🔊 ${pct}%`);
@@ -8258,8 +8408,8 @@ function init() {
     if (e.code === 'Space') { e.preventDefault(); video.paused ? video.play() : video.pause(); }
     else if (e.key === 'ArrowLeft' || k === 'j') { video.currentTime = Math.max(0, video.currentTime - 10); showGestureToast('⏪ -10s'); }
     else if (e.key === 'ArrowRight' || k === 'l') { video.currentTime = Math.min(video.duration || 0, video.currentTime + 10); showGestureToast('+10s ⏩'); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); ensureWebAudioDsp(video); applyVolumeBoost(state.volumeScale + 0.1); showGestureToast(`🔊 ${Math.round(state.volumeScale * 100)}%`); }
-    else if (e.key === 'ArrowDown') { e.preventDefault(); ensureWebAudioDsp(video); applyVolumeBoost(state.volumeScale - 0.1); showGestureToast(`🔊 ${Math.round(state.volumeScale * 100)}%`); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); applyVolumeBoost(state.volumeScale + 0.1); showGestureToast(`🔊 ${Math.round(state.volumeScale * 100)}%`); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); applyVolumeBoost(state.volumeScale - 0.1); showGestureToast(`🔊 ${Math.round(state.volumeScale * 100)}%`); }
     else if (/^[0-9]$/.test(e.key) && video.duration > 10) {
       const pct = Number(e.key) * 10;
       video.currentTime = (pct / 100) * video.duration;
@@ -8359,7 +8509,6 @@ function init() {
 
   // Night Audio Mode, Mobile Quick Strip & Shortcuts Modal
   $('nightAudioToggle')?.addEventListener('change', (e) => {
-    ensureWebAudioDsp(video);
     applyNightAudioMode(Boolean(e.target.checked));
     savePrefs();
     showGestureToast(state.prefs.nightAudio ? '🌙 Bật Chế Độ Xem Đêm' : 'Tắt Chế Độ Xem Đêm');
@@ -8392,11 +8541,10 @@ function init() {
     };
   });
   $('boostSlider').oninput = (e) => {
-    ensureWebAudioDsp(video);
     applyVolumeBoost(Number(e.target.value) / 100);
   };
   document.querySelectorAll('[data-eq]').forEach((b) => {
-    b.onclick = () => { ensureWebAudioDsp(video); applyEqPreset(b.dataset.eq); };
+    b.onclick = () => { applyEqPreset(b.dataset.eq); };
   });
   document.querySelectorAll('[data-aspect]').forEach((b) => {
     b.onclick = () => {
@@ -8427,18 +8575,41 @@ function init() {
 
   // Settings Modal (UI Language, Gemini Key, Default AI Sub Language, Direct URL / Local Video)
   $('saveSettingsBtn').onclick = () => {
+    const prevPrimaryLang = resolveLanguage(state.prefs.primaryLang).code;
     if ($('uiLangSelect')) {
       state.prefs.uiLang = resolveUiLang($('uiLangSelect').value);
     }
     state.prefs.geminiApiKey = $('geminiKeyInput').value.trim();
     state.prefs.geminiModel = $('geminiModelSelect').value;
-    state.prefs.primaryLang = $('defaultLangSelect').value;
-    savePrefs();
+    state.prefs.primaryLang = resolveLanguage($('defaultLangSelect').value).code;
+    const nextPrimaryLang = state.prefs.primaryLang;
+    savePrefs(false, true);
     applyUiTranslations();
     renderCategories();
     if (state.heroMovies.length) renderHero(state.heroMovies[state.heroIndex] || state.heroMovies[0]);
-  else if (state.movies.length) renderHero(state.movies[0]);
+    else if (state.movies.length) renderHero(state.movies[0]);
     updateCloudHeaderBadge();
+
+    // Immediately sync Detail Page & active Player subtitle language when user updates Settings!
+    const lObj = resolveLanguage(nextPrimaryLang);
+    if ($('detailSubLangSelect')) $('detailSubLangSelect').value = nextPrimaryLang;
+    if ($('detailHeroSubBadge')) $('detailHeroSubBadge').textContent = `AI SUB (${lObj.badge})`;
+    if ($('detailView')?.classList.contains('active') && state.currentMovie && $('detailSubCard')) {
+      const epVal = $('detailSubEpSelect')?.value || '';
+      const srvEps = state.currentMovie.servers?.[0]?.episodes || state.episodesFlat || [];
+      const pickedEp = srvEps.find((x) => x.link_m3u8 === epVal) || srvEps[0];
+      if (pickedEp) refreshDetailSubCardForSelection(state.currentMovie, pickedEp);
+    }
+    if ($('primaryLangChips')) renderLanguagePickers();
+    if (
+      $('playerModal')?.classList.contains('open')
+      && state.currentMovie
+      && state.currentEpisode
+      && (prevPrimaryLang !== nextPrimaryLang || hasWrongScriptForLang(state.primaryCues, nextPrimaryLang))
+    ) {
+      autoLoadSubtitlesForMovie(state.currentMovie, state.currentEpisode, Math.floor($('videoEl')?.currentTime || 0));
+    }
+
     $('settingsModal').classList.remove('open');
     showToast(tr('settingsSavedToast'));
   };

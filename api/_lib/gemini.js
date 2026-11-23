@@ -1,29 +1,122 @@
 const LANGUAGE_INSTRUCTIONS = {
-  vi: 'natural cinema-quality Vietnamese movie subtitles',
-  en: 'natural cinema-quality English movie subtitles',
-  th: 'natural cinema-quality Thai movie subtitles (ภาษาไทยธรรมชาติ)',
-  zh: 'natural cinema-quality Simplified Chinese subtitles',
-  'zh-tw': 'natural cinema-quality Traditional Chinese subtitles',
-  ko: 'natural cinema-quality Korean movie subtitles',
-  ja: 'natural cinema-quality Japanese movie subtitles',
-  fr: 'natural cinema-quality French movie subtitles',
-  es: 'natural cinema-quality Spanish movie subtitles',
-  de: 'natural cinema-quality German movie subtitles',
-  id: 'natural cinema-quality Indonesian movie subtitles',
-  ru: 'natural cinema-quality Russian movie subtitles',
-  pt: 'natural cinema-quality Portuguese movie subtitles',
-  it: 'natural cinema-quality Italian movie subtitles',
-  ar: 'natural cinema-quality Modern Standard Arabic subtitles',
-  hi: 'natural cinema-quality Hindi movie subtitles',
-  ms: 'natural cinema-quality Malay movie subtitles',
-  lo: 'natural cinema-quality Lao movie subtitles',
-  km: 'natural cinema-quality Khmer movie subtitles',
+  vi: 'natural cinema-quality Vietnamese (Tiếng Việt, Latin script with Vietnamese diacritics — NEVER output Chinese/Hanzi, Japanese, or Korean)',
+  en: 'natural cinema-quality English (Latin script only — NEVER output Chinese/Hanzi, Japanese, or Korean)',
+  th: 'natural cinema-quality Thai (ภาษาไทยธรรมชาติ — NEVER output Chinese/Hanzi)',
+  zh: 'natural cinema-quality Simplified Chinese (简体中文)',
+  'zh-tw': 'natural cinema-quality Traditional Chinese (繁體中文)',
+  ko: 'natural cinema-quality Korean (한국어)',
+  ja: 'natural cinema-quality Japanese (日本語)',
+  fr: 'natural cinema-quality French (Français)',
+  es: 'natural cinema-quality Spanish (Español)',
+  de: 'natural cinema-quality German (Deutsch)',
+  id: 'natural cinema-quality Indonesian (Bahasa Indonesia)',
+  ru: 'natural cinema-quality Russian (Русский)',
+  pt: 'natural cinema-quality Portuguese (Português)',
+  it: 'natural cinema-quality Italian (Italiano)',
+  ar: 'natural cinema-quality Modern Standard Arabic (العربية)',
+  hi: 'natural cinema-quality Hindi (हिन्दी)',
+  ms: 'natural cinema-quality Malay (Bahasa Melayu)',
+  lo: 'natural cinema-quality Lao (ພາສາລາວ)',
+  km: 'natural cinema-quality Khmer (ភាសាខ្មែរ)',
+};
+
+const LANGUAGE_DISPLAY_NAMES = {
+  vi: 'Vietnamese (Tiếng Việt)',
+  en: 'English',
+  th: 'Thai (ภาษาไทย)',
+  zh: 'Simplified Chinese (简体中文)',
+  'zh-tw': 'Traditional Chinese (繁體中文)',
+  ko: 'Korean (한국어)',
+  ja: 'Japanese (日本語)',
+  fr: 'French',
+  es: 'Spanish',
+  de: 'German',
+  id: 'Indonesian',
+  ru: 'Russian',
+  pt: 'Portuguese',
+  it: 'Italian',
+  ar: 'Arabic',
+  hi: 'Hindi',
+  ms: 'Malay',
+  lo: 'Lao',
+  km: 'Khmer',
 };
 
 export function resolveLangInstruction(targetLang) {
   const clean = String(targetLang || 'vi').trim();
   const key = clean.toLowerCase();
   return LANGUAGE_INSTRUCTIONS[key] || `natural cinema-quality movie subtitles in ${clean}`;
+}
+
+export function resolveLangDisplayName(targetLang) {
+  const clean = String(targetLang || 'vi').trim();
+  const key = clean.toLowerCase();
+  return LANGUAGE_DISPLAY_NAMES[key] || clean;
+}
+
+const RE_HAN = /[\u4e00-\u9fff\u3400-\u4dbf]/g;
+const RE_KANA = /[\u3040-\u30ff]/g;
+const RE_HANGUL = /[\uac00-\ud7af]/g;
+const RE_ALL_LETTERS = /[\p{L}]/gu;
+
+function countForbiddenScriptChars(text, langKey) {
+  const s = String(text || '');
+  if (!s) return { forbidden: 0, letters: 0 };
+  const letters = (s.match(RE_ALL_LETTERS) || []).length;
+  if (!letters) return { forbidden: 0, letters: 0 };
+
+  const han = (s.match(RE_HAN) || []).length;
+  const kana = (s.match(RE_KANA) || []).length;
+  const hangul = (s.match(RE_HANGUL) || []).length;
+
+  if (langKey === 'zh' || langKey === 'zh-tw' || langKey === 'zh-cn') {
+    return { forbidden: kana + hangul, letters };
+  }
+  if (langKey === 'ja') {
+    return { forbidden: hangul, letters };
+  }
+  if (langKey === 'ko') {
+    // Allow occasional Hanja, reject pure Chinese text lacking Hangul
+    return { forbidden: hangul === 0 ? han + kana : kana, letters };
+  }
+  // All non-CJK languages (vi, en, th, fr, es, de, id, ru, pt, it, ar, hi, ms, lo, km, ...)
+  return { forbidden: han + kana + hangul, letters };
+}
+
+export function isSingleLineWrongScript(text, targetLang = 'vi') {
+  const key = String(targetLang || 'vi').trim().toLowerCase();
+  const { forbidden, letters } = countForbiddenScriptChars(text, key);
+  return forbidden >= 2 && letters > 0 && forbidden / letters >= 0.3;
+}
+
+/**
+ * Returns true if a batch/bundle of subtitles is predominantly in a forbidden foreign script
+ * for `targetLang` (e.g. Chinese Hanzi characters inside a Vietnamese `vi` subtitle track).
+ */
+export function hasWrongScriptForTarget(cuesOrTexts, targetLang = 'vi') {
+  if (!Array.isArray(cuesOrTexts) || !cuesOrTexts.length) return false;
+  const key = String(targetLang || 'vi').trim().toLowerCase();
+  let nonEmpty = 0;
+  let badCues = 0;
+  let totalForbidden = 0;
+  let totalLetters = 0;
+
+  for (const item of cuesOrTexts) {
+    const txt = typeof item === 'string' ? item : String(item?.text ?? item?.t ?? '');
+    const { forbidden, letters } = countForbiddenScriptChars(txt, key);
+    if (letters === 0) continue;
+    nonEmpty += 1;
+    totalForbidden += forbidden;
+    totalLetters += letters;
+    if (forbidden >= 2 && forbidden / letters >= 0.3) {
+      badCues += 1;
+    }
+  }
+  if (!nonEmpty || !totalLetters) return false;
+  if (nonEmpty <= 5) {
+    return badCues >= 1 && totalForbidden >= 4 && totalForbidden / totalLetters >= 0.22;
+  }
+  return badCues / nonEmpty >= 0.18 || totalForbidden / totalLetters >= 0.2;
 }
 
 export function buildLowLatencyGenConfig(modelId, includeThinkingConfig = true, maxOutputTokens = 0) {
@@ -63,6 +156,7 @@ export function buildModelFallbackChain(preferredModel, preferTurboFlash = false
 async function callGeminiWithFallback({
   apiKey,
   contents,
+  systemInstruction = '',
   preferredModel,
   preferTurboFlash = false,
   perAttemptTimeoutMs = 18000,
@@ -81,14 +175,18 @@ async function callGeminiWithFallback({
       let res;
       let bodyText = '';
       try {
+        const reqBody = {
+          contents,
+          generationConfig: buildLowLatencyGenConfig(model, useThinking, maxOutputTokens),
+        };
+        if (systemInstruction) {
+          reqBody.systemInstruction = { parts: [{ text: systemInstruction }] };
+        }
         res = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           signal: ctrl.signal,
-          body: JSON.stringify({
-            contents,
-            generationConfig: buildLowLatencyGenConfig(model, useThinking, maxOutputTokens),
-          }),
+          body: JSON.stringify(reqBody),
         });
         bodyText = await res.text();
       } catch (fetchErr) {
@@ -164,26 +262,39 @@ function buildMovieContextLine(movieContext) {
 
 /**
  * Translates an array of dialogue texts (`string[]` or `{i, t}[]`) via server-side Gemini API.
+ * Includes strict target-language enforcement + automatic single-pass repair if any line echoes CJK/wrong script.
  */
-export async function translateTextsServerSide({ texts, targetLang, apiKey, preferredModel, movieContext = null }) {
+export async function translateTextsServerSide({
+  texts,
+  targetLang,
+  apiKey,
+  preferredModel,
+  movieContext = null,
+  _isRepairPass = false,
+}) {
   const langInstruction = resolveLangInstruction(targetLang);
+  const langName = resolveLangDisplayName(targetLang);
   const ctxLine = buildMovieContextLine(movieContext);
   const inputPayload = texts.map((t, idx) => ({
     i: idx,
     t: String(t || '').replace(/\r?\n/g, ' ').trim(),
   }));
 
+  const systemInstruction = `You are a professional cinema subtitle translator. EVERY output subtitle line MUST be written strictly in ${langName}. Never leave source-language text untranslated and never output Chinese/Japanese/Korean characters unless ${langName} itself uses them.`;
+
   const prompt = [
-    `Cinema subtitle translator: translate each movie dialogue line into ${langInstruction}.`,
+    `Translate EVERY movie dialogue line below into ${langInstruction}.`,
+    `STRICT RULE: Output text MUST be 100% in ${langName}. Do NOT copy or keep the original language.`,
     ...(ctxLine ? [ctxLine] : []),
-    'Keep concise, natural, idiomatic, easy to read on screen.',
-    'Return ONLY JSON array: [{"i":0,"t":"..."}]',
+    'Keep each line concise, natural, idiomatic, easy to read on screen.',
+    'Return ONLY JSON array with exact matching indices: [{"i":0,"t":"..."}]',
     'Input:',
     JSON.stringify(inputPayload),
   ].join('\n');
 
   const { rawText, modelUsed } = await callGeminiWithFallback({
     apiKey,
+    systemInstruction,
     preferredModel,
     preferTurboFlash: true,
     perAttemptTimeoutMs: 18000,
@@ -208,6 +319,38 @@ export async function translateTextsServerSide({ texts, targetLang, apiKey, pref
     if (typeof o?.t === 'string') map.set(key, o.t.trim());
   });
   const translated = texts.map((orig, idx) => map.get(idx) || String(orig || ''));
+
+  // Auto-repair any lines that slipped through in a forbidden script (e.g. Hanzi when translating to Vietnamese)
+  if (!_isRepairPass) {
+    const badIndices = [];
+    for (let idx = 0; idx < translated.length; idx++) {
+      if (isSingleLineWrongScript(translated[idx], targetLang)) {
+        badIndices.push(idx);
+      }
+    }
+    if (badIndices.length > 0 && badIndices.length <= 60) {
+      try {
+        const badTexts = badIndices.map((idx) => texts[idx] || translated[idx]);
+        const repair = await translateTextsServerSide({
+          texts: badTexts,
+          targetLang,
+          apiKey,
+          preferredModel,
+          movieContext,
+          _isRepairPass: true,
+        });
+        for (let k = 0; k < badIndices.length; k++) {
+          const fixed = repair.translated?.[k];
+          if (fixed && !isSingleLineWrongScript(fixed, targetLang)) {
+            translated[badIndices[k]] = fixed;
+          }
+        }
+      } catch (repairErr) {
+        console.warn('[gemini] wrong-script repair pass failed:', repairErr?.message || repairErr);
+      }
+    }
+  }
+
   return { translated, modelUsed };
 }
 
@@ -295,19 +438,23 @@ export async function transcribeAudioChunkServerSide({
 }) {
   const durationSec = (Number(chunkDurationMs || 60000) / 1000).toFixed(1);
   const langInstruction = resolveLangInstruction(targetLang);
+  const langName = resolveLangDisplayName(targetLang);
   const ctxLine = buildMovieContextLine(movieContext);
+  const systemInstruction = `You are a professional movie subtitle translator. Listen to spoken dialogue in ANY language (Chinese, English, Korean, Japanese, etc.) and output time-aligned subtitles WRITTEN STRICTLY IN ${langName}. NEVER transcribe or output in the original spoken language. NEVER output Chinese characters (汉字/中文) when translating into ${langName}.`;
   const prompt = [
-    `Universal cinema subtitle creator: listen to this ${durationSec}-second movie audio clip (starts at 0.0s).`,
-    `Transcribe ALL spoken dialogue (from ANY spoken language) directly into ${langInstruction}.`,
+    `Listen to this ${durationSec}-second movie audio clip (starts at 0.0s).`,
+    `TRANSLATE ALL spoken dialogue directly into ${langInstruction}.`,
+    `CRITICAL LANGUAGE RULE: Every "t" field MUST be written 100% in ${langName}. Even if the characters speak Chinese/Korean/Japanese/English, NEVER output their original script — ALWAYS translate into ${langName}.`,
     ...(ctxLine ? [ctxLine] : []),
     'Rules:',
     `- "s" and "e" = float seconds relative to 0.0 of this clip (0.0 <= s < e <= ${durationSec}), 1.2s-4.8s per cue.`,
     '- Skip music/silence; if no speech, return [].',
-    'Return ONLY JSON array: [{"s":1.2,"e":3.6,"t":"translated subtitle text"}]',
+    `Return ONLY JSON array: [{"s":1.2,"e":3.6,"t":"subtitle in ${langName}"}]`,
   ].join('\n');
 
   const { rawText, modelUsed } = await callGeminiWithFallback({
     apiKey,
+    systemInstruction,
     preferredModel,
     preferTurboFlash: true,
     perAttemptTimeoutMs: 22000,
@@ -372,6 +519,39 @@ export async function transcribeAudioChunkServerSide({
       });
     }
   }
+
+  // Automatic Language Safety Net: if audio model slipped into ASR transcription (e.g. Chinese Hanzi
+  // instead of Vietnamese), automatically translate those cues via text pass before returning!
+  if (cues.length && (hasWrongScriptForTarget(cues, targetLang) || cues.some((c) => isSingleLineWrongScript(c.text, targetLang)))) {
+    const badIdx = [];
+    const needFull = hasWrongScriptForTarget(cues, targetLang);
+    for (let i = 0; i < cues.length; i++) {
+      if (needFull || isSingleLineWrongScript(cues[i].text, targetLang)) {
+        badIdx.push(i);
+      }
+    }
+    if (badIdx.length) {
+      try {
+        const repair = await translateTextsServerSide({
+          texts: badIdx.map((i) => cues[i].text),
+          targetLang,
+          apiKey,
+          preferredModel,
+          movieContext,
+          _isRepairPass: true,
+        });
+        for (let k = 0; k < badIdx.length; k++) {
+          const fixed = repair.translated?.[k];
+          if (fixed && !isSingleLineWrongScript(fixed, targetLang)) {
+            cues[badIdx[k]].text = fixed;
+          }
+        }
+      } catch (repairErr) {
+        console.warn('[gemini audio-sub] wrong-script auto-translate repair failed:', repairErr?.message || repairErr);
+      }
+    }
+  }
+
   return { cues, modelUsed };
 }
 
