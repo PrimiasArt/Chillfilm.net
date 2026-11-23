@@ -53,7 +53,10 @@ internal data class SavedEpisodeSubtitleBundle(
     val primaryCues: List<SubtitleCue>,
     val secondaryCues: List<SubtitleCue>,
     val isFullyTranslated: Boolean,
-    val savedAtMs: Long
+    val savedAtMs: Long,
+    val translatedRanges: List<Pair<Long, Long>> = emptyList(),
+    val audioTranslatedUntilMs: Long = 0L,
+    val totalDurationMs: Long = 0L
 )
 
 class ThaiSubtitleManager(
@@ -145,6 +148,10 @@ class ThaiSubtitleManager(
     @Volatile
     private var activeCompletedAudioSlots: Set<Int> = emptySet()
     @Volatile
+    private var activeTranslatedRanges: List<Pair<Long, Long>> = emptyList()
+    @Volatile
+    private var activeTotalDurationMs: Long = 0L
+    @Volatile
     private var bilingualReferenceCues: List<SubtitleCue> = emptyList()
     private val rejectedTrackIdsForEpisode = ConcurrentHashMap.newKeySet<String>()
     private var autoSyncCallback: ((Long, Float, String, Boolean) -> Unit)? = null
@@ -226,20 +233,25 @@ class ThaiSubtitleManager(
                     loadEpisodeSubCache(movie, episode, targetLang.code)
                 }
                 // STEP 0B: SHARED NKI CLOUD SUBTITLE POOL ON VERCEL BLOB (<150ms, 0 GEMINI TOKENS!)
-                if ((cached == null || cached.primaryCues.size < 3) && CloudSyncClient.isSignedIn()) {
-                    _preFlightState.value = PreFlightSubtitleState(
-                        isPreparing = true,
-                        stepTitle = "☁️ Checking NKI Cloud Subtitles (${targetLang.shortBadge})...",
-                        stepDetail = "$searchDisplay • ${episode.name}",
-                        progressFraction = 0.08f,
-                        searchedQuery = searchDisplay
-                    )
+                // Check Cloud whenever local cache is missing OR not yet 100% complete (so Web's longer progress merges seamlessly!)
+                if ((cached == null || !cached.isFullyTranslated) && CloudSyncClient.isSignedIn()) {
+                    if (cached == null) {
+                        _preFlightState.value = PreFlightSubtitleState(
+                            isPreparing = true,
+                            stepTitle = "☁️ Checking NKI Cloud Subtitles (${targetLang.shortBadge})...",
+                            stepDetail = "$searchDisplay • ${episode.name}",
+                            progressFraction = 0.08f,
+                            searchedQuery = searchDisplay
+                        )
+                    }
                     val cloudHit = CloudSyncClient.fetchCloudSubtitle(
                         rawMovieSlug = movie.detailLookupId ?: movie.id,
                         rawEpisodeNameOrId = episode.name.ifBlank { episode.id },
                         langCode = targetLang.code
                     )
-                    if (cloudHit != null && cloudHit.primaryCues.size >= 3) {
+                    if (cloudHit != null && cloudHit.primaryCues.size >= 3 &&
+                        !CloudSyncClient.hasWrongScriptForLang(cloudHit.primaryCues, targetLang.code)
+                    ) {
                         val hydrated = SavedEpisodeSubtitleBundle(
                             movieId = movie.id,
                             episodeId = episode.id,
@@ -254,12 +266,16 @@ class ThaiSubtitleManager(
                             primaryCues = cloudHit.primaryCues,
                             secondaryCues = cloudHit.secondaryCues,
                             isFullyTranslated = cloudHit.isFullyTranslated,
-                            savedAtMs = cloudHit.savedAtMs
+                            savedAtMs = cloudHit.savedAtMs,
+                            translatedRanges = cloudHit.translatedRanges,
+                            audioTranslatedUntilMs = cloudHit.audioTranslatedUntilMs,
+                            totalDurationMs = cloudHit.totalDurationMs
                         )
+                        val merged = if (cached != null) mergeSubtitleBundlesMonotonic(cached, hydrated) else hydrated
                         withContext(Dispatchers.IO) {
-                            saveEpisodeSubCache(movie, episode, hydrated, uploadToCloud = false)
+                            saveEpisodeSubCache(movie, episode, merged, uploadToCloud = false)
                         }
-                        cached = hydrated
+                        cached = merged
                     }
                 }
                 if (cached != null && cached.primaryCues.size >= 3) {
@@ -568,6 +584,7 @@ class ThaiSubtitleManager(
         geminiApiKey: String,
         preloadedSlots: Set<Int> = emptySet(),
         preloadedCues: List<SubtitleCue> = emptyList(),
+        preloadedRanges: List<Pair<Long, Long>> = emptyList(),
         onReadyToPlay: (() -> Unit)? = null
     ) {
         preFlightJob?.cancel()
@@ -585,7 +602,7 @@ class ThaiSubtitleManager(
         activeSourcePlatform = "Gemini Audio"
         val searchDisplay = movie.originalTitle.ifBlank { movie.title }
 
-        if (cleanKey.isEmpty()) {
+        if (!hasAiAccess(cleanKey)) {
             currentBadge = "🔐 Cần nạp Gemini API Key trước"
             _renderState.value = _renderState.value.copy(statusBadge = currentBadge, isTranslating = false)
             if (onReadyToPlay != null) {
@@ -648,8 +665,21 @@ class ThaiSubtitleManager(
             val slotSizeMs = 60_000L // 1-minute nimble slots (2x faster turnaround, zero timeout)
             val halfSprintMs = 30_000L // 30-second micro-sprint for ~3s instant startup & seek!
             val totalDurationMs = timeline.totalDurationMs.coerceAtLeast(slotSizeMs)
+            activeTotalDurationMs = totalDurationMs
             val totalSlots = ((totalDurationMs + slotSizeMs - 1L) / slotSizeMs).toInt().coerceIn(1, 480)
-            val completedSlots = HashSet<Int>(preloadedSlots)
+            // Reconstruct completed 60s slots from BOTH saved ranges (Web 38s -> Android 60s!), legacy slots, AND cue timestamps!
+            val completedSlots = HashSet<Int>(
+                reconstructCompletedSlots(
+                    preloadedSlots = preloadedSlots,
+                    preloadedRanges = preloadedRanges,
+                    preloadedCues = preloadedCues,
+                    totalSlots = totalSlots,
+                    slotSizeMs = slotSizeMs
+                )
+            )
+            activeTranslatedRanges = CloudSyncClient.mergeTimeRanges(
+                preloadedRanges + completedSlots.map { idx -> (idx * slotSizeMs) to ((idx + 1) * slotSizeMs).coerceAtMost(totalDurationMs) }
+            )
             val failedSlotCounts = HashMap<Int, Int>()
             val inFlightJobs = HashMap<Int, Job>()
             val prefetchedSlots = HashSet<Int>()
@@ -686,6 +716,11 @@ class ThaiSubtitleManager(
                 sourceCues = merged
                 primaryThaiCues = merged
                 activeCompletedAudioSlots = completedSlots.toSet()
+                activeTranslatedRanges = CloudSyncClient.mergeTimeRanges(
+                    activeTranslatedRanges + completedSlots.map { idx ->
+                        (idx * slotSizeMs) to ((idx + 1) * slotSizeMs).coerceAtMost(totalDurationMs)
+                    }
+                )
                 activeIsFullyTranslated = completedSlots.size >= totalSlots
                 activeTranslatedCueIds = merged.mapTo(HashSet()) { it.id }
                 refreshOverlayAt(currentPositionMs, config)
@@ -947,10 +982,39 @@ class ThaiSubtitleManager(
                                 preferTurboFlash = (candidateSlot <= viewerSlot + 1),
                                 targetLangCode = targetLang.code
                             )
-                            val chunk = slotRes.getOrNull()
-                            if (chunk != null) {
+                            var slotCues = slotRes.getOrNull()?.cues
+                            // Auto-recover empty or early-truncated 60s slots by splitting into two 30s halves!
+                            val stoppedTooEarly = slotCues != null && slotDurMs >= 42_000L && (
+                                slotCues.isEmpty() ||
+                                    ((slotCues.lastOrNull()?.endMs ?: 0L) - slotStartMs) < (slotDurMs * 35L / 100L)
+                                )
+                            if (stoppedTooEarly) {
+                                val hA = audioSubGenerator.generateThaiCuesForWindow(
+                                    cacheNamespace = cacheNamespace,
+                                    timeline = timeline,
+                                    windowStartMs = slotStartMs,
+                                    windowDurationMs = halfSprintMs,
+                                    apiKey = cleanKey,
+                                    modelId = cleanModel,
+                                    preferTurboFlash = true,
+                                    targetLangCode = targetLang.code
+                                ).getOrNull()?.cues.orEmpty()
+                                val hB = audioSubGenerator.generateThaiCuesForWindow(
+                                    cacheNamespace = cacheNamespace,
+                                    timeline = timeline,
+                                    windowStartMs = slotStartMs + halfSprintMs,
+                                    windowDurationMs = (slotDurMs - halfSprintMs).coerceAtLeast(8_000L),
+                                    apiKey = cleanKey,
+                                    modelId = cleanModel,
+                                    preferTurboFlash = true,
+                                    targetLangCode = targetLang.code
+                                ).getOrNull()?.cues.orEmpty()
+                                val combined = mergeCuesChronological(slotCues.orEmpty(), hA + hB)
+                                if (combined.isNotEmpty()) slotCues = combined
+                            }
+                            if (slotCues != null) {
                                 completedSlots.add(candidateSlot)
-                                accumulatedCuesBySlot[candidateSlot] = chunk.cues
+                                accumulatedCuesBySlot[candidateSlot] = slotCues
                                 rebuildMergedAiCues()
                             } else {
                                 failedSlotCounts[candidateSlot] = (failedSlotCounts[candidateSlot] ?: 0) + 1
@@ -992,6 +1056,138 @@ class ThaiSubtitleManager(
             currentBadge = "Sub ${targetLang.shortBadge} • Gemini (${primaryThaiCues.size} câu)"
             refreshOverlayAt(currentPositionMs, config)
         }
+    }
+
+    /**
+     * Surgical Gap Repair (Android & Smart TV):
+     * Scans existing local + Cloud cues against 30s HLS windows, skips 100% of already-translated
+     * stretches (0 wasted tokens!), and ONLY translates missing holes!
+     */
+    suspend fun repairMissingAudioSubGaps(
+        movie: MovieItem,
+        episode: Episode,
+        config: SubtitleStyleConfig,
+        geminiApiKey: String,
+        onProgress: (percent: Int, message: String) -> Unit
+    ): Pair<Int, Int> = withContext(Dispatchers.IO) {
+        val targetLang = config.resolvedPrimaryLanguage()
+        val cleanKey = geminiApiKey.trim()
+        val cleanModel = config.geminiModelId.trim().ifBlank { "gemini-2.5-flash" }
+        if (!hasAiAccess(cleanKey)) {
+            onProgress(0, "⚠️ Đăng nhập NKI Cloud hoặc nhập Gemini API Key để dịch bù đoạn thiếu!")
+            return@withContext (0 to 0)
+        }
+        onProgress(5, "🔍 Đang kiểm tra Sub đã lưu & NKI Cloud (${targetLang.shortBadge})...")
+        val localBundle = loadEpisodeSubCache(movie, episode, targetLang.code)
+        val cloudBundle = if (CloudSyncClient.isSignedIn()) {
+            CloudSyncClient.fetchCloudSubtitle(
+                rawMovieSlug = movie.detailLookupId ?: movie.id,
+                rawEpisodeNameOrId = episode.name.ifBlank { episode.id },
+                langCode = targetLang.code
+            )?.takeIf { !CloudSyncClient.hasWrongScriptForLang(it.primaryCues, targetLang.code) }
+        } else null
+
+        var mergedCues = mergeCuesChronological(
+            localBundle?.primaryCues.orEmpty(),
+            cloudBundle?.primaryCues.orEmpty()
+        )
+        val beforeCount = mergedCues.size
+        val timeline = audioSubGenerator.inspectStreamTimeline(episode)
+        if (timeline == null || timeline.totalDurationMs <= 15_000L) {
+            onProgress(0, "⚠️ Luồng này chưa hỗ trợ tách HLS tự động — mở phát trực tiếp để dịch.")
+            return@withContext (beforeCount to 0)
+        }
+
+        val totalMs = timeline.totalDurationMs
+        val sliceMs = 30_000L
+        val sliceCount = ((totalMs + sliceMs - 1L) / sliceMs).toInt().coerceAtLeast(1)
+        val missingSlices = ArrayList<Int>()
+        for (i in 0 until sliceCount) {
+            val sStart = i * sliceMs
+            val sEnd = minOf(totalMs, sStart + sliceMs)
+            val inside = mergedCues.filter { it.endMs >= sStart + 400L && it.startMs <= sEnd - 400L }
+            if (inside.isEmpty()) {
+                missingSlices.add(i)
+            } else if (sEnd - sStart >= 22_000L) {
+                var cursor = sStart
+                var maxHole = 0L
+                for (c in inside) {
+                    val cs = c.startMs.coerceAtLeast(sStart)
+                    val ce = c.endMs.coerceAtMost(sEnd)
+                    if (cs - cursor > maxHole) maxHole = cs - cursor
+                    if (ce > cursor) cursor = ce
+                }
+                if (sEnd - cursor > maxHole) maxHole = sEnd - cursor
+                if (maxHole >= 19_000L) missingSlices.add(i)
+            }
+        }
+
+        if (missingSlices.isEmpty()) {
+            onProgress(100, "✅ Đã kiểm tra xong — Sub ${targetLang.shortBadge} đầy đủ ($beforeCount câu), không có đoạn trống!")
+            return@withContext (beforeCount to 0)
+        }
+
+        onProgress(10, "🔧 Phát hiện ${missingSlices.size}/$sliceCount đoạn trống — chỉ dịch bù các đoạn thiếu...")
+        val cacheNamespace = "${episode.streamUrl.hashCode().toUInt().toString(16)}_${targetLang.code}_gap"
+        val doneRanges = ArrayList<Pair<Long, Long>>()
+        localBundle?.translatedRanges?.let { doneRanges.addAll(it) }
+        cloudBundle?.translatedRanges?.let { doneRanges.addAll(it) }
+
+        var processed = 0
+        for (sliceIdx in missingSlices) {
+            val sStart = (sliceIdx * sliceMs - 3_000L).coerceAtLeast(0L)
+            val sDur = minOf(sliceMs + 3_000L, totalMs - sStart).coerceAtLeast(6_000L)
+            val res = audioSubGenerator.generateThaiCuesForWindow(
+                cacheNamespace = cacheNamespace,
+                timeline = timeline,
+                windowStartMs = sStart,
+                windowDurationMs = sDur,
+                apiKey = cleanKey,
+                modelId = cleanModel,
+                preferTurboFlash = true,
+                targetLangCode = targetLang.code
+            ).getOrNull()
+            processed++
+            if (res != null && res.cues.isNotEmpty() && !CloudSyncClient.hasWrongScriptForLang(res.cues, targetLang.code)) {
+                mergedCues = mergeCuesChronological(mergedCues, res.cues)
+            }
+            doneRanges.add(sStart to (sStart + sDur))
+            val pct = (12 + (processed * 85) / missingSlices.size).coerceIn(12, 97)
+            val addedNow = (mergedCues.size - beforeCount).coerceAtLeast(0)
+            onProgress(pct, "🔧 Đang dịch bù $processed/${missingSlices.size} (+$addedNow câu mới • Tổng ${mergedCues.size} câu)")
+        }
+
+        val netAdded = (mergedCues.size - beforeCount).coerceAtLeast(0)
+        if (mergedCues.size >= 3) {
+            val finalRanges = CloudSyncClient.mergeTimeRanges(doneRanges + listOf(0L to totalMs))
+            val repairedBundle = SavedEpisodeSubtitleBundle(
+                movieId = movie.id,
+                episodeId = episode.id,
+                primaryLangCode = targetLang.code,
+                secondaryLangCode = config.resolvedSecondaryLangCode(),
+                sourceLangCode = "auto",
+                sourcePlatform = "🎙 AI Audio (Đã vá đoạn thiếu)",
+                isAiAudio = true,
+                completedAudioSlots = (0 until ((totalMs + 59_999L) / 60_000L).toInt()).toSet(),
+                translatedCueIds = mergedCues.mapTo(HashSet()) { it.id },
+                sourceCues = mergedCues,
+                primaryCues = mergedCues,
+                secondaryCues = localBundle?.secondaryCues.orEmpty(),
+                isFullyTranslated = true,
+                savedAtMs = System.currentTimeMillis(),
+                translatedRanges = finalRanges,
+                audioTranslatedUntilMs = totalMs,
+                totalDurationMs = totalMs
+            )
+            saveEpisodeSubCache(movie, episode, repairedBundle, uploadToCloud = true)
+        }
+        val msg = if (netAdded > 0) {
+            "✅ Đã dịch bù thêm +$netAdded câu vào ${missingSlices.size} đoạn thiếu (Tổng ${mergedCues.size} câu • Đã lưu Cloud)!"
+        } else {
+            "✅ Đã kiểm tra xong ${missingSlices.size} đoạn trống (nhạc/im lặng • Tổng ${mergedCues.size} câu)!"
+        }
+        onProgress(100, msg)
+        mergedCues.size to netAdded
     }
 
     private fun formatSlotRange(slotIndex: Int, slotSizeMs: Long): String {
@@ -2215,6 +2411,8 @@ class ThaiSubtitleManager(
         activeIsFullyTranslated = cached.isFullyTranslated
         activeIsAiAudio = cached.isAiAudio
         activeCompletedAudioSlots = cached.completedAudioSlots
+        activeTranslatedRanges = cached.translatedRanges
+        activeTotalDurationMs = cached.totalDurationMs
 
         sourceCues = cached.sourceCues.ifEmpty { cached.primaryCues }
         primaryThaiCues = cached.primaryCues
@@ -2304,12 +2502,30 @@ class ThaiSubtitleManager(
                 geminiApiKey = geminiApiKey,
                 preloadedSlots = cached.completedAudioSlots,
                 preloadedCues = cached.primaryCues,
+                preloadedRanges = cached.translatedRanges,
                 onReadyToPlay = null
             )
         }
     }
 
     private fun episodeSubCacheFile(movie: MovieItem, episode: Episode, primaryLangCode: String): File? {
+        val dir = episodeSubCacheDir ?: return null
+        val mId = CloudSyncClient.normalizeMovieSlug(movie.detailLookupId ?: movie.id)
+        val epKey = CloudSyncClient.normalizeEpisodeKey(episode.name.ifBlank { episode.id })
+        val streamPart = if (mId.isBlank() || mId in setOf("unknown", "direct", "local", "external", "custom")) {
+            episode.streamUrl.substringBefore('?').trim().lowercase()
+        } else {
+            ""
+        }
+        val rawKey = "$mId|$epKey|$streamPart|${primaryLangCode.trim().lowercase()}"
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(rawKey.toByteArray(Charsets.UTF_8))
+            .take(12)
+            .joinToString("") { "%02x".format(it) }
+        return File(dir, "ep_$digest.json")
+    }
+
+    private fun legacyEpisodeSubCacheFile(movie: MovieItem, episode: Episode, primaryLangCode: String): File? {
         val dir = episodeSubCacheDir ?: return null
         val mId = movie.id.trim().lowercase()
         val epId = episode.id.trim().lowercase()
@@ -2327,16 +2543,122 @@ class ThaiSubtitleManager(
         return File(dir, "ep_$digest.json")
     }
 
+    private fun reconstructCompletedSlots(
+        preloadedSlots: Set<Int>,
+        preloadedRanges: List<Pair<Long, Long>>,
+        preloadedCues: List<SubtitleCue>,
+        totalSlots: Int,
+        slotSizeMs: Long
+    ): Set<Int> {
+        val out = HashSet<Int>()
+        // 1. Reconstruct from exact millisecond time-ranges (bridges Web 38s windows -> Android 60s slots cleanly!)
+        val mergedRanges = CloudSyncClient.mergeTimeRanges(preloadedRanges)
+        if (mergedRanges.isNotEmpty()) {
+            for (slotIdx in 0 until totalSlots) {
+                val sStart = slotIdx * slotSizeMs
+                val sEnd = sStart + slotSizeMs
+                var overlap = 0L
+                for ((rs, re) in mergedRanges) {
+                    if (re <= sStart) continue
+                    if (rs >= sEnd) break
+                    overlap += (minOf(sEnd, re) - maxOf(sStart, rs)).coerceAtLeast(0L)
+                }
+                if (overlap >= (slotSizeMs * 55L) / 100L) {
+                    out.add(slotIdx)
+                }
+            }
+        }
+        // 2. Include Android's native 60s slot indices ONLY if ranges were empty (avoid confusing Web 38s indices!)
+        if (mergedRanges.isEmpty()) {
+            for (slotIdx in preloadedSlots) {
+                if (slotIdx in 0 until totalSlots) out.add(slotIdx)
+            }
+        }
+        // 3. Reconstruct from actual cue timestamps so minutes already translated on Web are NEVER re-translated!
+        if (preloadedCues.isNotEmpty()) {
+            for (slotIdx in 0 until totalSlots) {
+                if (slotIdx in out) continue
+                val innerStart = slotIdx * slotSizeMs + 2_000L
+                val innerEnd = (slotIdx + 1) * slotSizeMs - 2_000L
+                val hasCueInside = preloadedCues.any { c ->
+                    val mid = (c.startMs + c.endMs.coerceAtLeast(c.startMs)) / 2L
+                    mid in innerStart..innerEnd
+                }
+                if (hasCueInside) out.add(slotIdx)
+            }
+        }
+        return out
+    }
+
+    private fun mergeCuesChronological(a: List<SubtitleCue>, b: List<SubtitleCue>): List<SubtitleCue> {
+        val combined = (a + b)
+            .filter { it.text.isNotBlank() }
+            .sortedBy { it.startMs }
+        val out = ArrayList<SubtitleCue>(combined.size)
+        for (c in combined) {
+            val prev = out.lastOrNull()
+            if (prev != null && kotlin.math.abs(prev.startMs - c.startMs) < 900L && prev.text == c.text) continue
+            out.add(
+                SubtitleCue(
+                    id = out.size + 1,
+                    startMs = c.startMs.coerceAtLeast(0L),
+                    endMs = c.endMs.coerceAtLeast(c.startMs + 450L),
+                    text = c.text.trim()
+                )
+            )
+        }
+        return out
+    }
+
+    private fun mergeSubtitleBundlesMonotonic(
+        existing: SavedEpisodeSubtitleBundle,
+        incoming: SavedEpisodeSubtitleBundle
+    ): SavedEpisodeSubtitleBundle {
+        val isAudio = existing.isAiAudio || incoming.isAiAudio
+        if (isAudio) {
+            val mergedPrimary = mergeCuesChronological(existing.primaryCues, incoming.primaryCues)
+            val mergedSource = mergeCuesChronological(existing.sourceCues, incoming.sourceCues).ifEmpty { mergedPrimary }
+            val mergedRanges = CloudSyncClient.mergeTimeRanges(existing.translatedRanges + incoming.translatedRanges)
+            val maxRangeEnd = mergedRanges.lastOrNull()?.second ?: 0L
+            val maxCueEnd = mergedPrimary.lastOrNull()?.endMs ?: 0L
+            return existing.copy(
+                sourcePlatform = incoming.sourcePlatform.ifBlank { existing.sourcePlatform },
+                isAiAudio = true,
+                completedAudioSlots = existing.completedAudioSlots + incoming.completedAudioSlots,
+                translatedCueIds = mergedPrimary.mapTo(HashSet()) { it.id },
+                sourceCues = mergedSource,
+                primaryCues = mergedPrimary,
+                secondaryCues = incoming.secondaryCues.ifEmpty { existing.secondaryCues },
+                isFullyTranslated = existing.isFullyTranslated || incoming.isFullyTranslated,
+                savedAtMs = maxOf(existing.savedAtMs, incoming.savedAtMs),
+                translatedRanges = mergedRanges,
+                audioTranslatedUntilMs = maxOf(existing.audioTranslatedUntilMs, incoming.audioTranslatedUntilMs, maxRangeEnd, maxCueEnd),
+                totalDurationMs = maxOf(existing.totalDurationMs, incoming.totalDurationMs)
+            )
+        }
+        if (existing.isFullyTranslated && !incoming.isFullyTranslated && incoming.primaryCues.size <= existing.primaryCues.size) {
+            return existing
+        }
+        return if (incoming.primaryCues.size >= existing.primaryCues.size || incoming.isFullyTranslated) incoming else existing
+    }
+
     private fun persistActiveEpisodeSubtitleCacheAsync(config: SubtitleStyleConfig) {
         val movie = activeMovieRef ?: return
         val episode = activeEpisodeRef ?: return
         val prim = primaryThaiCues
         if (prim.size < 3 || episodeSubCacheDir == null) return
+        val langCode = activePrimaryLangCode.ifBlank { config.resolvedPrimaryLanguage().code }
+        if (CloudSyncClient.hasWrongScriptForLang(prim, langCode)) return
 
+        val ranges = CloudSyncClient.mergeTimeRanges(activeTranslatedRanges)
+        val audioUntil = maxOf(
+            ranges.lastOrNull()?.second ?: 0L,
+            if (activeIsAiAudio) (prim.lastOrNull()?.endMs ?: 0L) else 0L
+        )
         val bundle = SavedEpisodeSubtitleBundle(
             movieId = movie.id,
             episodeId = episode.id,
-            primaryLangCode = activePrimaryLangCode.ifBlank { config.resolvedPrimaryLanguage().code },
+            primaryLangCode = langCode,
             secondaryLangCode = activeSecondaryLangCode.ifBlank { config.resolvedSecondaryLangCode() },
             sourceLangCode = activeSourceLangCode,
             sourcePlatform = activeSourcePlatform,
@@ -2347,7 +2669,10 @@ class ThaiSubtitleManager(
             primaryCues = prim,
             secondaryCues = secondaryCues,
             isFullyTranslated = activeIsFullyTranslated,
-            savedAtMs = System.currentTimeMillis()
+            savedAtMs = System.currentTimeMillis(),
+            translatedRanges = ranges,
+            audioTranslatedUntilMs = audioUntil,
+            totalDurationMs = activeTotalDurationMs
         )
         scope.launch(Dispatchers.IO) {
             saveEpisodeSubCache(movie, episode, bundle, uploadToCloud = true)
@@ -2360,32 +2685,44 @@ class ThaiSubtitleManager(
         bundle: SavedEpisodeSubtitleBundle,
         uploadToCloud: Boolean = false
     ): Boolean {
+        if (CloudSyncClient.hasWrongScriptForLang(bundle.primaryCues, bundle.primaryLangCode)) return false
         val targetFile = episodeSubCacheFile(movie, episode, bundle.primaryLangCode) ?: return false
+        var finalBundle = bundle
         val savedLocal = runCatching {
             synchronized(episodeCacheLock) {
                 targetFile.parentFile?.mkdirs()
+                // Monotonic merge with existing valid local file so progress NEVER shrinks!
+                val existing = readBundleFromFile(targetFile, movie, episode, bundle.primaryLangCode)
+                if (existing != null) {
+                    finalBundle = mergeSubtitleBundlesMonotonic(existing, bundle)
+                }
                 val root = JSONObject().apply {
-                    put("v", 1)
-                    put("movieId", bundle.movieId)
-                    put("episodeId", bundle.episodeId)
-                    put("primaryLangCode", bundle.primaryLangCode)
-                    put("secondaryLangCode", bundle.secondaryLangCode)
-                    put("sourceLangCode", bundle.sourceLangCode)
-                    put("sourcePlatform", bundle.sourcePlatform)
-                    put("isAiAudio", bundle.isAiAudio)
-                    put("isFullyTranslated", bundle.isFullyTranslated)
-                    put("savedAtMs", bundle.savedAtMs)
+                    put("v", 2)
+                    put("movieId", finalBundle.movieId)
+                    put("episodeId", finalBundle.episodeId)
+                    put("primaryLangCode", finalBundle.primaryLangCode)
+                    put("secondaryLangCode", finalBundle.secondaryLangCode)
+                    put("sourceLangCode", finalBundle.sourceLangCode)
+                    put("sourcePlatform", finalBundle.sourcePlatform)
+                    put("isAiAudio", finalBundle.isAiAudio)
+                    put("isFullyTranslated", finalBundle.isFullyTranslated)
+                    put("savedAtMs", finalBundle.savedAtMs)
+                    put("audioTranslatedUntilMs", finalBundle.audioTranslatedUntilMs)
+                    put("totalDurationMs", finalBundle.totalDurationMs)
                     put("completedAudioSlots", JSONArray().apply {
-                        bundle.completedAudioSlots.sorted().forEach { put(it) }
+                        finalBundle.completedAudioSlots.sorted().forEach { put(it) }
+                    })
+                    put("translatedRanges", JSONArray().apply {
+                        finalBundle.translatedRanges.forEach { (s, e) -> put(JSONArray().put(s).put(e)) }
                     })
                     put("translatedCueIds", JSONArray().apply {
-                        if (!bundle.isFullyTranslated) {
-                            bundle.translatedCueIds.forEach { put(it) }
+                        if (!finalBundle.isFullyTranslated) {
+                            finalBundle.translatedCueIds.forEach { put(it) }
                         }
                     })
-                    put("sourceCues", encodeCueListJson(bundle.sourceCues))
-                    put("primaryCues", encodeCueListJson(bundle.primaryCues))
-                    put("secondaryCues", encodeCueListJson(bundle.secondaryCues))
+                    put("sourceCues", encodeCueListJson(finalBundle.sourceCues))
+                    put("primaryCues", encodeCueListJson(finalBundle.primaryCues))
+                    put("secondaryCues", encodeCueListJson(finalBundle.secondaryCues))
                 }
                 val tmp = File(targetFile.parentFile, "${targetFile.name}.tmp")
                 tmp.writeText(root.toString(), Charsets.UTF_8)
@@ -2398,24 +2735,27 @@ class ThaiSubtitleManager(
             true
         }.getOrDefault(false)
 
-        if (uploadToCloud && CloudSyncClient.isSignedIn() && bundle.primaryCues.size >= 3) {
+        if (uploadToCloud && CloudSyncClient.isSignedIn() && finalBundle.primaryCues.size >= 3) {
             val now = System.currentTimeMillis()
-            if (bundle.isFullyTranslated || now - lastCloudSubtitleUploadMs >= 25_000L) {
+            if (finalBundle.isFullyTranslated || now - lastCloudSubtitleUploadMs >= 22_000L) {
                 lastCloudSubtitleUploadMs = now
                 scope.launch(Dispatchers.IO) {
                     CloudSyncClient.uploadCloudSubtitle(
                         rawMovieSlug = movie.detailLookupId ?: movie.id,
                         rawEpisodeNameOrId = episode.name.ifBlank { episode.id },
-                        primaryLangCode = bundle.primaryLangCode,
-                        secondaryLangCode = bundle.secondaryLangCode,
-                        sourceLangCode = bundle.sourceLangCode,
-                        sourcePlatform = bundle.sourcePlatform.ifBlank { "NKI Android" },
-                        isAiAudio = bundle.isAiAudio,
-                        isFullyTranslated = bundle.isFullyTranslated,
-                        completedAudioSlots = bundle.completedAudioSlots,
-                        sourceCues = bundle.sourceCues,
-                        primaryCues = bundle.primaryCues,
-                        secondaryCues = bundle.secondaryCues
+                        primaryLangCode = finalBundle.primaryLangCode,
+                        secondaryLangCode = finalBundle.secondaryLangCode,
+                        sourceLangCode = finalBundle.sourceLangCode,
+                        sourcePlatform = finalBundle.sourcePlatform.ifBlank { "NKI Android" },
+                        isAiAudio = finalBundle.isAiAudio,
+                        isFullyTranslated = finalBundle.isFullyTranslated,
+                        completedAudioSlots = finalBundle.completedAudioSlots,
+                        sourceCues = finalBundle.sourceCues,
+                        primaryCues = finalBundle.primaryCues,
+                        secondaryCues = finalBundle.secondaryCues,
+                        translatedRanges = finalBundle.translatedRanges,
+                        audioTranslatedUntilMs = finalBundle.audioTranslatedUntilMs,
+                        totalDurationMs = finalBundle.totalDurationMs
                     )
                 }
             }
@@ -2423,18 +2763,24 @@ class ThaiSubtitleManager(
         return savedLocal
     }
 
-    internal fun loadEpisodeSubCache(
+    private fun readBundleFromFile(
+        file: File,
         movie: MovieItem,
         episode: Episode,
         primaryLangCode: String
     ): SavedEpisodeSubtitleBundle? {
-        val targetFile = episodeSubCacheFile(movie, episode, primaryLangCode) ?: return null
-        if (!targetFile.exists() || targetFile.length() < 20L) return null
+        if (!file.exists() || file.length() < 20L) return null
         return runCatching {
-            val raw = synchronized(episodeCacheLock) { targetFile.readText(Charsets.UTF_8) }
+            val raw = file.readText(Charsets.UTF_8)
             val obj = JSONObject(raw)
             val primary = decodeCueListJson(obj.optJSONArray("primaryCues"))
             if (primary.isEmpty()) return null
+            val resolvedLang = obj.optString("primaryLangCode", primaryLangCode)
+            // Self-heal poisoned local cache (e.g. Chinese Hanzi saved under Vietnamese `vi`)!
+            if (CloudSyncClient.hasWrongScriptForLang(primary, resolvedLang)) {
+                runCatching { file.delete() }
+                return null
+            }
             val source = decodeCueListJson(obj.optJSONArray("sourceCues")).ifEmpty { primary }
             val secondary = decodeCueListJson(obj.optJSONArray("secondaryCues"))
             val isFull = obj.optBoolean("isFullyTranslated", true)
@@ -2442,6 +2788,7 @@ class ThaiSubtitleManager(
             obj.optJSONArray("completedAudioSlots")?.let { arr ->
                 for (i in 0 until arr.length()) slots.add(arr.optInt(i))
             }
+            val ranges = CloudSyncClient.decodeTimeRanges(obj.optJSONArray("translatedRanges"))
             val transIds = if (isFull) {
                 primary.mapTo(HashSet()) { it.id }
             } else {
@@ -2454,7 +2801,7 @@ class ThaiSubtitleManager(
             SavedEpisodeSubtitleBundle(
                 movieId = obj.optString("movieId", movie.id),
                 episodeId = obj.optString("episodeId", episode.id),
-                primaryLangCode = obj.optString("primaryLangCode", primaryLangCode),
+                primaryLangCode = resolvedLang,
                 secondaryLangCode = obj.optString("secondaryLangCode", ""),
                 sourceLangCode = obj.optString("sourceLangCode", "auto"),
                 sourcePlatform = obj.optString("sourcePlatform", "Đã lưu"),
@@ -2465,7 +2812,57 @@ class ThaiSubtitleManager(
                 primaryCues = primary,
                 secondaryCues = secondary,
                 isFullyTranslated = isFull,
-                savedAtMs = obj.optLong("savedAtMs", 0L)
+                savedAtMs = obj.optLong("savedAtMs", 0L),
+                translatedRanges = ranges,
+                audioTranslatedUntilMs = obj.optLong("audioTranslatedUntilMs", ranges.lastOrNull()?.second ?: 0L),
+                totalDurationMs = obj.optLong("totalDurationMs", 0L)
+            )
+        }.getOrNull()
+    }
+
+    internal fun loadEpisodeSubCache(
+        movie: MovieItem,
+        episode: Episode,
+        primaryLangCode: String
+    ): SavedEpisodeSubtitleBundle? {
+        val canonicalFile = episodeSubCacheFile(movie, episode, primaryLangCode)
+        val legacyFile = legacyEpisodeSubCacheFile(movie, episode, primaryLangCode)
+        val found = synchronized(episodeCacheLock) {
+            canonicalFile?.let { readBundleFromFile(it, movie, episode, primaryLangCode) }
+                ?: legacyFile?.takeIf { it.absolutePath != canonicalFile?.absolutePath }
+                    ?.let { readBundleFromFile(it, movie, episode, primaryLangCode) }
+        }
+        if (found != null) return found
+
+        // Offline Download Subtitle Fallback (works 100% in Airplane Mode!)
+        val root = persistentRoot ?: return null
+        val slug = CloudSyncClient.normalizeMovieSlug(movie.detailLookupId ?: movie.id)
+        val epKey = CloudSyncClient.normalizeEpisodeKey(episode.name.ifBlank { episode.id })
+        val offlineCandidates = listOfNotNull(
+            File(File(root.parentFile ?: root, "chillfilm_offline_subs"), "${slug}__${epKey}.json"),
+            File(File(root, "chillfilm_offline_subs"), "${slug}__${epKey}.json")
+        )
+        val offlineFile = offlineCandidates.firstOrNull { it.exists() && it.length() >= 12L } ?: return null
+        return runCatching {
+            val obj = JSONObject(offlineFile.readText(Charsets.UTF_8))
+            val lang = obj.optString("lang", primaryLangCode)
+            val cues = decodeCueListJson(obj.optJSONArray("cues"))
+            if (cues.size < 3 || CloudSyncClient.hasWrongScriptForLang(cues, lang)) return@runCatching null
+            SavedEpisodeSubtitleBundle(
+                movieId = movie.id,
+                episodeId = episode.id,
+                primaryLangCode = lang,
+                secondaryLangCode = "",
+                sourceLangCode = "auto",
+                sourcePlatform = "📥 Offline AI Sub",
+                isAiAudio = false,
+                completedAudioSlots = emptySet(),
+                translatedCueIds = cues.mapTo(HashSet()) { it.id },
+                sourceCues = cues,
+                primaryCues = cues,
+                secondaryCues = emptyList(),
+                isFullyTranslated = true,
+                savedAtMs = offlineFile.lastModified()
             )
         }.getOrNull()
     }

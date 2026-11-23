@@ -30,10 +30,12 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import com.phyll.filmhub.ui.AppScreen
 import com.phyll.filmhub.ui.MainViewModel
+import com.phyll.filmhub.ui.components.WatchPartyHubDialog
 import com.phyll.filmhub.ui.i18n.AppStrings
 import com.phyll.filmhub.ui.i18n.LocalAppStrings
 import com.phyll.filmhub.ui.screens.CompanionQrDialog
 import com.phyll.filmhub.ui.screens.DetailScreen
+import com.phyll.filmhub.ui.screens.DownloadsScreen
 import com.phyll.filmhub.ui.screens.HomeScreen
 import com.phyll.filmhub.ui.screens.PlayerScreen
 import com.phyll.filmhub.ui.screens.SettingsSourcesScreen
@@ -106,6 +108,9 @@ class MainActivity : ComponentActivity() {
             val remoteTvState by viewModel.remoteTvState.collectAsState()
             val tvScreenFrameBytes by viewModel.tvScreenFrameBytes.collectAsState()
             val appUpdateState by viewModel.appUpdateState.collectAsState()
+            val offlineDownloads by viewModel.offlineDownloads.collectAsState()
+            val watchPartyState by viewModel.watchPartyState.collectAsState()
+            val watchPartySyncCommand by viewModel.watchPartySyncCommand.collectAsState()
             val isTvHardware = viewModel.isTvHardware
             val selectedTvDevice = managedTvDevices.firstOrNull { it.ip == selectedTvIp }
             val isPlayerFullscreenActive = activePlaybackSession != null && !isPlayerMinimized
@@ -115,6 +120,10 @@ class MainActivity : ComponentActivity() {
                     delay(3_500L)
                     viewModel.dismissBanner()
                 }
+            }
+
+            BackHandler(enabled = watchPartyState.showHubDialog) {
+                viewModel.dismissWatchPartyHub()
             }
 
             BackHandler(enabled = showQrDialog) {
@@ -147,6 +156,8 @@ class MainActivity : ComponentActivity() {
                                 sections = sections,
                                 watchHistory = watchHistory,
                                 myList = myList,
+                                downloadsCount = offlineDownloads.size,
+                                isInWatchParty = watchPartyState.isInRoom,
                                 isLoading = isLoadingCatalog,
                                 searchQuery = searchQuery,
                                 searchResults = searchResults,
@@ -169,6 +180,10 @@ class MainActivity : ComponentActivity() {
                                 onQuickPlayMovie = viewModel::quickPlayMovie,
                                 onResumeHistory = viewModel::resumeFromWatchHistory,
                                 onRemoveContinueWatching = viewModel::removeContinueWatchingItem,
+                                onRemoveMyListItem = viewModel::removeMyListItem,
+                                onRefreshMyListFromCloud = { viewModel.pullCloudState(silent = true, force = true) },
+                                onOpenDownloads = viewModel::openDownloads,
+                                onOpenWatchParty = { viewModel.openWatchPartyHub(initialTab = 0) },
                                 onToggleControlTargetMode = viewModel::toggleControlTargetMode,
                                 onOpenTvManager = viewModel::openTvManager,
                                 onOpenQrCompanion = { viewModel.setQrDialogVisible(true) },
@@ -187,20 +202,42 @@ class MainActivity : ComponentActivity() {
                             DetailScreen(
                                 movie = screen.movie,
                                 isResolving = screen.isResolving,
-                                isFavorite = favoriteIds.contains(screen.movie.id),
+                                isFavorite = (myList.isNotEmpty() || favoriteIds.isNotEmpty()) && viewModel.prefs.isMovieInMyList(screen.movie),
                                 isTvHardware = isTvHardware,
                                 controlTargetMode = controlTargetMode,
                                 selectedTvName = selectedTvDevice?.displayTitle.orEmpty(),
                                 savedWatchProgress = watchHistory.firstOrNull { it.movieId == screen.movie.id }
                                     ?: viewModel.prefs.getLatestMovieWatchProgress(screen.movie.id),
                                 detailSubState = detailSubState,
+                                offlineDownloads = offlineDownloads,
                                 isEpisodeWatched = { ep -> viewModel.prefs.isEpisodeWatched(screen.movie.id, ep.id) },
                                 onPreTranslateEpisode = { ep -> viewModel.preTranslateDetailEpisode(screen.movie, ep) },
+                                onRepairSubGaps = { ep -> viewModel.repairDetailEpisodeSubGaps(screen.movie, ep) },
+                                onDownloadEpisode = { ep -> viewModel.downloadEpisodeOffline(screen.movie, ep) },
+                                onPauseDownload = viewModel::pauseOfflineDownload,
+                                onResumeDownload = viewModel::resumeOfflineDownload,
+                                onOpenDownloads = viewModel::openDownloads,
+                                onExportSrt = { ep -> viewModel.exportEpisodeSrt(screen.movie, ep) },
+                                onStartWatchParty = { ep ->
+                                    viewModel.openWatchPartyHub(initialTab = 2, movie = screen.movie, episode = ep)
+                                },
                                 onPlayEpisode = { ep -> viewModel.startTargetAwarePlayback(screen.movie, ep) },
                                 onPlayOnPhone = { ep -> viewModel.startPlayback(screen.movie, ep) },
                                 onPlayOnTv = { ep -> viewModel.playMovieOnSelectedTv(screen.movie, ep) },
                                 onToggleFavorite = { viewModel.toggleMyList(screen.movie) },
                                 onOpenQrCompanion = { viewModel.setQrDialogVisible(true) },
+                                onBack = { viewModel.navigateBack() }
+                            )
+                        }
+
+                        is AppScreen.Downloads -> {
+                            DownloadsScreen(
+                                downloads = offlineDownloads,
+                                onPlayOffline = viewModel::playOfflineDownload,
+                                onPause = viewModel::pauseOfflineDownload,
+                                onResume = viewModel::resumeOfflineDownload,
+                                onExportSrt = viewModel::exportOfflineRecordSrt,
+                                onDelete = viewModel::deleteOfflineDownload,
                                 onBack = { viewModel.navigateBack() }
                             )
                         }
@@ -341,11 +378,37 @@ class MainActivity : ComponentActivity() {
                             isTvHardware = isTvHardware,
                             isMinimized = isPlayerMinimized,
                             skipIntroSec = skipIntroSec,
+                            watchPartyState = watchPartyState,
+                            watchPartySyncCommand = watchPartySyncCommand,
                             modifier = if (isPlayerMinimized) {
                                 Modifier.align(Alignment.BottomEnd)
                             } else {
                                 Modifier.fillMaxSize()
                             },
+                            onConsumeWatchPartySync = viewModel::consumeWatchPartySyncCommand,
+                            onReportPlayerToParty = viewModel::reportLocalPlayerToParty,
+                            onUpdatePartySyncBadge = viewModel::updatePartySyncBadge,
+                            onOpenWatchPartyHub = {
+                                viewModel.openWatchPartyHub(
+                                    initialTab = 2,
+                                    movie = session.movie,
+                                    episode = session.episode
+                                )
+                            },
+                            onTogglePartyPanel = viewModel::togglePartyPanel,
+                            onForcePartyResync = viewModel::forcePartyResync,
+                            onSendPartyChat = viewModel::sendPartyChat,
+                            onSendPartyReaction = viewModel::sendPartyReaction,
+                            onStartPartyCountdown = viewModel::startPartyCountdown,
+                            onTogglePartyControlMode = viewModel::togglePartyControlMode,
+                            onTogglePartyVisibility = viewModel::togglePartyVisibility,
+                            onClaimPartyHost = viewModel::claimPartyHost,
+                            onQueueSearch = viewModel::partyQuickSearch,
+                            onQueueAddMovie = viewModel::partyAddMovieToQueue,
+                            onQueueVote = viewModel::partyVoteQueue,
+                            onQueuePlay = viewModel::partyPlayQueueItem,
+                            onQueueRemove = viewModel::partyRemoveQueueItem,
+                            onLeaveWatchParty = { viewModel.leaveWatchParty(silent = false) },
                             onSaveGeminiKeyInline = { key, modelId ->
                                 viewModel.setSessionGeminiCredentials(key, modelId)
                             },
@@ -376,6 +439,21 @@ class MainActivity : ComponentActivity() {
                             onMinimizePlayer = viewModel::minimizePlayer,
                             onRestorePlayer = viewModel::restoreMinimizedPlayer,
                             onExitPlayer = viewModel::closePlayerSession
+                        )
+                    }
+
+                    if (watchPartyState.showHubDialog) {
+                        WatchPartyHubDialog(
+                            state = watchPartyState,
+                            defaultNickname = cloudSession?.displayName?.takeIf { it.isNotBlank() }
+                                ?: cloudSession?.username?.takeIf { it.isNotBlank() }
+                                ?: if (isTvHardware) "Smart TV" else "ChillFan",
+                            onDismiss = viewModel::dismissWatchPartyHub,
+                            onRefreshLobby = viewModel::refreshPartyLobby,
+                            onJoinRoom = viewModel::joinWatchParty,
+                            onCreateRoom = viewModel::createWatchParty,
+                            onQuickSearchMovies = viewModel::partyQuickSearch,
+                            onPickMovieForCreate = viewModel::pickMovieForPartyCreate
                         )
                     }
 

@@ -1,6 +1,6 @@
 {
-  "versionName": "3.4.1",
-  "versionCode": 117,
+  "versionName": "3.5.0",
+  "versionCode": 350,
   "downloadUrl": "https://github.com/PrimiasArt/Chillfilm.net/releases/download/android-apk-latest/ChillFilm-latest.apk",
-  "releaseNotes": "ChillFilm 3.4.1 Turbo Speed Update: 1-Query Cold Start DB Guard (30x faster), CDN Caching on All Movie Details/Glossary/AI Search, Instant RAM Detail & Category Caching, Fast Suggest Mode & Deferred Scrub Bandwidth Optimization"
+  "releaseNotes": "ChillFilm 3.5.0 Complete Android & Smart TV Edition: Watch Party 2.0 (Public Lobby, Soft-Sync, 3-2-1 Countdown, Emoji Reactions, Up Next Queue & QR Invite), Offline Video + AI Subtitles Download (Media3 HLS + Airplane Mode + 1-Tap .SRT Export), Bulletproof Web ↔ Android AI Sub Sync & Wrong-Script Guard, Authoritative 2-Way My List Modal with Instant Delete"
 }

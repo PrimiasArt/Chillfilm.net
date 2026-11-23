@@ -8,6 +8,14 @@ import androidx.lifecycle.viewModelScope
 import com.phyll.filmhub.cloud.AdminVaultSnapshot
 import com.phyll.filmhub.cloud.CloudHealthInfo
 import com.phyll.filmhub.cloud.CloudSyncClient
+import com.phyll.filmhub.cloud.PartyPasscodeRequiredException
+import com.phyll.filmhub.cloud.WatchPartyEpisodeMeta
+import com.phyll.filmhub.cloud.WatchPartyMovieMeta
+import com.phyll.filmhub.offline.OfflineDownloadManager
+import com.phyll.filmhub.offline.OfflineEpisodeRecord
+import com.phyll.filmhub.subtitle.ThaiSubtitleManager
+import com.phyll.filmhub.ui.components.WatchPartySyncCommand
+import com.phyll.filmhub.ui.components.WatchPartyUiState
 import com.phyll.filmhub.companion.CompanionEvent
 import com.phyll.filmhub.companion.CompanionHttpServer
 import com.phyll.filmhub.companion.CompanionPlayerTelemetry
@@ -85,6 +93,7 @@ sealed class AppScreen {
     ) : AppScreen()
     data object SettingsSources : AppScreen()
     data object TvManager : AppScreen()
+    data object Downloads : AppScreen()
 }
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -104,6 +113,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     @Volatile
     private var lastRemoteSubStyleEditMs: Long = 0L
+
+    val offlineDownloads: StateFlow<List<OfflineEpisodeRecord>> = OfflineDownloadManager.downloads
+
+    private val _watchPartyState = MutableStateFlow(WatchPartyUiState())
+    val watchPartyState: StateFlow<WatchPartyUiState> = _watchPartyState.asStateFlow()
+
+    private val _watchPartySyncCommand = MutableStateFlow<WatchPartySyncCommand?>(null)
+    val watchPartySyncCommand: StateFlow<WatchPartySyncCommand?> = _watchPartySyncCommand.asStateFlow()
+
+    private var partyPollJob: Job? = null
+    @Volatile private var partyLastMsgId: Long = 0L
+    @Volatile private var partyLastReactionTs: Long = 0L
+    @Volatile private var partyLastStateUpdatedAt: Long = 0L
+    @Volatile private var partyLastActionAt: Long = 0L
+    @Volatile private var partyLastMovieKey: String = ""
+    @Volatile private var partyLastReportedPosSec: Int = 0
+    @Volatile private var partyLastReportedStatus: String = "playing"
 
     private val _currentScreen = MutableStateFlow<AppScreen>(AppScreen.Home)
     val currentScreen: StateFlow<AppScreen> = _currentScreen.asStateFlow()
@@ -224,6 +250,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
 
     init {
+        OfflineDownloadManager.ensureInitialized(application)
         _companionLanUrl.value = companionServer.start()
         if (prefs.isTvHardware && prefs.promptQrOnStartup.value && prefs.geminiApiKey.value.isBlank()) {
             _showQrCompanionDialog.value = true
@@ -304,7 +331,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     prefs.saveCloudSession(session)
                     val roleTag = if (session.role == "ADMIN") "👑 ADMIN" else "☁️ Member"
                     showBanner("$roleTag @${session.username} created & synced!")
-                    pullCloudState(silent = true, force = true)
+                    pullCloudState(silent = true, force = true, migrateLocalOnRegister = true)
                     refreshGeminiModelsFromApi(silent = true)
                     if (session.role == "ADMIN") {
                         loadAdminVault()
@@ -364,7 +391,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         showBanner("Signed out of NKI Cloud")
     }
 
-    fun pullCloudState(silent: Boolean = true, force: Boolean = false) {
+    fun pullCloudState(
+        silent: Boolean = true,
+        force: Boolean = false,
+        migrateLocalOnRegister: Boolean = false
+    ) {
         if (!CloudSyncClient.isSignedIn()) return
         val now = System.currentTimeMillis()
         if (!force && now - lastCloudPullMs < 15_000L) return
@@ -378,7 +409,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             CloudSyncClient.pullState()
                 .onSuccess { res ->
                     prefs.mergeCloudWatchProgress(res.watchProgress)
-                    val localOnlyMyList = prefs.mergeCloudMyList(res.myList)
+                    val localOnlyMyList = prefs.mergeCloudMyList(res.myList, migrateLocalOnRegister = migrateLocalOnRegister)
                     if (localOnlyMyList.isNotEmpty()) {
                         viewModelScope.launch(Dispatchers.IO) {
                             CloudSyncClient.pushMyListUpdates(added = localOnlyMyList)
@@ -819,6 +850,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun repairDetailEpisodeSubGaps(movie: MovieItem, episode: Episode) {
+        val ctx = getApplication<Application>()
+        detailSubJob?.cancel()
+        detailSubJob = viewModelScope.launch {
+            _detailSubState.value = DetailSubPreTranslateState(
+                movieId = movie.id,
+                episodeId = episode.id,
+                isRunning = true,
+                percent = 4,
+                statusText = "🔍 Đang quét các đoạn thiếu Sub (không dịch lại phần đã có)...",
+                isReady = false
+            )
+            CloudSyncClient.activeMovieSlug = CloudSyncClient.normalizeMovieSlug(movie.detailLookupId ?: movie.id)
+            val subMgr = ThaiSubtitleManager(ctx.cacheDir, File(ctx.filesDir, "chillfilm_saved_subs_v1"))
+            try {
+                val (totalCues, netAdded) = subMgr.repairMissingAudioSubGaps(
+                    movie = movie,
+                    episode = episode,
+                    config = prefs.subtitleConfig.value,
+                    geminiApiKey = prefs.geminiApiKey.value,
+                    onProgress = { pct, msg ->
+                        _detailSubState.value = DetailSubPreTranslateState(
+                            movieId = movie.id,
+                            episodeId = episode.id,
+                            isRunning = pct in 1..99,
+                            percent = pct,
+                            statusText = msg,
+                            isReady = pct >= 100
+                        )
+                    }
+                )
+                if (netAdded > 0) {
+                    showBanner("🔧 Đã dịch bù thêm +$netAdded câu Sub (Tổng $totalCues câu)!")
+                }
+            } finally {
+                subMgr.release()
+            }
+        }
+    }
+
     fun openMovieDetail(movie: MovieItem) {
         if (_detailSubState.value.movieId != movie.id) {
             _detailSubState.value = DetailSubPreTranslateState(movieId = movie.id)
@@ -953,6 +1024,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             startPositionMs = effectiveStartMs
         )
         _isPlayerMinimized.value = false
+        // If Host / Co-Controller switches movie or episode while inside Watch Party 2.0, sync the whole room live!
+        val party = _watchPartyState.value
+        if (party.isInRoom && party.canControl) {
+            val mMeta = movieToPartyMeta(movie)
+            val eMeta = episodeToPartyMeta(episode)
+            val nextKey = "${mMeta.slug}|${eMeta.linkM3u8}"
+            if (nextKey != partyLastMovieKey && eMeta.linkM3u8.isNotBlank()) {
+                partyLastMovieKey = nextKey
+                viewModelScope.launch {
+                    CloudSyncClient.partyControl(
+                        roomCode = party.roomCode,
+                        hostToken = party.hostToken,
+                        memberId = party.memberId,
+                        nickname = party.nickname,
+                        isPlaying = true,
+                        positionSec = effectiveStartMs / 1000.0,
+                        movie = mMeta,
+                        episode = eMeta
+                    ).onSuccess { res ->
+                        partyLastStateUpdatedAt = res.stateUpdatedAt
+                    }
+                }
+            }
+        }
     }
 
     fun minimizePlayer() {
@@ -970,6 +1065,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun closePlayerSession() {
         flushPendingCloudProgress()
+        if (_watchPartyState.value.isInRoom) {
+            leaveWatchParty(silent = true)
+        }
         _activePlaybackSession.value = null
         _isPlayerMinimized.value = false
         _playerTelemetry.value = CompanionPlayerTelemetry(isActive = false)
@@ -981,17 +1079,623 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleMyList(movie: MovieItem) {
-        val (added, cloudItem) = prefs.toggleMyList(movie)
-        showBanner(if (added) "❤️ Saved \"${movie.title}\" to My List" else "Removed \"${movie.title}\" from My List")
+        val (added, cloudItem, removedKeys) = prefs.toggleMyListWithRemovedKeys(movie)
+        showBanner(if (added) "❤️ Đã lưu \"${movie.title}\" vào Yêu thích" else "🗑️ Đã xóa \"${movie.title}\" khỏi Yêu thích")
         if (CloudSyncClient.isSignedIn()) {
             viewModelScope.launch(Dispatchers.IO) {
                 if (added) {
                     CloudSyncClient.pushMyListUpdates(added = listOf(cloudItem))
-                } else {
-                    CloudSyncClient.pushMyListUpdates(removedKeys = listOf(cloudItem.itemKey))
+                } else if (removedKeys.isNotEmpty()) {
+                    CloudSyncClient.pushMyListUpdates(removedKeys = removedKeys)
                 }
             }
         }
+    }
+
+    fun removeMyListItem(movie: MovieItem) {
+        val removedKeys = prefs.removeMyListItem(movie)
+        showBanner("🗑️ Đã xóa \"${movie.title}\" khỏi Yêu thích")
+        if (CloudSyncClient.isSignedIn() && removedKeys.isNotEmpty()) {
+            viewModelScope.launch(Dispatchers.IO) {
+                CloudSyncClient.pushMyListUpdates(removedKeys = removedKeys)
+            }
+        }
+    }
+
+    /* ==================== PILLAR 3: OFFLINE VIDEO + AI SUBTITLE DOWNLOADS ==================== */
+    fun openDownloads() {
+        OfflineDownloadManager.ensureInitialized(getApplication())
+        navigateTo(AppScreen.Downloads)
+    }
+
+    fun downloadEpisodeOffline(movie: MovieItem, episode: Episode) {
+        val ctx = getApplication<Application>()
+        if (episode.streamUrl.isBlank()) {
+            showBanner("⚠️ Không tìm thấy luồng phát cho tập này")
+            return
+        }
+        val langCode = prefs.subtitleConfig.value.resolvedPrimaryLanguage().code
+        OfflineDownloadManager.enqueueEpisodeDownload(
+            context = ctx,
+            movie = movie,
+            episode = episode,
+            subtitleLangCode = langCode
+        )
+        showBanner("⬇️ Đang tải ngầm \"${movie.title} • ${episode.name}\" + Phụ đề ${langCode.uppercase()}!")
+    }
+
+    fun pauseOfflineDownload(id: String) {
+        OfflineDownloadManager.pauseDownload(getApplication(), id)
+    }
+
+    fun resumeOfflineDownload(id: String) {
+        OfflineDownloadManager.resumeDownload(getApplication(), id)
+    }
+
+    fun deleteOfflineDownload(id: String) {
+        OfflineDownloadManager.removeDownload(getApplication(), id)
+        showBanner("🗑️ Đã xóa tập phim tải về khỏi bộ nhớ máy")
+    }
+
+    fun playOfflineDownload(record: OfflineEpisodeRecord) {
+        val (movie, episode) = record.toPlayablePair()
+        val resumeMs = prefs.getEpisodeResumePositionMs(movie.id, episode.id, episode.streamUrl, episode.name)
+        startPlayback(movie, episode, resumeMs)
+    }
+
+    fun exportEpisodeSrt(movie: MovieItem, episode: Episode) {
+        val ctx = getApplication<Application>()
+        val langCode = prefs.subtitleConfig.value.resolvedPrimaryLanguage().code
+        viewModelScope.launch(Dispatchers.IO) {
+            val subMgr = ThaiSubtitleManager(ctx.cacheDir, File(ctx.filesDir, "chillfilm_saved_subs_v1"))
+            var cues = subMgr.loadEpisodeSubCache(movie, episode, langCode)?.primaryCues.orEmpty()
+            if (cues.size < 3) {
+                cues = OfflineDownloadManager.loadOfflineSubtitleCues(ctx, movie, episode)?.second.orEmpty()
+            }
+            if (cues.size < 3 && CloudSyncClient.isSignedIn()) {
+                cues = CloudSyncClient.fetchCloudSubtitle(
+                    rawMovieSlug = movie.detailLookupId ?: movie.id,
+                    rawEpisodeNameOrId = episode.name.ifBlank { episode.id },
+                    langCode = langCode
+                )?.primaryCues.orEmpty()
+            }
+            if (cues.size < 3) {
+                withContext(Dispatchers.Main) {
+                    showBanner("⚠️ Chưa có phụ đề ${langCode.uppercase()} cho tập này — hãy dịch Sub AI trước!")
+                }
+                return@launch
+            }
+            val slug = CloudSyncClient.normalizeMovieSlug(movie.detailLookupId ?: movie.id)
+            val epKey = CloudSyncClient.normalizeEpisodeKey(episode.name.ifBlank { episode.id })
+            val res = OfflineDownloadManager.exportSrtToPublicDownloads(ctx, "$slug-$epKey-$langCode", cues)
+            withContext(Dispatchers.Main) {
+                res.onSuccess { path ->
+                    showBanner("📄 Đã xuất phụ đề .SRT (${cues.size} câu) → $path")
+                }.onFailure { err ->
+                    showBanner("⚠️ Lỗi xuất .SRT: ${err.message.orEmpty()}")
+                }
+            }
+        }
+    }
+
+    fun exportOfflineRecordSrt(record: OfflineEpisodeRecord) {
+        val (movie, episode) = record.toPlayablePair()
+        exportEpisodeSrt(movie, episode)
+    }
+
+    /* ==================== PILLAR 4: WATCH PARTY 2.0 ENGINE ==================== */
+    private fun defaultPartyNick(): String {
+        return prefs.cloudSession.value?.displayName?.takeIf { it.isNotBlank() }
+            ?: prefs.cloudSession.value?.username?.takeIf { it.isNotBlank() }
+            ?: if (isTvHardware) "Smart TV" else "ChillFan"
+    }
+
+    private fun movieToPartyMeta(movie: MovieItem): WatchPartyMovieMeta {
+        val c = prefs.toCloudMyListItem(movie)
+        return WatchPartyMovieMeta(
+            slug = c.slug,
+            source = c.source,
+            sourceId = c.sourceId,
+            name = movie.title,
+            poster = movie.posterUrl
+        )
+    }
+
+    private fun episodeToPartyMeta(ep: Episode): WatchPartyEpisodeMeta {
+        return WatchPartyEpisodeMeta(
+            name = ep.name.ifBlank { "Full" },
+            slug = CloudSyncClient.normalizeEpisodeKey(ep.name.ifBlank { ep.id }),
+            linkM3u8 = ep.streamUrl
+        )
+    }
+
+    fun openWatchPartyHub(initialTab: Int = 0, movie: MovieItem? = null, episode: Episode? = null) {
+        val active = _activePlaybackSession.value
+        val pickedMovie = movie ?: active?.movie
+        val pickedEp = episode ?: active?.episode ?: pickedMovie?.firstPlayableEpisode
+        _watchPartyState.value = _watchPartyState.value.copy(
+            showHubDialog = true,
+            hubInitialTab = initialTab,
+            needPasscodePrompt = false,
+            errorText = "",
+            createPickedMovie = pickedMovie,
+            createPickedEpisode = pickedEp,
+            nickname = _watchPartyState.value.nickname.ifBlank { defaultPartyNick() }
+        )
+        if (initialTab == 0) refreshPartyLobby()
+    }
+
+    fun dismissWatchPartyHub() {
+        _watchPartyState.value = _watchPartyState.value.copy(showHubDialog = false, errorText = "", quickSearchResults = emptyList())
+    }
+
+    fun refreshPartyLobby() {
+        viewModelScope.launch {
+            _watchPartyState.value = _watchPartyState.value.copy(lobbyLoading = true)
+            CloudSyncClient.partyListLobby()
+                .onSuccess { rooms ->
+                    _watchPartyState.value = _watchPartyState.value.copy(lobbyRooms = rooms, lobbyLoading = false)
+                }
+                .onFailure {
+                    _watchPartyState.value = _watchPartyState.value.copy(lobbyLoading = false)
+                }
+        }
+    }
+
+    fun partyQuickSearch(keyword: String) {
+        viewModelScope.launch {
+            _watchPartyState.value = _watchPartyState.value.copy(quickSearching = true)
+            val results = CloudSyncClient.partyQuickSearch(keyword)
+            _watchPartyState.value = _watchPartyState.value.copy(quickSearchResults = results, quickSearching = false)
+        }
+    }
+
+    fun pickMovieForPartyCreate(movie: MovieItem) {
+        _watchPartyState.value = _watchPartyState.value.copy(
+            createPickedMovie = movie,
+            createPickedEpisode = movie.firstPlayableEpisode,
+            quickSearchResults = emptyList()
+        )
+        if (movie.firstPlayableEpisode == null) {
+            viewModelScope.launch {
+                val resolved = repository.resolveMovieDetail(movie, prefs.customProviders.value)
+                _watchPartyState.value = _watchPartyState.value.copy(
+                    createPickedMovie = resolved,
+                    createPickedEpisode = resolved.firstPlayableEpisode
+                )
+            }
+        }
+    }
+
+    fun createWatchParty(
+        roomTitle: String,
+        nickname: String,
+        visibility: String,
+        controlMode: String,
+        passcode: String,
+        movie: MovieItem?,
+        episode: Episode?
+    ) {
+        viewModelScope.launch {
+            if (movie == null) {
+                _watchPartyState.value = _watchPartyState.value.copy(errorText = "Hãy chọn 1 bộ phim trước khi mở phòng!")
+                return@launch
+            }
+            _watchPartyState.value = _watchPartyState.value.copy(isBusy = true, errorText = "")
+            val resolvedMovie = if (episode == null && movie.firstPlayableEpisode == null) {
+                repository.resolveMovieDetail(movie, prefs.customProviders.value)
+            } else {
+                movie
+            }
+            val resolvedEp = episode ?: resolvedMovie.firstPlayableEpisode
+            if (resolvedEp == null || resolvedEp.streamUrl.isBlank()) {
+                _watchPartyState.value = _watchPartyState.value.copy(isBusy = false, errorText = "Phim chưa có luồng phát khả dụng")
+                return@launch
+            }
+            val posSec = (_playerTelemetry.value.positionMs.takeIf { _activePlaybackSession.value?.episode?.streamUrl == resolvedEp.streamUrl } ?: 0L) / 1000.0
+            CloudSyncClient.partyCreate(
+                nickname = nickname.ifBlank { defaultPartyNick() },
+                roomTitle = roomTitle.ifBlank { resolvedMovie.title },
+                visibility = visibility,
+                controlMode = controlMode,
+                passcode = passcode,
+                movie = movieToPartyMeta(resolvedMovie),
+                episode = episodeToPartyMeta(resolvedEp),
+                positionSec = posSec,
+                isPlaying = true
+            ).onSuccess { res ->
+                applyPartyJoinSuccess(res, nickname.ifBlank { defaultPartyNick() })
+                if (_activePlaybackSession.value?.episode?.streamUrl != resolvedEp.streamUrl) {
+                    startPlayback(resolvedMovie, resolvedEp, (posSec * 1000).toLong())
+                }
+                showBanner("🍿 Đã mở phòng ${res.roomCode}! Chia sẻ mã hoặc QR để bạn bè vào xem.")
+            }.onFailure { err ->
+                _watchPartyState.value = _watchPartyState.value.copy(isBusy = false, errorText = err.message ?: "Không tạo được phòng")
+            }
+        }
+    }
+
+    fun joinWatchParty(code: String, nickname: String, passcode: String = "") {
+        val cleanCode = code.trim().uppercase()
+        if (cleanCode.length < 4) {
+            _watchPartyState.value = _watchPartyState.value.copy(errorText = "Mã phòng không hợp lệ")
+            return
+        }
+        viewModelScope.launch {
+            _watchPartyState.value = _watchPartyState.value.copy(isBusy = true, errorText = "", needPasscodePrompt = false)
+            val nick = nickname.ifBlank { defaultPartyNick() }
+            CloudSyncClient.partyJoin(cleanCode, nick, passcode = passcode)
+                .onSuccess { res ->
+                    applyPartyJoinSuccess(res, nick)
+                    val snap = res.party
+                    val elapsedMs = if (snap.isPlaying) {
+                        ((snap.serverTime - snap.stateUpdatedAt).coerceAtLeast(0L) + snap.rttMs / 2L)
+                    } else 0L
+                    val startMs = ((snap.positionSec * 1000.0).toLong() + elapsedMs).coerceAtLeast(0L)
+                    transitionPlaybackForParty(snap.movie, snap.episode, startMs)
+                    showBanner("🍿 Đã vào phòng ${res.roomCode} của ${snap.hostName}!")
+                }
+                .onFailure { err ->
+                    val needPass = err is PartyPasscodeRequiredException
+                    _watchPartyState.value = _watchPartyState.value.copy(
+                        isBusy = false,
+                        needPasscodePrompt = needPass,
+                        prefillJoinCode = cleanCode,
+                        errorText = err.message ?: "Không thể vào phòng"
+                    )
+                }
+        }
+    }
+
+    private fun applyPartyJoinSuccess(res: com.phyll.filmhub.cloud.WatchPartyJoinOrCreateResult, nick: String) {
+        val snap = res.party
+        partyLastMsgId = snap.messages.maxOfOrNull { it.id } ?: 0L
+        partyLastReactionTs = snap.reactions.maxOfOrNull { it.createdAt } ?: 0L
+        partyLastStateUpdatedAt = snap.stateUpdatedAt
+        partyLastActionAt = snap.lastActionAt
+        partyLastMovieKey = "${snap.movie.slug}|${snap.episode.linkM3u8}"
+        _watchPartyState.value = _watchPartyState.value.copy(
+            showHubDialog = false,
+            isBusy = false,
+            errorText = "",
+            needPasscodePrompt = false,
+            roomCode = res.roomCode,
+            roomTitle = snap.roomTitle,
+            visibility = snap.visibility,
+            controlMode = snap.controlMode,
+            hasPasscode = snap.hasPasscode,
+            hostToken = res.hostToken,
+            hostName = snap.hostName,
+            hostInactive = snap.hostInactive,
+            memberId = res.memberId,
+            nickname = nick,
+            isHost = res.isHost,
+            panelVisible = true,
+            syncStatusText = "● Sync OK (${snap.rttMs}ms)",
+            actionPillText = snap.lastActionText,
+            actionPillTs = snap.lastActionAt,
+            members = snap.members,
+            queue = snap.queue,
+            messages = snap.messages,
+            floatingReactions = emptyList()
+        )
+        startPartyPollingLoop()
+    }
+
+    private fun transitionPlaybackForParty(movieMeta: WatchPartyMovieMeta, epMeta: WatchPartyEpisodeMeta, startMs: Long) {
+        if (epMeta.linkM3u8.isBlank()) return
+        partyLastMovieKey = "${movieMeta.slug}|${epMeta.linkM3u8}"
+        val providerId = if (movieMeta.source == "phimapi") "modern_vod" else "cloud_${movieMeta.source}"
+        val ep = Episode(
+            id = epMeta.slug.ifBlank { epMeta.name },
+            name = epMeta.name.ifBlank { "Full" },
+            streamUrl = epMeta.linkM3u8
+        )
+        val movie = MovieItem(
+            id = if (movieMeta.source == "phimapi") "modern_${movieMeta.slug}" else "${providerId}_${movieMeta.sourceId}_${movieMeta.slug}",
+            title = movieMeta.name,
+            posterUrl = movieMeta.poster,
+            backdropUrl = movieMeta.poster,
+            providerId = providerId,
+            servers = listOf(ServerGroup("Party", listOf(ep))),
+            detailLookupId = if (movieMeta.sourceId.isNotBlank() && movieMeta.source != "phimapi") "${movieMeta.slug}|${movieMeta.sourceId}" else movieMeta.slug
+        )
+        startPlayback(movie, ep, startMs)
+    }
+
+    private fun startPartyPollingLoop() {
+        partyPollJob?.cancel()
+        partyPollJob = viewModelScope.launch {
+            while (isActive && _watchPartyState.value.isInRoom) {
+                delay(1_500L)
+                val st = _watchPartyState.value
+                if (!st.isInRoom) break
+                CloudSyncClient.partyPoll(
+                    roomCode = st.roomCode,
+                    memberId = st.memberId,
+                    nickname = st.nickname,
+                    hostToken = st.hostToken,
+                    sinceMsgId = partyLastMsgId,
+                    sinceReactionTs = partyLastReactionTs,
+                    status = partyLastReportedStatus,
+                    posSec = partyLastReportedPosSec
+                ).onSuccess { snap ->
+                    val cur = _watchPartyState.value
+                    if (!cur.isInRoom || cur.roomCode != snap.roomCode) return@onSuccess
+
+                    val newMsgs = snap.messages.filter { it.id > partyLastMsgId }
+                    if (newMsgs.isNotEmpty()) partyLastMsgId = newMsgs.maxOf { it.id }
+
+                    val newReacts = snap.reactions.filter { it.createdAt > partyLastReactionTs }
+                    if (newReacts.isNotEmpty()) partyLastReactionTs = newReacts.maxOf { it.createdAt }
+
+                    val nowLocal = System.currentTimeMillis()
+                    val countdownLeadMs = snap.stateUpdatedAt - snap.serverTime
+                    val countdownTarget = if (countdownLeadMs > 300L) nowLocal + countdownLeadMs - (snap.rttMs / 2L) else 0L
+
+                    val incomingMovieKey = "${snap.movie.slug}|${snap.episode.linkM3u8}"
+                    val movieChanged = incomingMovieKey != partyLastMovieKey && snap.episode.linkM3u8.isNotBlank()
+                    if (movieChanged) {
+                        val elapsed = if (snap.isPlaying) (snap.serverTime - snap.stateUpdatedAt).coerceAtLeast(0L) else 0L
+                        transitionPlaybackForParty(snap.movie, snap.episode, ((snap.positionSec * 1000.0).toLong() + elapsed).coerceAtLeast(0L))
+                    } else if (!cur.isHost || snap.stateUpdatedAt != partyLastStateUpdatedAt) {
+                        // Compute RTT-compensated target position for 3-tier Smooth Soft-Sync on ExoPlayer
+                        val elapsedMs = if (snap.isPlaying && snap.serverTime >= snap.stateUpdatedAt) {
+                            (((snap.serverTime - snap.stateUpdatedAt) + snap.rttMs / 2L) * snap.playbackRate).toLong()
+                        } else 0L
+                        val targetMs = ((snap.positionSec * 1000.0).toLong() + elapsedMs).coerceAtLeast(0L)
+                        val stateChanged = snap.stateUpdatedAt != partyLastStateUpdatedAt
+                        partyLastStateUpdatedAt = snap.stateUpdatedAt
+                        if (!cur.isHost || stateChanged) {
+                            _watchPartySyncCommand.value = WatchPartySyncCommand(
+                                id = System.nanoTime(),
+                                targetPositionMs = targetMs,
+                                shouldPlay = snap.isPlaying,
+                                playbackRate = snap.playbackRate,
+                                forceHardSeek = stateChanged,
+                                countdownStartAtLocalMs = countdownTarget
+                            )
+                        }
+                    }
+
+                    val showNewAction = snap.lastActionAt > partyLastActionAt && snap.lastActionText.isNotBlank()
+                    if (showNewAction) partyLastActionAt = snap.lastActionAt
+
+                    _watchPartyState.value = cur.copy(
+                        roomTitle = snap.roomTitle,
+                        visibility = snap.visibility,
+                        controlMode = snap.controlMode,
+                        hasPasscode = snap.hasPasscode,
+                        hostName = snap.hostName,
+                        hostInactive = snap.hostInactive,
+                        members = snap.members,
+                        queue = snap.queue,
+                        messages = (cur.messages + newMsgs).takeLast(120),
+                        floatingReactions = (cur.floatingReactions.filter { nowLocal - it.createdAt < 4000L } + newReacts).takeLast(12),
+                        countdownTargetLocalMs = if (countdownTarget > nowLocal) countdownTarget else cur.countdownTargetLocalMs,
+                        actionPillText = if (showNewAction) snap.lastActionText else cur.actionPillText,
+                        actionPillTs = if (showNewAction) snap.lastActionAt else cur.actionPillTs,
+                        syncStatusText = "● Sync OK (${snap.rttMs}ms)"
+                    )
+                }
+            }
+        }
+    }
+
+    fun consumeWatchPartySyncCommand(id: Long) {
+        if (_watchPartySyncCommand.value?.id == id) {
+            _watchPartySyncCommand.value = null
+        }
+    }
+
+    fun updatePartySyncBadge(text: String) {
+        if (_watchPartyState.value.isInRoom) {
+            _watchPartyState.value = _watchPartyState.value.copy(syncStatusText = text)
+        }
+    }
+
+    fun reportLocalPlayerToParty(isPlaying: Boolean, posMs: Long, isBuffering: Boolean, pushControl: Boolean = false) {
+        val st = _watchPartyState.value
+        if (!st.isInRoom) return
+        partyLastReportedPosSec = (posMs / 1000L).toInt().coerceAtLeast(0)
+        partyLastReportedStatus = when {
+            isBuffering -> "buffering"
+            isPlaying -> "playing"
+            else -> "paused"
+        }
+        if (pushControl && st.canControl) {
+            viewModelScope.launch {
+                CloudSyncClient.partyControl(
+                    roomCode = st.roomCode,
+                    hostToken = st.hostToken,
+                    memberId = st.memberId,
+                    nickname = st.nickname,
+                    isPlaying = isPlaying,
+                    positionSec = posMs / 1000.0
+                ).onSuccess { res ->
+                    partyLastStateUpdatedAt = res.stateUpdatedAt
+                }
+            }
+        }
+    }
+
+    fun togglePartyPanel() {
+        _watchPartyState.value = _watchPartyState.value.copy(panelVisible = !_watchPartyState.value.panelVisible)
+    }
+
+    fun forcePartyResync() {
+        partyLastStateUpdatedAt = 0L
+        showBanner("🔄 Đang đồng bộ lại mốc phát...")
+    }
+
+    fun sendPartyChat(text: String) {
+        val st = _watchPartyState.value
+        if (!st.isInRoom || text.isBlank()) return
+        viewModelScope.launch {
+            CloudSyncClient.partySendChat(st.roomCode, st.nickname, text, st.hostToken).onSuccess { msg ->
+                if (msg != null && msg.id > partyLastMsgId) {
+                    partyLastMsgId = msg.id
+                    _watchPartyState.value = _watchPartyState.value.copy(
+                        messages = (_watchPartyState.value.messages + msg).takeLast(120)
+                    )
+                }
+            }
+        }
+    }
+
+    fun sendPartyReaction(emoji: String) {
+        val st = _watchPartyState.value
+        if (!st.isInRoom) return
+        val localReact = com.phyll.filmhub.cloud.WatchPartyReaction(
+            id = "loc_${System.nanoTime()}",
+            emoji = emoji,
+            senderName = st.nickname,
+            createdAt = System.currentTimeMillis()
+        )
+        _watchPartyState.value = st.copy(floatingReactions = (st.floatingReactions + localReact).takeLast(12))
+        viewModelScope.launch {
+            CloudSyncClient.partyReact(st.roomCode, st.memberId, st.nickname, emoji)
+        }
+    }
+
+    fun startPartyCountdown() {
+        val st = _watchPartyState.value
+        if (!st.isInRoom || !st.canControl) return
+        viewModelScope.launch {
+            CloudSyncClient.partyControl(
+                roomCode = st.roomCode,
+                hostToken = st.hostToken,
+                memberId = st.memberId,
+                nickname = st.nickname,
+                isPlaying = true,
+                positionSec = partyLastReportedPosSec.toDouble(),
+                countdown = true
+            ).onSuccess { res ->
+                partyLastStateUpdatedAt = res.stateUpdatedAt
+                val lead = (res.stateUpdatedAt - res.serverTime).coerceAtLeast(3000L)
+                val targetLocal = System.currentTimeMillis() + lead
+                _watchPartyState.value = _watchPartyState.value.copy(
+                    countdownTargetLocalMs = targetLocal,
+                    actionPillText = res.lastActionText.ifBlank { "⏱️ Đếm ngược 3-2-1 bắt đầu cùng lúc!" },
+                    actionPillTs = System.currentTimeMillis()
+                )
+                _watchPartySyncCommand.value = WatchPartySyncCommand(
+                    id = System.nanoTime(),
+                    targetPositionMs = (res.positionSec * 1000.0).toLong(),
+                    shouldPlay = true,
+                    forceHardSeek = true,
+                    countdownStartAtLocalMs = targetLocal
+                )
+            }
+        }
+    }
+
+    fun togglePartyControlMode() {
+        val st = _watchPartyState.value
+        if (!st.isInRoom || !st.isHost) return
+        val next = if (st.controlMode == "EVERYONE") "HOST_ONLY" else "EVERYONE"
+        viewModelScope.launch {
+            CloudSyncClient.partyUpdateSettings(st.roomCode, st.hostToken, controlMode = next).onSuccess {
+                _watchPartyState.value = _watchPartyState.value.copy(controlMode = next)
+                showBanner(if (next == "EVERYONE") "🤝 Đã bật: Ai cũng điều khiển được" else "👑 Chỉ Chủ phòng điều khiển")
+            }
+        }
+    }
+
+    fun togglePartyVisibility() {
+        val st = _watchPartyState.value
+        if (!st.isInRoom || !st.isHost) return
+        val next = if (st.visibility == "PUBLIC") "PRIVATE" else "PUBLIC"
+        viewModelScope.launch {
+            CloudSyncClient.partyUpdateSettings(st.roomCode, st.hostToken, visibility = next).onSuccess {
+                _watchPartyState.value = _watchPartyState.value.copy(visibility = next)
+                showBanner(if (next == "PUBLIC") "🌐 Phòng đã mở trên Sảnh Công Khai" else "🔒 Phòng chuyển sang Riêng tư")
+            }
+        }
+    }
+
+    fun claimPartyHost() {
+        val st = _watchPartyState.value
+        if (!st.isInRoom || st.isHost) return
+        viewModelScope.launch {
+            CloudSyncClient.partyClaimHost(st.roomCode, st.memberId, st.nickname).onSuccess { newToken ->
+                _watchPartyState.value = _watchPartyState.value.copy(
+                    isHost = true,
+                    hostToken = newToken,
+                    hostInactive = false,
+                    hostName = st.nickname
+                )
+                showBanner("👑 Bạn đã tiếp quản quyền Chủ phòng!")
+            }.onFailure { err ->
+                showBanner("⚠️ ${err.message.orEmpty()}")
+            }
+        }
+    }
+
+    fun partyAddMovieToQueue(movie: MovieItem) {
+        val st = _watchPartyState.value
+        if (!st.isInRoom) return
+        viewModelScope.launch {
+            _watchPartyState.value = _watchPartyState.value.copy(quickSearchResults = emptyList())
+            val resolved = if (movie.firstPlayableEpisode == null) {
+                repository.resolveMovieDetail(movie, prefs.customProviders.value)
+            } else movie
+            val ep = resolved.firstPlayableEpisode ?: return@launch
+            CloudSyncClient.partyQueueAdd(
+                roomCode = st.roomCode,
+                memberId = st.memberId,
+                nickname = st.nickname,
+                movie = movieToPartyMeta(resolved),
+                episode = episodeToPartyMeta(ep)
+            ).onSuccess { q ->
+                _watchPartyState.value = _watchPartyState.value.copy(queue = q)
+                showBanner("➕ Đã thêm \"${resolved.title}\" vào Hàng chờ!")
+            }
+        }
+    }
+
+    fun partyVoteQueue(itemId: String) {
+        val st = _watchPartyState.value
+        if (!st.isInRoom) return
+        viewModelScope.launch {
+            CloudSyncClient.partyQueueVote(st.roomCode, st.memberId, itemId).onSuccess { q ->
+                _watchPartyState.value = _watchPartyState.value.copy(queue = q)
+            }
+        }
+    }
+
+    fun partyPlayQueueItem(itemId: String) {
+        val st = _watchPartyState.value
+        if (!st.isInRoom || !st.canControl) return
+        viewModelScope.launch {
+            CloudSyncClient.partyQueuePlay(st.roomCode, st.hostToken, st.memberId, st.nickname, itemId).onSuccess { (m, e) ->
+                transitionPlaybackForParty(m, e, 0L)
+            }
+        }
+    }
+
+    fun partyRemoveQueueItem(itemId: String) {
+        val st = _watchPartyState.value
+        if (!st.isInRoom) return
+        viewModelScope.launch {
+            CloudSyncClient.partyQueueRemove(st.roomCode, st.hostToken, st.memberId, itemId).onSuccess { q ->
+                _watchPartyState.value = _watchPartyState.value.copy(queue = q)
+            }
+        }
+    }
+
+    fun leaveWatchParty(silent: Boolean = false) {
+        val st = _watchPartyState.value
+        partyPollJob?.cancel()
+        partyPollJob = null
+        if (st.isInRoom) {
+            viewModelScope.launch(Dispatchers.IO) {
+                CloudSyncClient.partyLeave(st.roomCode, st.memberId)
+            }
+        }
+        _watchPartyState.value = WatchPartyUiState(nickname = st.nickname)
+        _watchPartySyncCommand.value = null
+        if (!silent) showBanner("🚪 Đã rời phòng Xem chung")
     }
 
     fun startTargetAwarePlayback(movie: MovieItem, episode: Episode, startPositionMs: Long = 0L) {
@@ -1240,6 +1944,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 is AppScreen.Home -> "HOME"
                 is AppScreen.Detail -> "DETAIL"
                 is AppScreen.Player -> "PLAYER"
+                is AppScreen.Downloads -> "DOWNLOADS"
                 is AppScreen.SettingsSources -> "SETTINGS"
                 is AppScreen.TvManager -> "TV_MANAGER"
             }
@@ -2153,6 +2858,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        partyPollJob?.cancel()
         tvPollJob?.cancel()
         tvScreenStreamJob?.cancel()
         companionServer.stop()

@@ -34,23 +34,31 @@ jobs:
         id: ver
         run: |
           RUN_NUM="${{ github.run_number }}"
-          VERSION_CODE=$((100 + RUN_NUM))
-          VERSION_NAME="3.1.${RUN_NUM}"
+          JSON_CODE="$(node -e "const v=require('./version.json'); console.log(Number(v.versionCode)||0)")"
+          JSON_NAME="$(node -e "const v=require('./version.json'); console.log(v.versionName||'3.5.0')")"
+          JSON_NOTES="$(node -e "const v=require('./version.json'); console.log(v.releaseNotes||'')")"
+          CI_CODE=$((100 + RUN_NUM))
+          VERSION_CODE=$(( JSON_CODE > CI_CODE ? JSON_CODE : CI_CODE ))
+          VERSION_NAME="${JSON_NAME}"
           BUILD_TIME="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           echo "version_code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
           echo "version_name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
-          cat << EOF > version.json
-          {
-            "versionName": "${VERSION_NAME}",
-            "versionCode": ${VERSION_CODE},
-            "buildTime": "${BUILD_TIME}",
-            "downloadUrl": "https://github.com/PrimiasArt/Chillfilm.net/releases/download/android-apk-latest/ChillFilm-latest.apk",
-            "webAppUrl": "https://chillfilm.vercel.app/",
-            "commit": "${{ github.sha }}",
-            "releaseNotes": "ChillFilm x NKI v${VERSION_NAME} (Build ${VERSION_CODE}) • Global Multi-Source Auto-Crawler (Bilingual EN/VI), My List Cloud Sync, Skip Intro (+85s) & Auto-Next 5s, Hard VN-Safe Filter"
-          }
-          EOF
+          node -e '
+            const fs = require("fs");
+            const out = {
+              versionName: process.env.VERSION_NAME,
+              versionCode: Number(process.env.VERSION_CODE),
+              buildTime: process.env.BUILD_TIME,
+              downloadUrl: "https://github.com/PrimiasArt/Chillfilm.net/releases/download/android-apk-latest/ChillFilm-latest.apk",
+              webAppUrl: "https://chillfilm.vercel.app/",
+              commit: process.env.COMMIT_SHA,
+              releaseNotes: process.env.JSON_NOTES || ("ChillFilm x NKI v" + process.env.VERSION_NAME + " (Build " + process.env.VERSION_CODE + ")")
+            };
+            fs.writeFileSync("version.json", JSON.stringify(out, null, 2) + "\n");
+          '
           cat version.json
+        env:
+          COMMIT_SHA: ${{ github.sha }}
 
       - name: Run Unit Tests & Build Release APKs
         env:

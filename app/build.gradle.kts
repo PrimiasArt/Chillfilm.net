@@ -6,22 +6,20 @@ plugins {
 }
 
 val runNumEnv = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull()
-var computedVersionCode = 117
-var computedVersionName = "3.4.1"
+var computedVersionCode = 350
+var computedVersionName = "3.5.0"
 
-if (runNumEnv != null && runNumEnv > 0) {
-    computedVersionCode = 100 + runNumEnv
-    computedVersionName = "3.1.$runNumEnv"
-} else {
-    val versionFile = rootProject.file("version.json")
-    if (versionFile.exists()) {
-        runCatching {
-            @Suppress("UNCHECKED_CAST")
-            val parsed = JsonSlurper().parse(versionFile) as Map<String, Any?>
-            (parsed["versionCode"] as? Number)?.toInt()?.let { computedVersionCode = it }
-            (parsed["versionName"] as? String)?.takeIf { it.isNotBlank() }?.let { computedVersionName = it }
-        }
+val versionFile = rootProject.file("version.json")
+if (versionFile.exists()) {
+    runCatching {
+        @Suppress("UNCHECKED_CAST")
+        val parsed = JsonSlurper().parse(versionFile) as Map<String, Any?>
+        (parsed["versionCode"] as? Number)?.toInt()?.let { computedVersionCode = it }
+        (parsed["versionName"] as? String)?.takeIf { it.isNotBlank() }?.let { computedVersionName = it }
     }
+}
+if (runNumEnv != null && runNumEnv > 0) {
+    computedVersionCode = maxOf(computedVersionCode, 100 + runNumEnv)
 }
 
 android {

@@ -550,20 +550,70 @@ class PreferencesManager(context: Context) {
         )
     }
 
+    private fun normalizedMovieSlug(movie: MovieItem): String {
+        val raw = (movie.detailLookupId ?: movie.id).substringBefore("|")
+        return CloudSyncClient.normalizeMovieSlug(raw)
+    }
+
+    private fun loadMyListTombstones(): MutableMap<String, Long> {
+        val raw = prefs.getString(KEY_MY_LIST_TOMBSTONES, null) ?: return HashMap()
+        val now = System.currentTimeMillis()
+        val ttl = 7L * 24L * 60L * 60L * 1000L
+        return runCatching {
+            val type = object : TypeToken<Map<String, Long>>() {}.type
+            val map: Map<String, Long> = gson.fromJson(raw, type) ?: emptyMap()
+            map.filterValues { ts -> ts > 0L && (now - ts) < ttl }.toMutableMap()
+        }.getOrElse { HashMap() }
+    }
+
+    private fun saveMyListTombstones(map: Map<String, Long>) {
+        prefs.edit().putString(KEY_MY_LIST_TOMBSTONES, gson.toJson(map)).apply()
+    }
+
+    fun isMovieInMyList(movie: MovieItem): Boolean {
+        val slug = normalizedMovieSlug(movie)
+        if (_favoriteIds.value.contains(movie.id)) return true
+        return _myList.value.any { it.id == movie.id || normalizedMovieSlug(it) == slug }
+    }
+
     fun toggleMyList(movie: MovieItem): Pair<Boolean, CloudMyListItem> {
+        val (added, cloudItem, _) = toggleMyListWithRemovedKeys(movie)
+        return added to cloudItem
+    }
+
+    fun toggleMyListWithRemovedKeys(movie: MovieItem): Triple<Boolean, CloudMyListItem, List<String>> {
         val cloudItem = toCloudMyListItem(movie)
+        val targetSlug = normalizedMovieSlug(movie)
         val current = _myList.value.toMutableList()
-        val existingIdx = current.indexOfFirst {
-            it.id == movie.id || toCloudMyListItem(it).itemKey == cloudItem.itemKey
+        val matches = current.filter {
+            it.id == movie.id || toCloudMyListItem(it).itemKey == cloudItem.itemKey || normalizedMovieSlug(it) == targetSlug
         }
         val favs = _favoriteIds.value.toMutableSet()
+        val tombstones = loadMyListTombstones()
+        val removedKeys = LinkedHashSet<String>()
         val added: Boolean
-        if (existingIdx >= 0) {
-            val removed = current.removeAt(existingIdx)
+
+        if (matches.isNotEmpty()) {
+            removedKeys.add(cloudItem.itemKey)
+            if (targetSlug.isNotBlank() && targetSlug != "unknown") removedKeys.add(targetSlug)
+            for (m in matches) {
+                removedKeys.add(toCloudMyListItem(m).itemKey)
+                favs.remove(m.id)
+            }
             favs.remove(movie.id)
-            favs.remove(removed.id)
+            current.removeAll {
+                it.id == movie.id || toCloudMyListItem(it).itemKey == cloudItem.itemKey || normalizedMovieSlug(it) == targetSlug
+            }
+            if (targetSlug.isNotBlank() && targetSlug != "unknown") {
+                tombstones[targetSlug] = System.currentTimeMillis()
+                saveMyListTombstones(tombstones)
+            }
             added = false
         } else {
+            if (targetSlug.isNotBlank()) {
+                tombstones.remove(targetSlug)
+                saveMyListTombstones(tombstones)
+            }
             current.add(0, movie.copy(servers = emptyList()))
             favs.add(movie.id)
             added = true
@@ -575,17 +625,65 @@ class PreferencesManager(context: Context) {
             .putString(KEY_MY_LIST_V1, gson.toJson(trimmed))
             .putStringSet(KEY_FAVORITES, favs)
             .apply()
-        return added to cloudItem
+        return Triple(added, cloudItem, removedKeys.toList())
     }
 
-    fun mergeCloudMyList(remoteItems: List<CloudMyListItem>): List<CloudMyListItem> {
-        val byKey = LinkedHashMap<String, MovieItem>()
+    fun removeMyListItem(movie: MovieItem): List<String> {
+        val cloudItem = toCloudMyListItem(movie)
+        val targetSlug = normalizedMovieSlug(movie)
+        val current = _myList.value.toMutableList()
         val favs = _favoriteIds.value.toMutableSet()
+        val removedKeys = LinkedHashSet<String>()
+        removedKeys.add(cloudItem.itemKey)
+        if (targetSlug.isNotBlank() && targetSlug != "unknown") removedKeys.add(targetSlug)
+        current.filter {
+            it.id == movie.id || toCloudMyListItem(it).itemKey == cloudItem.itemKey || normalizedMovieSlug(it) == targetSlug
+        }.forEach { m ->
+            removedKeys.add(toCloudMyListItem(m).itemKey)
+            favs.remove(m.id)
+        }
+        favs.remove(movie.id)
+        current.removeAll {
+            it.id == movie.id || toCloudMyListItem(it).itemKey == cloudItem.itemKey || normalizedMovieSlug(it) == targetSlug
+        }
+        val tombstones = loadMyListTombstones()
+        if (targetSlug.isNotBlank() && targetSlug != "unknown") {
+            tombstones[targetSlug] = System.currentTimeMillis()
+            saveMyListTombstones(tombstones)
+        }
+        _myList.value = current
+        _favoriteIds.value = favs
+        prefs.edit()
+            .putString(KEY_MY_LIST_V1, gson.toJson(current))
+            .putStringSet(KEY_FAVORITES, favs)
+            .apply()
+        return removedKeys.toList()
+    }
+
+    /**
+     * Authoritative Cloud My List Sync (matches Web v20):
+     * Cloud `remoteItems` is the single source of truth so deletions made on Web immediately
+     * disappear on Android and are NEVER resurrected back to Cloud!
+     * Pre-login guest items are only migrated upward on brand-new account registration (`migrateLocalOnRegister = true`).
+     */
+    fun mergeCloudMyList(
+        remoteItems: List<CloudMyListItem>,
+        migrateLocalOnRegister: Boolean = false
+    ): List<CloudMyListItem> {
+        val bySlug = LinkedHashMap<String, MovieItem>()
+        val favs = HashSet<String>()
+        val tombstones = loadMyListTombstones()
+        val nowMs = System.currentTimeMillis()
+
         for (r in remoteItems) {
+            val normSlug = CloudSyncClient.normalizeMovieSlug(r.slug)
+            val tombTs = tombstones[normSlug] ?: 0L
+            if (tombTs > 0L && (nowMs - tombTs) < 60_000L && tombTs >= r.addedAt) continue
+            if (bySlug.containsKey(normSlug)) continue
             val providerId = if (r.source == "phimapi") "modern_vod" else "cloud_${r.source}"
             val id = if (r.source == "phimapi") "modern_${r.slug}" else "${providerId}_${r.sourceId}_${r.slug}"
             val lookup = if (r.sourceId.isNotBlank() && r.source != "phimapi") "${r.slug}|${r.sourceId}" else r.slug
-            byKey[r.itemKey] = MovieItem(
+            bySlug[normSlug] = MovieItem(
                 id = id,
                 title = r.name,
                 originalTitle = r.originName,
@@ -602,15 +700,18 @@ class PreferencesManager(context: Context) {
             favs.add(id)
         }
         val localOnly = ArrayList<CloudMyListItem>()
-        for (local in _myList.value) {
-            val c = toCloudMyListItem(local)
-            if (!byKey.containsKey(c.itemKey)) {
-                byKey[c.itemKey] = local
-                localOnly.add(c)
-                favs.add(local.id)
+        if (migrateLocalOnRegister) {
+            for (local in _myList.value) {
+                val normSlug = normalizedMovieSlug(local)
+                if (tombstones.containsKey(normSlug)) continue
+                if (!bySlug.containsKey(normSlug)) {
+                    bySlug[normSlug] = local
+                    localOnly.add(toCloudMyListItem(local))
+                    favs.add(local.id)
+                }
             }
         }
-        val merged = byKey.values.toList().take(150)
+        val merged = bySlug.values.toList().take(150)
         _myList.value = merged
         _favoriteIds.value = favs
         prefs.edit()
@@ -863,6 +964,7 @@ class PreferencesManager(context: Context) {
         private const val KEY_EPISODE_RESUME_MAP = "episode_resume_map_v1"
         private const val KEY_FAVORITES = "favorite_movie_ids"
         private const val KEY_MY_LIST_V1 = "my_list_movies_v1"
+        private const val KEY_MY_LIST_TOMBSTONES = "my_list_tombstones_v1"
         private const val KEY_SKIP_INTRO_SEC = "skip_intro_sec_v1"
         private const val KEY_MOVIE_INTRO_PREFIX = "skip_intro_movie_"
         private const val KEY_TTS_DUBBING = "tts_dubbing_enabled_v1"

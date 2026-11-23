@@ -422,6 +422,34 @@ function parseFlexibleSeconds(val) {
   return Number.isFinite(n) ? n : null;
 }
 
+function extractCueObjectsRobust(cleaned) {
+  const s = cleaned.indexOf('[');
+  const e = cleaned.lastIndexOf(']');
+  let arr = [];
+  if (s >= 0 && e > s) {
+    try {
+      const parsed = JSON.parse(cleaned.slice(s, e + 1));
+      if (Array.isArray(parsed)) arr = parsed;
+    } catch {
+      arr = [];
+    }
+  }
+  // Robust salvage for truncated or slightly malformed JSON arrays (supports escaped quotes \" and t/text keys!)
+  if (!arr.length && s >= 0) {
+    const slice = cleaned.slice(s);
+    const objRegex = /\{[^{}]*"(?:t|text)"\s*:\s*"(?:\\.|[^"\\])*"[^{}]*\}/g;
+    const matches = slice.match(objRegex) || [];
+    for (const m of matches) {
+      try {
+        arr.push(JSON.parse(m));
+      } catch {
+        // Ignore single broken object
+      }
+    }
+  }
+  return arr;
+}
+
 /**
  * Transcribes + translates a base64 audio chunk into time-aligned subtitles via server-side Gemini.
  */
@@ -434,22 +462,30 @@ export async function transcribeAudioChunkServerSide({
   apiKey,
   preferredModel,
   preferTurboFlash = false,
+  retrySensitive = false,
   movieContext = null,
+  _isEmptyRetry = false,
 }) {
-  const durationSec = (Number(chunkDurationMs || 60000) / 1000).toFixed(1);
+  const durMs = Math.max(4000, Number(chunkDurationMs || 30000));
+  const durationSecNum = durMs / 1000;
+  const durationSec = durationSecNum.toFixed(1);
   const langInstruction = resolveLangInstruction(targetLang);
   const langName = resolveLangDisplayName(targetLang);
   const ctxLine = buildMovieContextLine(movieContext);
-  const systemInstruction = `You are a professional movie subtitle translator. Listen to spoken dialogue in ANY language (Chinese, English, Korean, Japanese, etc.) and output time-aligned subtitles WRITTEN STRICTLY IN ${langName}. NEVER transcribe or output in the original spoken language. NEVER output Chinese characters (汉字/中文) when translating into ${langName}.`;
+  const systemInstruction = `You are a professional movie subtitle translator. Listen carefully to the ENTIRE audio clip from start to end and output complete time-aligned subtitles WRITTEN STRICTLY IN ${langName}. NEVER transcribe in the original spoken language. NEVER skip the second half of the clip or quiet dialogue. NEVER output Chinese characters (汉字/中文) unless translating into Chinese.`;
+  const sensitivityLine = retrySensitive
+    ? `IMPORTANT SECOND-PASS RECOVERY: There IS spoken dialogue in this ${durationSec}s clip (possibly soft, fast, or over background music). Listen closely to EVERY second from 0.0s to ${durationSec}s and capture ALL audible speech.`
+    : `COVERAGE RULE: Translate EVERY spoken sentence across the ENTIRE clip from 0.0s all the way to ${durationSec}s — do NOT stop early or skip quiet/fast lines over music.`;
   const prompt = [
-    `Listen to this ${durationSec}-second movie audio clip (starts at 0.0s).`,
+    `Listen to this ${durationSec}-second movie audio clip (starts at 0.0s, ends at ${durationSec}s).`,
     `TRANSLATE ALL spoken dialogue directly into ${langInstruction}.`,
-    `CRITICAL LANGUAGE RULE: Every "t" field MUST be written 100% in ${langName}. Even if the characters speak Chinese/Korean/Japanese/English, NEVER output their original script — ALWAYS translate into ${langName}.`,
+    `CRITICAL LANGUAGE RULE: Every "t" field MUST be written 100% in ${langName}. Even if characters speak Chinese/Korean/Japanese/English, NEVER output their original script — ALWAYS translate into ${langName}.`,
+    sensitivityLine,
     ...(ctxLine ? [ctxLine] : []),
     'Rules:',
-    `- "s" and "e" = float seconds relative to 0.0 of this clip (0.0 <= s < e <= ${durationSec}), 1.2s-4.8s per cue.`,
-    '- Skip music/silence; if no speech, return [].',
-    `Return ONLY JSON array: [{"s":1.2,"e":3.6,"t":"subtitle in ${langName}"}]`,
+    `- "s" and "e" = float seconds relative to 0.0 of this clip (0.0 <= s < e <= ${durationSec}), 1.0s-4.8s per cue.`,
+    '- Only return [] if the entire clip is truly 100% silence or instrumental music with zero spoken words.',
+    `Return ONLY valid JSON array: [{"s":1.2,"e":3.6,"t":"subtitle in ${langName}"}]`,
   ].join('\n');
 
   const { rawText, modelUsed } = await callGeminiWithFallback({
@@ -458,7 +494,7 @@ export async function transcribeAudioChunkServerSide({
     preferredModel,
     preferTurboFlash: true,
     perAttemptTimeoutMs: 22000,
-    maxOutputTokens: 2048,
+    maxOutputTokens: 4096,
     contents: [
       {
         parts: [
@@ -481,42 +517,63 @@ export async function transcribeAudioChunkServerSide({
     .trim();
 
   const cues = [];
-  const s = cleaned.indexOf('[');
-  const e = cleaned.lastIndexOf(']');
-  let arr = [];
-  if (s >= 0 && e > s) {
-    try {
-      arr = JSON.parse(cleaned.slice(s, e + 1));
-    } catch {
-      arr = [];
-    }
-  }
-  // Salvage complete cue objects even if output was truncated at maxOutputTokens
-  if (!arr.length && s >= 0) {
-    const matches = cleaned.slice(s).match(/\{[^{}]*"t"\s*:\s*"[^"]*"[^{}]*\}/g) || [];
-    for (const m of matches) {
-      try { arr.push(JSON.parse(m)); } catch { /* ignore */ }
-    }
-  }
+  const arr = extractCueObjectsRobust(cleaned);
   if (arr.length) {
-    const maxRelMs = Number(chunkDurationMs || 60000) + 5000;
+    const maxRelMs = durMs + 5000;
     const baseOffset = Number(chunkStartOffsetMs || 0);
+    const baseOffsetSec = baseOffset / 1000;
     for (let i = 0; i < arr.length; i++) {
       const obj = arr[i];
       if (!obj) continue;
       const text = String(obj.t || obj.text || '').trim();
       if (!text) continue;
-      const sSec = parseFlexibleSeconds(obj.s ?? obj.start);
+      let sSec = parseFlexibleSeconds(obj.s ?? obj.start);
       if (sSec === null) continue;
-      const eSec = parseFlexibleSeconds(obj.e ?? obj.end) ?? (sSec + 2.5);
+      let eSec = parseFlexibleSeconds(obj.e ?? obj.end) ?? (sSec + 2.5);
+      // Guard against Gemini returning milliseconds instead of seconds
+      if (sSec > durationSecNum * 2.2 && sSec <= durMs + 5000) {
+        sSec /= 1000;
+        if (eSec > durationSecNum * 2.2 && eSec <= durMs + 8000) eSec /= 1000;
+      } else if (baseOffsetSec > 10 && sSec >= baseOffsetSec - 2 && sSec <= baseOffsetSec + durationSecNum + 4) {
+        // Guard against Gemini echoing absolute episode seconds instead of clip-relative seconds
+        sSec -= baseOffsetSec;
+        eSec -= baseOffsetSec;
+      }
+      if (sSec > durationSecNum + 4) continue;
       const relStart = Math.max(0, Math.min(maxRelMs, Math.round(sSec * 1000)));
-      const relEnd = Math.max(relStart + 400, Math.min(maxRelMs + 2000, Math.round(eSec * 1000)));
+      const relEnd = Math.max(relStart + 500, Math.min(maxRelMs + 2000, Math.round(eSec * 1000)));
       cues.push({
         id: i + 1,
         startMs: baseOffset + relStart,
         endMs: baseOffset + relEnd,
         text,
       });
+    }
+    cues.sort((a, b) => a.startMs - b.startMs);
+  }
+
+  // Server-side Empty-Clip Recovery: if a non-trivial audio clip returned 0 cues on first pass,
+  // retry ONCE with an alternate fast Flash model and heightened speech sensitivity!
+  if (!cues.length && !_isEmptyRetry && String(audioBase64 || '').length >= 24000) {
+    const chain = buildModelFallbackChain(preferredModel, true);
+    const altModel = chain.find((m) => m !== modelUsed) || 'gemini-2.0-flash';
+    try {
+      const retryRes = await transcribeAudioChunkServerSide({
+        audioBase64,
+        mimeType,
+        chunkStartOffsetMs,
+        chunkDurationMs,
+        targetLang,
+        apiKey,
+        preferredModel: altModel,
+        preferTurboFlash: true,
+        retrySensitive: true,
+        movieContext,
+        _isEmptyRetry: true,
+      });
+      if (retryRes?.cues?.length) return retryRes;
+    } catch {
+      // Keep empty result if recovery fails
     }
   }
 

@@ -59,6 +59,9 @@ import com.phyll.filmhub.model.ControlTargetMode
 import com.phyll.filmhub.model.Episode
 import com.phyll.filmhub.model.MovieItem
 import com.phyll.filmhub.model.WatchProgress
+import com.phyll.filmhub.offline.OfflineDownloadManager
+import com.phyll.filmhub.offline.OfflineDownloadStatus
+import com.phyll.filmhub.offline.OfflineEpisodeRecord
 import com.phyll.filmhub.ui.DetailSubPreTranslateState
 import com.phyll.filmhub.ui.i18n.LocalAppStrings
 import com.phyll.filmhub.ui.theme.BrandEmeraldVioletBrush
@@ -88,8 +91,16 @@ fun DetailScreen(
     selectedTvName: String = "",
     savedWatchProgress: WatchProgress? = null,
     detailSubState: DetailSubPreTranslateState = DetailSubPreTranslateState(),
+    offlineDownloads: List<OfflineEpisodeRecord> = emptyList(),
     isEpisodeWatched: (Episode) -> Boolean = { false },
     onPreTranslateEpisode: (Episode) -> Unit = {},
+    onRepairSubGaps: (Episode) -> Unit = {},
+    onDownloadEpisode: (Episode) -> Unit = {},
+    onPauseDownload: (String) -> Unit = {},
+    onResumeDownload: (String) -> Unit = {},
+    onOpenDownloads: () -> Unit = {},
+    onExportSrt: (Episode) -> Unit = {},
+    onStartWatchParty: (Episode) -> Unit = {},
     onPlayEpisode: (Episode) -> Unit,
     onPlayOnPhone: (Episode) -> Unit = onPlayEpisode,
     onPlayOnTv: (Episode) -> Unit = onPlayEpisode,
@@ -546,6 +557,96 @@ fun DetailScreen(
                 }
             }
 
+            // 3a. Quick Action Pills: ⬇️ Tải Offline • 📄 Xuất .SRT • 🍿 Xem chung (Phone & Smart TV D-Pad Ready)
+            if (!isResolving && firstEp != null) {
+                val activeDlId = remember(movie.id, firstEp.id, firstEp.name) {
+                    OfflineDownloadManager.buildDownloadId(movie, firstEp)
+                }
+                val activeDl = offlineDownloads.firstOrNull { it.id == activeDlId }
+                Spacer(modifier = Modifier.height(10.dp))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val dlLabel = when (activeDl?.status) {
+                        OfflineDownloadStatus.COMPLETED -> "✅ Đã tải Offline"
+                        OfflineDownloadStatus.DOWNLOADING -> "⬇️ Đang tải ${activeDl.progressPercent}% • ⏸"
+                        OfflineDownloadStatus.QUEUED -> "⏳ Đang chờ tải..."
+                        OfflineDownloadStatus.PAUSED -> "▶ Tiếp tục tải (${activeDl.progressPercent}%)"
+                        OfflineDownloadStatus.FAILED -> "🔄 Tải lại Offline"
+                        null -> "⬇️ Tải Offline (${firstEp.name})"
+                    }
+                    val dlDone = activeDl?.status == OfflineDownloadStatus.COMPLETED
+                    val dlActive = activeDl?.status == OfflineDownloadStatus.DOWNLOADING || activeDl?.status == OfflineDownloadStatus.QUEUED
+                    Box(
+                        modifier = Modifier
+                            .tvFocusableClickable(
+                                shape = RoundedCornerShape(10.dp),
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = if (dlDone || dlActive) EmeraldNeon.copy(alpha = 0.65f) else CinemaGlassBorder,
+                                onClick = {
+                                    when (activeDl?.status) {
+                                        OfflineDownloadStatus.COMPLETED -> onOpenDownloads()
+                                        OfflineDownloadStatus.DOWNLOADING, OfflineDownloadStatus.QUEUED -> onPauseDownload(activeDl.id)
+                                        OfflineDownloadStatus.PAUSED, OfflineDownloadStatus.FAILED -> onResumeDownload(activeDl.id)
+                                        null -> onDownloadEpisode(firstEp)
+                                    }
+                                }
+                            )
+                            .background(if (dlDone) EmeraldPrimary.copy(alpha = 0.24f) else CinemaSurfaceElevated)
+                            .padding(horizontal = 13.dp, vertical = 9.dp)
+                    ) {
+                        Text(
+                            text = dlLabel,
+                            color = if (dlDone || dlActive) EmeraldNeon else TextPrimary,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            maxLines = 1
+                        )
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .tvFocusableClickable(
+                                shape = RoundedCornerShape(10.dp),
+                                focusedBorderColor = VioletGlow,
+                                unfocusedBorderColor = VioletPrimary.copy(alpha = 0.5f),
+                                onClick = { onExportSrt(firstEp) }
+                            )
+                            .background(VioletPrimary.copy(alpha = 0.18f))
+                            .padding(horizontal = 13.dp, vertical = 9.dp)
+                    ) {
+                        Text(
+                            text = "📄 Xuất .SRT",
+                            color = VioletSoft,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            maxLines = 1
+                        )
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .tvFocusableClickable(
+                                shape = RoundedCornerShape(10.dp),
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = EmeraldPrimary.copy(alpha = 0.55f),
+                                onClick = { onStartWatchParty(firstEp) }
+                            )
+                            .background(EmeraldPrimary.copy(alpha = 0.16f))
+                            .padding(horizontal = 13.dp, vertical = 9.dp)
+                    ) {
+                        Text(
+                            text = "🍿 Xem chung",
+                            color = EmeraldNeon,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+
             // 3b. AI Subtitle Pre-Translator Card (0-100% Progress Bar — Phone & Smart TV D-Pad Ready)
             if (!isResolving && firstEp != null) {
                 val activeSubForThisMovie = detailSubState.movieId == movie.id
@@ -607,7 +708,10 @@ fun DetailScreen(
                         lineHeight = 16.sp
                     )
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         Box(
                             modifier = Modifier
                                 .tvFocusableClickable(
@@ -632,6 +736,27 @@ fun DetailScreen(
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.ExtraBold
                             )
+                        }
+
+                        if (!subRunning) {
+                            Box(
+                                modifier = Modifier
+                                    .tvFocusableClickable(
+                                        shape = RoundedCornerShape(8.dp),
+                                        focusedBorderColor = Color(0xFFFDE68A),
+                                        unfocusedBorderColor = Color(0x88FBBF24),
+                                        onClick = { onRepairSubGaps(firstEp) }
+                                    )
+                                    .background(Color(0x26F59E0B))
+                                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                            ) {
+                                Text(
+                                    text = "🔧 Dịch bù đoạn thiếu",
+                                    color = Color(0xFFFDE68A),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
                         }
                     }
                 }
@@ -721,6 +846,10 @@ fun DetailScreen(
                 ) {
                     for (ep in currentServer.episodes) {
                         val watched = isEpisodeWatched(ep)
+                        val epDlDone = offlineDownloads.any {
+                            it.id == OfflineDownloadManager.buildDownloadId(movie, ep) &&
+                                it.status == OfflineDownloadStatus.COMPLETED
+                        }
                         val isCurrentResume = resumeEp != null && (ep.id == resumeEp.id || ep.streamUrl == resumeEp.streamUrl)
                         Box(
                             modifier = Modifier
@@ -730,7 +859,7 @@ fun DetailScreen(
                                     focusedBorderColor = EmeraldNeon,
                                     unfocusedBorderColor = when {
                                         isCurrentResume -> EmeraldNeon
-                                        watched -> EmeraldPrimary.copy(alpha = 0.55f)
+                                        watched || epDlDone -> EmeraldPrimary.copy(alpha = 0.55f)
                                         else -> CinemaGlassBorder
                                     },
                                     onClick = { onPlayOnPhone(ep) }
@@ -738,16 +867,21 @@ fun DetailScreen(
                                 .background(
                                     when {
                                         isCurrentResume -> EmeraldPrimary.copy(alpha = 0.22f)
-                                        watched -> EmeraldPrimary.copy(alpha = 0.11f)
+                                        watched || epDlDone -> EmeraldPrimary.copy(alpha = 0.11f)
                                         else -> CinemaSurface
                                     }
                                 )
                                 .padding(horizontal = 14.dp, vertical = 10.dp),
                             contentAlignment = Alignment.Center
                         ) {
+                            val epLabel = buildString {
+                                append(ep.name)
+                                if (epDlDone) append(" 📥")
+                                if (watched) append(" ✓")
+                            }
                             Text(
-                                text = if (watched) "${ep.name} ✓" else ep.name,
-                                color = if (watched || isCurrentResume) EmeraldNeon else TextPrimary,
+                                text = epLabel,
+                                color = if (watched || isCurrentResume || epDlDone) EmeraldNeon else TextPrimary,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 maxLines = 1

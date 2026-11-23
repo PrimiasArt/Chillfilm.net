@@ -349,6 +349,7 @@ export async function cloudTranscribeAudioChunk({
   targetLang = 'vi',
   model = '',
   movieContext = null,
+  retrySensitive = false,
 }) {
   const session = getCloudSession();
   if (!session?.token || !audioBase64) return null;
@@ -363,6 +364,7 @@ export async function cloudTranscribeAudioChunk({
       targetLang,
       model: model || session.defaultModel || 'gemini-3-flash-preview',
       preferTurboFlash: true,
+      retrySensitive: Boolean(retrySensitive),
       movieContext: movieContext || undefined,
     },
   });

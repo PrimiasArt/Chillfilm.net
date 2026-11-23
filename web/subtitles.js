@@ -157,33 +157,39 @@ export function parseSubtitleText(raw) {
 }
 
 export function findActiveCueText(cues, effectiveMs) {
-  if (!cues || !cues.length) return '';
+  if (!cues || !cues.length || !Number.isFinite(effectiveMs) || effectiveMs < -250) return '';
+  // Binary search for the last cue whose startMs <= effectiveMs + 80ms grace
   let lo = 0;
   let hi = cues.length - 1;
-  let hitIdx = -1;
+  let candidate = -1;
+  const upperProbe = effectiveMs + 80;
   while (lo <= hi) {
     const mid = (lo + hi) >>> 1;
-    const c = cues[mid];
-    if (effectiveMs < c.startMs) hi = mid - 1;
-    else if (effectiveMs > c.endMs) lo = mid + 1;
-    else {
-      hitIdx = mid;
-      break;
+    if ((cues[mid].startMs || 0) <= upperProbe) {
+      candidate = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
     }
   }
-  if (hitIdx >= 0) return cues[hitIdx].text;
+  if (candidate < 0) return '';
 
-  // Overlap-safe neighborhood check around insertion point (for slight overlapping AI timestamps)
-  const center = Math.max(0, Math.min(cues.length - 1, lo));
-  const start = Math.max(0, center - 4);
-  const end = Math.min(cues.length - 1, center + 4);
-  for (let i = end; i >= start; i--) {
+  // Overlap-safe backward window scan (up to 16 preceding cues) so overlapping AI/ASS cues NEVER drop out!
+  const windowStart = Math.max(0, candidate - 16);
+  const matched = [];
+  for (let i = windowStart; i <= candidate; i++) {
     const c = cues[i];
-    if (effectiveMs >= c.startMs && effectiveMs <= c.endMs) {
-      return c.text;
+    if (!c || !c.text) continue;
+    const sMs = c.startMs || 0;
+    const eMs = Math.max(c.endMs || sMs + 2000, sMs + 450);
+    if (effectiveMs >= sMs - 60 && effectiveMs <= eMs + 140) {
+      if (!matched.includes(c.text)) {
+        matched.push(c.text);
+      }
     }
   }
-  return '';
+  if (!matched.length) return '';
+  return matched.slice(-2).join('\n');
 }
 
 export async function fetchOpenSubtitlesV3(imdbId, isSeries, season = 1, episode = 1) {
@@ -271,21 +277,27 @@ export async function transcribeAudioChunkDirect({
   apiKey = '',
   modelId = 'gemini-3-flash-preview',
   movieContext = null,
+  retrySensitive = false,
 }) {
   if (!apiKey || apiKey.trim().length < 15 || !audioBase64) return [];
   const langSpec = resolveLanguage(targetLang);
   const cleanModel = (modelId || 'gemini-3-flash-preview').replace(/^models\//, '');
-  const durationSec = (Number(chunkDurationMs || 18000) / 1000).toFixed(1);
+  const durMs = Math.max(4000, Number(chunkDurationMs || 28000));
+  const durSecNum = durMs / 1000;
+  const durationSec = durSecNum.toFixed(1);
   const ctxHint = movieContext?.title
     ? `Movie context: "${movieContext.title}"${movieContext.genres?.length ? ` [${movieContext.genres.join(', ')}]` : ''} — adapt tone and pronouns naturally.\n`
     : '';
-  const systemText = `You are a professional movie subtitle translator. Listen to spoken dialogue in ANY language and output subtitles WRITTEN STRICTLY IN ${langSpec.name} (${langSpec.native}). NEVER transcribe or output in the original spoken language or Chinese characters unless the target language itself is Chinese.`;
-  const prompt = `Listen to this ${durationSec}-second movie audio clip (starts at 0.0s).\nTRANSLATE ALL spoken dialogue directly into ${langSpec.prompt}.\nCRITICAL RULE: Every "t" MUST be 100% in ${langSpec.name} (${langSpec.native}). NEVER output the original spoken language (e.g. NEVER output Chinese characters when translating into Vietnamese).\n${ctxHint}Rules:\n- "s" and "e" = float seconds relative to 0.0 (0.0 <= s < e <= ${durationSec}), 1.2s-4.8s per cue.\n- Skip music/silence; if no speech, return [].\nReturn ONLY JSON array: [{"s":1.2,"e":3.6,"t":"subtitle in ${langSpec.name}"}]`;
+  const systemText = `You are a professional movie subtitle translator. Listen carefully to the ENTIRE audio clip from start to end and output complete time-aligned subtitles WRITTEN STRICTLY IN ${langSpec.name} (${langSpec.native}). NEVER transcribe in the original spoken language. NEVER skip the second half of the clip or quiet dialogue.`;
+  const sensitivityLine = retrySensitive
+    ? `IMPORTANT RECOVERY: There IS spoken dialogue in this ${durationSec}s clip (possibly quiet or over music). Capture EVERY audible spoken sentence from 0.0s to ${durationSec}s.\n`
+    : `COVERAGE RULE: Translate EVERY spoken sentence from 0.0s all the way to ${durationSec}s without stopping early.\n`;
+  const prompt = `Listen to this ${durationSec}-second movie audio clip (starts at 0.0s, ends at ${durationSec}s).\nTRANSLATE ALL spoken dialogue directly into ${langSpec.prompt}.\nCRITICAL RULE: Every "t" MUST be 100% in ${langSpec.name} (${langSpec.native}). NEVER output the original spoken language (e.g. NEVER output Chinese characters when translating into Vietnamese).\n${sensitivityLine}${ctxHint}Rules:\n- "s" and "e" = float seconds relative to 0.0 (0.0 <= s < e <= ${durationSec}), 1.0s-4.8s per cue.\n- Only return [] if 100% silence/instrumental music with zero speech.\nReturn ONLY JSON array: [{"s":1.2,"e":3.6,"t":"subtitle in ${langSpec.name}"}]`;
 
-  const genConfig = { temperature: 0.15, responseMimeType: 'application/json' };
+  const genConfig = { temperature: 0.15, responseMimeType: 'application/json', maxOutputTokens: 4096 };
   const lower = cleanModel.toLowerCase();
   if (lower.startsWith('gemini-3') && lower.includes('flash')) genConfig.thinkingConfig = { thinkingLevel: 'MINIMAL' };
-  else if (lower.startsWith('gemini-2.5') && lower.includes('flash')) genConfig.thinkingConfig = { thinkingBudget: 0 };
+  else if (lower.startsWith('gemini-2.5') && lower.includes('flash') && !retrySensitive) genConfig.thinkingConfig = { thinkingBudget: 0 };
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(cleanModel)}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
   const res = await fetch(url, {
@@ -313,19 +325,37 @@ export async function transcribeAudioChunkDirect({
   }
   const s = raw.indexOf('[');
   const e = raw.lastIndexOf(']');
-  if (s < 0 || e <= s) return [];
-  const arr = JSON.parse(raw.slice(s, e + 1));
+  let arr = [];
+  if (s >= 0 && e > s) {
+    try { arr = JSON.parse(raw.slice(s, e + 1)); } catch { arr = []; }
+  }
+  if (!arr.length && s >= 0) {
+    const matches = raw.slice(s).match(/\{[^{}]*"(?:t|text)"\s*:\s*"(?:\\.|[^"\\])*"[^{}]*\}/g) || [];
+    for (const m of matches) {
+      try { arr.push(JSON.parse(m)); } catch { /* ignore */ }
+    }
+  }
   const out = [];
+  const baseOffsetSec = Number(chunkStartOffsetMs || 0) / 1000;
   for (let i = 0; i < arr.length; i++) {
     const o = arr[i];
     const txt = String(o?.t || o?.text || '').trim();
-    const sSec = Number(o?.s ?? o?.start);
+    let sSec = Number(o?.s ?? o?.start);
     if (!txt || !Number.isFinite(sSec)) continue;
-    const eSec = Number.isFinite(Number(o?.e ?? o?.end)) ? Number(o?.e ?? o?.end) : sSec + 2.5;
-    const relStart = Math.max(0, Math.min(chunkDurationMs + 4000, Math.round(sSec * 1000)));
-    const relEnd = Math.max(relStart + 500, Math.min(chunkDurationMs + 5000, Math.round(eSec * 1000)));
+    let eSec = Number.isFinite(Number(o?.e ?? o?.end)) ? Number(o?.e ?? o?.end) : sSec + 2.5;
+    if (sSec > durSecNum * 2.2 && sSec <= durMs + 5000) {
+      sSec /= 1000;
+      if (eSec > durSecNum * 2.2 && eSec <= durMs + 8000) eSec /= 1000;
+    } else if (baseOffsetSec > 10 && sSec >= baseOffsetSec - 2 && sSec <= baseOffsetSec + durSecNum + 4) {
+      sSec -= baseOffsetSec;
+      eSec -= baseOffsetSec;
+    }
+    if (sSec > durSecNum + 4) continue;
+    const relStart = Math.max(0, Math.min(durMs + 4000, Math.round(sSec * 1000)));
+    const relEnd = Math.max(relStart + 500, Math.min(durMs + 5000, Math.round(eSec * 1000)));
     out.push({ id: i + 1, startMs: chunkStartOffsetMs + relStart, endMs: chunkStartOffsetMs + relEnd, text: txt });
   }
+  out.sort((a, b) => a.startMs - b.startMs);
   // Safety net: if direct Gemini audio slipped into wrong script (e.g. Chinese Hanzi for Vietnamese), repair via text translation!
   if (out.length && (hasWrongScriptForLang(out, langSpec.code) || out.some((c) => isSingleLineWrongScript(c.text, langSpec.code)))) {
     try {
@@ -853,6 +883,7 @@ export async function parseHlsMediaSegments(m3u8Url, signal = undefined) {
   let mediaSeq = 0;
   let curKey = null;
   let pendingDurSec = 0;
+  let pendingDiscontinuity = false;
   let accMs = 0;
   const segments = [];
 
@@ -860,6 +891,8 @@ export async function parseHlsMediaSegments(m3u8Url, signal = undefined) {
     const line = lines[i];
     if (line.startsWith('#EXT-X-MEDIA-SEQUENCE:')) {
       mediaSeq = Number(line.split(':')[1]) || 0;
+    } else if (line.startsWith('#EXT-X-DISCONTINUITY')) {
+      pendingDiscontinuity = true;
     } else if (line.startsWith('#EXT-X-KEY:')) {
       curKey = parseExtXKeyAttrs(line, mediaUrl);
     } else if (line.startsWith('#EXTINF:')) {
@@ -875,9 +908,11 @@ export async function parseHlsMediaSegments(m3u8Url, signal = undefined) {
         durationMs: durMs,
         endMs: accMs + durMs,
         key: curKey,
+        discontinuity: pendingDiscontinuity,
       });
       accMs += durMs;
       pendingDurSec = 0;
+      pendingDiscontinuity = false;
     }
   }
 
@@ -996,6 +1031,15 @@ export function extractAdtsFromTs(u8) {
     out.set(c, pos);
     pos += c.length;
   }
+  // Align to the first valid ADTS syncword (0xFF 0xF0..0xFF) so concatenated segments never start mid-frame!
+  if (out.length > 7 && !(out[0] === 0xff && (out[1] & 0xf0) === 0xf0)) {
+    const scanMax = Math.min(out.length - 7, 4096);
+    for (let k = 1; k < scanMax; k++) {
+      if (out[k] === 0xff && (out[k + 1] & 0xf6) === 0xf0) {
+        return out.subarray(k);
+      }
+    }
+  }
   return out;
 }
 
@@ -1024,24 +1068,19 @@ async function decryptHlsSegmentIfNeeded(buf, keyInfo, seqNum, keyCache, signal)
 }
 
 /**
- * Packs HLS media segments into clean ~45-second audio windows for ultra-fast
- * parallel lookahead transcription (10 minutes ahead = ~13 windows!).
+ * Packs HLS media segments into clean ~28-second audio windows with 1-segment boundary overlap (~3-5s)
+ * and discontinuity boundaries so sentences crossing edges are NEVER cut off and Gemini NEVER truncates!
  */
-export function buildHlsAudioWindows(segments, targetWindowSec = 45) {
-  const targetMs = Math.max(20, Math.min(60, targetWindowSec)) * 1000;
-  const windows = [];
+export function buildHlsAudioWindows(segments, targetWindowSec = 28) {
+  const targetMs = Math.max(16, Math.min(55, targetWindowSec)) * 1000;
+  const rawGroups = [];
   let curSegs = [];
   let curDur = 0;
 
   for (const seg of segments) {
-    if (curSegs.length > 0 && curDur + seg.durationMs > targetMs + 6000) {
-      windows.push({
-        index: windows.length,
-        startMs: curSegs[0].startMs,
-        endMs: curSegs[curSegs.length - 1].endMs,
-        durationMs: curSegs[curSegs.length - 1].endMs - curSegs[0].startMs,
-        segments: curSegs,
-      });
+    const hitDiscontinuity = Boolean(seg.discontinuity && curSegs.length > 0);
+    if (curSegs.length > 0 && (hitDiscontinuity || curDur + seg.durationMs > targetMs + 4000)) {
+      rawGroups.push({ segs: curSegs, brokeAtDiscontinuity: hitDiscontinuity });
       curSegs = [];
       curDur = 0;
     }
@@ -1049,15 +1088,85 @@ export function buildHlsAudioWindows(segments, targetWindowSec = 45) {
     curDur += seg.durationMs;
   }
   if (curSegs.length > 0) {
+    rawGroups.push({ segs: curSegs, brokeAtDiscontinuity: false });
+  }
+
+  const windows = [];
+  for (let i = 0; i < rawGroups.length; i++) {
+    const core = rawGroups[i].segs;
+    const prevGroup = i > 0 ? rawGroups[i - 1] : null;
+    // Prepend 1 overlap segment (~3-5s) from previous window unless separated by a discontinuity
+    const canOverlap = Boolean(
+      prevGroup &&
+      !prevGroup.brokeAtDiscontinuity &&
+      !core[0]?.discontinuity &&
+      prevGroup.segs.length >= 2 &&
+      (prevGroup.segs[prevGroup.segs.length - 1]?.durationMs || 0) <= 8500
+    );
+    const extractSegs = canOverlap ? [prevGroup.segs[prevGroup.segs.length - 1], ...core] : core;
     windows.push({
-      index: windows.length,
-      startMs: curSegs[0].startMs,
-      endMs: curSegs[curSegs.length - 1].endMs,
-      durationMs: curSegs[curSegs.length - 1].endMs - curSegs[0].startMs,
-      segments: curSegs,
+      index: i,
+      startMs: extractSegs[0].startMs,
+      coreStartMs: core[0].startMs,
+      endMs: extractSegs[extractSegs.length - 1].endMs,
+      durationMs: extractSegs[extractSegs.length - 1].endMs - extractSegs[0].startMs,
+      segments: extractSegs,
     });
   }
   return windows;
+}
+
+/**
+ * Surgical Gap Detector: scans existing cues across all HLS windows WITHOUT touching already-translated
+ * windows, returning ONLY windows that have 0 cues OR a >18s blank hole where dialogue was dropped!
+ */
+export function findMissingAudioGapWindows(windows, cues) {
+  if (!Array.isArray(windows) || !windows.length) return [];
+  const sorted = (Array.isArray(cues) ? cues : [])
+    .filter((c) => c && c.text && Number.isFinite(c.startMs))
+    .sort((a, b) => a.startMs - b.startMs);
+
+  const windowHasCues = windows.map((w) => {
+    const sBound = (w.coreStartMs ?? w.startMs) + 400;
+    const eBound = Math.max(sBound + 500, w.endMs - 400);
+    return sorted.filter((c) => {
+      const cStart = c.startMs || 0;
+      const cEnd = Math.max(c.endMs || cStart + 2000, cStart + 450);
+      return cEnd >= sBound && cStart <= eBound;
+    });
+  });
+
+  const gaps = [];
+  for (let i = 0; i < windows.length; i++) {
+    const w = windows[i];
+    const coreStart = w.coreStartMs ?? w.startMs;
+    const coreDur = Math.max(1000, w.endMs - coreStart);
+    const inside = windowHasCues[i];
+
+    // 1. Completely blank window (0 cues!)
+    if (!inside.length) {
+      gaps.push({ win: w, reason: 'empty', maxHoleMs: coreDur });
+      continue;
+    }
+
+    // 2. Partial cutoff inside window (e.g. Gemini stopped after 8s of a 28s clip -> >18s uncovered hole!)
+    if (coreDur >= 20000) {
+      let cursor = coreStart;
+      let maxHole = 0;
+      for (const c of inside) {
+        const s = Math.max(coreStart, c.startMs || 0);
+        const e = Math.min(w.endMs, Math.max(c.endMs || s + 2000, s + 450));
+        if (s - cursor > maxHole) maxHole = s - cursor;
+        if (e > cursor) cursor = e;
+      }
+      if (w.endMs - cursor > maxHole) maxHole = w.endMs - cursor;
+      // Only flag partial holes >= 19s (avoids wasting tokens on normal short scenic pauses!)
+      if (maxHole >= 19000) {
+        gaps.push({ win: w, reason: 'partial_hole', maxHoleMs: maxHole });
+      }
+    }
+  }
+  return gaps;
 }
 
 /**

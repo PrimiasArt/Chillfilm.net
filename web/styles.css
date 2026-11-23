@@ -920,6 +920,19 @@ button > svg {
   background: #000 !important;
 }
 
+/* Guarantee Subtitle/Options/Party Modals & Toasts render crisply ON TOP inside Browser Fullscreen Top Layer! */
+.player-modal .backdrop {
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 2147483000 !important;
+  pointer-events: auto !important;
+}
+
+.player-modal .toast {
+  position: fixed !important;
+  z-index: 2147483640 !important;
+}
+
 .player-modal:fullscreen .player-hud,
 .player-modal:-webkit-full-screen .player-hud {
   padding: 12px 20px 16px;

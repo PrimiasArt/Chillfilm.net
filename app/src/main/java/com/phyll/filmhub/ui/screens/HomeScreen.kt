@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -42,6 +43,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Language
@@ -78,6 +81,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
 import com.phyll.filmhub.R
 import com.phyll.filmhub.data.CatalogSection
@@ -113,6 +118,8 @@ fun HomeScreen(
     sections: List<CatalogSection>,
     watchHistory: List<WatchProgress>,
     myList: List<MovieItem> = emptyList(),
+    downloadsCount: Int = 0,
+    isInWatchParty: Boolean = false,
     isLoading: Boolean,
     searchQuery: String,
     searchResults: List<MovieItem>,
@@ -135,6 +142,10 @@ fun HomeScreen(
     onQuickPlayMovie: (MovieItem) -> Unit,
     onResumeHistory: (WatchProgress) -> Unit,
     onRemoveContinueWatching: (String) -> Unit = {},
+    onRemoveMyListItem: (MovieItem) -> Unit = {},
+    onRefreshMyListFromCloud: () -> Unit = {},
+    onOpenDownloads: () -> Unit = {},
+    onOpenWatchParty: () -> Unit = {},
     onToggleControlTargetMode: () -> Unit = {},
     onOpenTvManager: () -> Unit = {},
     onOpenQrCompanion: () -> Unit,
@@ -150,6 +161,7 @@ fun HomeScreen(
     val focusManager = LocalFocusManager.current
     var showSearchBar by remember { mutableStateOf(searchQuery.isNotBlank() || isTv) }
     var showLanguagePicker by remember { mutableStateOf(false) }
+    var showMyListDialog by remember { mutableStateOf(false) }
 
     val heroCandidates = remember(sections) {
         sections.firstOrNull()?.movies?.take(6).orEmpty()
@@ -524,6 +536,86 @@ fun HomeScreen(
                 }
             }
 
+            // 2b. Compact Quick Hub Strip: ❤️ Yêu thích (modal) + 🍿 Xem chung + 📥 Đã tải (zero clutter on Home!)
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = horizPad, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.padding(bottom = 4.dp)
+            ) {
+                item(key = "hub_my_list") {
+                    Row(
+                        modifier = Modifier
+                            .tvFocusableClickable(
+                                shape = RoundedCornerShape(99.dp),
+                                focusedBorderColor = Color(0xFFEF4444),
+                                unfocusedBorderColor = if (myList.isNotEmpty()) Color(0x66EF4444) else CinemaGlassBorder,
+                                onClick = {
+                                    showMyListDialog = true
+                                    onRefreshMyListFromCloud()
+                                }
+                            )
+                            .background(if (myList.isNotEmpty()) Color(0x26EF4444) else CinemaGlass)
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        Text(
+                            text = "❤️ Yêu thích (${myList.size})",
+                            color = TextPrimary,
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            maxLines = 1
+                        )
+                    }
+                }
+                item(key = "hub_watch_party") {
+                    Row(
+                        modifier = Modifier
+                            .tvFocusableClickable(
+                                shape = RoundedCornerShape(99.dp),
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = if (isInWatchParty) EmeraldNeon else VioletSoft.copy(alpha = 0.55f),
+                                onClick = onOpenWatchParty
+                            )
+                            .background(if (isInWatchParty) EmeraldPrimary.copy(alpha = 0.28f) else VioletPrimary.copy(alpha = 0.22f))
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        Text(
+                            text = if (isInWatchParty) "🍿 Đang Xem chung • LIVE" else "🍿 Xem chung",
+                            color = if (isInWatchParty) EmeraldNeon else Color.White,
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            maxLines = 1
+                        )
+                    }
+                }
+                item(key = "hub_downloads") {
+                    Row(
+                        modifier = Modifier
+                            .tvFocusableClickable(
+                                shape = RoundedCornerShape(99.dp),
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = if (downloadsCount > 0) EmeraldPrimary.copy(alpha = 0.6f) else CinemaGlassBorder,
+                                onClick = onOpenDownloads
+                            )
+                            .background(if (downloadsCount > 0) EmeraldPrimary.copy(alpha = 0.16f) else CinemaGlass)
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        Text(
+                            text = if (downloadsCount > 0) "📥 Đã tải ($downloadsCount)" else "📥 Đã tải",
+                            color = if (downloadsCount > 0) EmeraldNeon else TextPrimary,
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+
             // 3. Clean Horizontally Scrollable Category Chips
             LazyRow(
                 contentPadding = PaddingValues(horizontal = horizPad, vertical = 4.dp),
@@ -599,23 +691,6 @@ fun HomeScreen(
                         }
                     }
 
-                    if (myList.isNotEmpty() && selectedCountry == CountryCategory.ALL) {
-                        item(key = "my_list_row") {
-                            CatalogSectionRow(
-                                section = CatalogSection(
-                                    id = "my_list_cloud",
-                                    title = "❤️ My List",
-                                    subtitle = "Saved for later • Synced across Web, Android & TV",
-                                    movies = myList
-                                ),
-                                horizPad = horizPad,
-                                showTopTenRanks = false,
-                                onMovieFocused = { focused -> spotlightMovie = focused },
-                                onMovieClick = onMovieClick
-                            )
-                        }
-                    }
-
                     if (isLoading && sections.isEmpty()) {
                         item(key = "loading_indicator") {
                             Box(
@@ -673,6 +748,20 @@ fun HomeScreen(
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
         )
+
+        // 6. Clean ❤️ My List Modal Dialog (Replaces bulky Home row + instant ✕ delete synced 2-way with Web!)
+        if (showMyListDialog) {
+            MyListModalDialog(
+                myList = myList,
+                onDismiss = { showMyListDialog = false },
+                onRefreshCloud = onRefreshMyListFromCloud,
+                onOpenMovie = { movie ->
+                    showMyListDialog = false
+                    onMovieClick(movie)
+                },
+                onRemoveMovie = onRemoveMyListItem
+            )
+        }
     }
 }
 
@@ -1254,6 +1343,189 @@ private fun SearchResultsBody(
             ) {
                 items(results, key = { it.id }) { movie ->
                     MovieCard(movie = movie, onClick = { onMovieClick(movie) })
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MyListModalDialog(
+    myList: List<MovieItem>,
+    onDismiss: () -> Unit,
+    onRefreshCloud: () -> Unit,
+    onOpenMovie: (MovieItem) -> Unit,
+    onRemoveMovie: (MovieItem) -> Unit
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth(0.93f)
+                .widthIn(max = 560.dp)
+                .clip(RoundedCornerShape(18.dp))
+                .background(Color(0xFF0E131A))
+                .border(1.dp, Color(0x55EF4444), RoundedCornerShape(18.dp))
+                .padding(16.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "❤️ Danh sách Yêu thích (${myList.size})",
+                        color = TextPrimary,
+                        fontSize = 16.5.sp,
+                        fontWeight = FontWeight.Black
+                    )
+                    Text(
+                        text = "Đồng bộ 2 chiều Web ↔ Android/TV • Bấm ✕ để xóa ngay",
+                        color = TextSecondary,
+                        fontSize = 11.sp
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .tvFocusableClickable(
+                                shape = CircleShape,
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = CinemaGlassBorder,
+                                onClick = onRefreshCloud
+                            )
+                            .background(CinemaGlass),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = "Đồng bộ", tint = EmeraldNeon, modifier = Modifier.size(17.dp))
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .tvFocusableClickable(
+                                shape = CircleShape,
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = CinemaGlassBorder,
+                                onClick = onDismiss
+                            )
+                            .background(CinemaGlass),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.Close, contentDescription = "Đóng", tint = TextPrimary, modifier = Modifier.size(17.dp))
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            if (myList.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(CinemaSurface)
+                        .padding(24.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "Danh sách yêu thích đang trống.\nBấm biểu tượng ❤️ ở trang chi tiết phim để lưu vào đây.",
+                        color = TextSecondary,
+                        fontSize = 12.5.sp
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(360.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(myList, key = { it.id }) { movie ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .tvFocusableClickable(
+                                    shape = RoundedCornerShape(12.dp),
+                                    focusedBorderColor = EmeraldNeon,
+                                    unfocusedBorderColor = CinemaGlassBorder,
+                                    onClick = { onOpenMovie(movie) }
+                                )
+                                .background(CinemaSurface)
+                                .padding(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .width(48.dp)
+                                    .height(68.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(CinemaSurfaceElevated),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Default.Movie, null, tint = TextSecondary.copy(alpha = 0.4f), modifier = Modifier.size(20.dp))
+                                if (movie.posterUrl.isNotBlank()) {
+                                    AsyncImage(
+                                        model = movie.posterUrl,
+                                        contentDescription = movie.title,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
+                            }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = movie.title,
+                                    color = TextPrimary,
+                                    fontSize = 13.5.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                if (movie.originalTitle.isNotBlank() && !movie.originalTitle.equals(movie.title, true)) {
+                                    Text(
+                                        text = movie.originalTitle,
+                                        color = TextSecondary,
+                                        fontSize = 11.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                Text(
+                                    text = listOfNotNull(
+                                        movie.year.takeIf { it.isNotBlank() },
+                                        movie.quality.takeIf { it.isNotBlank() }
+                                    ).joinToString(" • ").ifBlank { "ChillFilm Cloud" },
+                                    color = EmeraldNeon,
+                                    fontSize = 10.5.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .tvFocusableClickable(
+                                        shape = RoundedCornerShape(9.dp),
+                                        focusedBorderColor = Color(0xFFEF4444),
+                                        unfocusedBorderColor = Color(0x44EF4444),
+                                        onClick = { onRemoveMovie(movie) }
+                                    )
+                                    .background(Color(0x22EF4444)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Delete,
+                                    contentDescription = "Xóa khỏi Yêu thích",
+                                    tint = Color(0xFFFCA5A5),
+                                    modifier = Modifier.size(17.dp)
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }

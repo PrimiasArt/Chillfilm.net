@@ -67,6 +67,7 @@ export async function POST(request) {
       apiKey: aiCfg.apiKey,
       preferredModel,
       preferTurboFlash: Boolean(body.preferTurboFlash),
+      retrySensitive: Boolean(body.retrySensitive),
       movieContext,
     });
 

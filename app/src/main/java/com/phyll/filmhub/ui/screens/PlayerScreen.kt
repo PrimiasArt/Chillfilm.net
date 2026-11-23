@@ -146,6 +146,7 @@ import com.phyll.filmhub.model.SnapCueCandidate
 import com.phyll.filmhub.model.SubtitleColorChoice
 import com.phyll.filmhub.model.SubtitleStyleConfig
 import com.phyll.filmhub.model.SubtitleTrackOption
+import com.phyll.filmhub.offline.OfflineDownloadManager
 import com.phyll.filmhub.subtitle.HlsPlaylistSanitizer
 import com.phyll.filmhub.subtitle.SubtitleParser
 import com.phyll.filmhub.subtitle.ThaiSubtitleManager
@@ -157,6 +158,9 @@ import com.phyll.filmhub.ui.components.ChillGestureFeedback
 import com.phyll.filmhub.ui.components.ChillPlayerMenu
 import com.phyll.filmhub.ui.components.ChillPlayerMenuOverlay
 import com.phyll.filmhub.ui.components.ThaiCinemaSubtitleOverlay
+import com.phyll.filmhub.ui.components.WatchPartyPlayerOverlay
+import com.phyll.filmhub.ui.components.WatchPartySyncCommand
+import com.phyll.filmhub.ui.components.WatchPartyUiState
 import com.phyll.filmhub.ui.i18n.LocalAppStrings
 import com.phyll.filmhub.ui.theme.AmberBoost
 import com.phyll.filmhub.ui.theme.BrandEmeraldVioletBrush
@@ -197,7 +201,27 @@ fun PlayerScreen(
     isTvHardware: Boolean = false,
     isMinimized: Boolean = false,
     skipIntroSec: Int = 85,
+    watchPartyState: WatchPartyUiState = WatchPartyUiState(),
+    watchPartySyncCommand: WatchPartySyncCommand? = null,
     modifier: Modifier = Modifier,
+    onConsumeWatchPartySync: (Long) -> Unit = {},
+    onReportPlayerToParty: (Boolean, Long, Boolean, Boolean) -> Unit = { _, _, _, _ -> },
+    onUpdatePartySyncBadge: (String) -> Unit = {},
+    onOpenWatchPartyHub: () -> Unit = {},
+    onTogglePartyPanel: () -> Unit = {},
+    onForcePartyResync: () -> Unit = {},
+    onSendPartyChat: (String) -> Unit = {},
+    onSendPartyReaction: (String) -> Unit = {},
+    onStartPartyCountdown: () -> Unit = {},
+    onTogglePartyControlMode: () -> Unit = {},
+    onTogglePartyVisibility: () -> Unit = {},
+    onClaimPartyHost: () -> Unit = {},
+    onQueueSearch: (String) -> Unit = {},
+    onQueueAddMovie: (MovieItem) -> Unit = {},
+    onQueueVote: (String) -> Unit = {},
+    onQueuePlay: (String) -> Unit = {},
+    onQueueRemove: (String) -> Unit = {},
+    onLeaveWatchParty: () -> Unit = {},
     onSaveGeminiKeyInline: (String, String) -> Unit = { _, _ -> },
     onConsumeRemoteCommand: (Long) -> Unit = {},
     onReportTelemetry: (CompanionPlayerTelemetry) -> Unit = {},
@@ -241,6 +265,8 @@ fun PlayerScreen(
     var autoNextCancelled by remember(episode.id, episode.streamUrl) { mutableStateOf(false) }
     var autoNextCountdownSec by remember(episode.id, episode.streamUrl) { mutableIntStateOf(0) }
     var lastUserInteractionTick by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    var partyApplyingRemoteUntilMs by remember { mutableLongStateOf(0L) }
+    val latestWatchPartyState by androidx.compose.runtime.rememberUpdatedState(watchPartyState)
 
     // PrimiasArt/Chill-Player Core Features: Lock, Gestures, DSP 200% Boost + Equalizer, Aspect Ratio, Speed, Sleep Timer, PiP
     var isLocked by remember { mutableStateOf(false) }
@@ -365,7 +391,8 @@ fun PlayerScreen(
         if (episode.headers.isNotEmpty()) {
             httpFactory.setDefaultRequestProperties(episode.headers)
         }
-        val dataSourceFactory = DefaultDataSource.Factory(context, httpFactory)
+        val upstreamFactory = DefaultDataSource.Factory(context, httpFactory)
+        val dataSourceFactory = OfflineDownloadManager.buildOfflineFirstDataSourceFactory(context, upstreamFactory)
         val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
 
         val renderersFactory = DefaultRenderersFactory(context)
@@ -643,8 +670,13 @@ fun PlayerScreen(
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
+                val posNow = maxOf(exoPlayer.currentPosition.coerceAtLeast(0L), positionMs)
+                if (latestWatchPartyState.isInRoom && latestWatchPartyState.canControl &&
+                    System.currentTimeMillis() > partyApplyingRemoteUntilMs && !isPreFlightBlocking
+                ) {
+                    onReportPlayerToParty(playing, posNow, isBuffering, true)
+                }
                 if (!playing) {
-                    val posNow = maxOf(exoPlayer.currentPosition.coerceAtLeast(0L), positionMs)
                     val durNow = maxOf(exoPlayer.duration.coerceAtLeast(0L), durationMs)
                     if (posNow > 2_000L) {
                         onSaveProgress(posNow, durNow)
@@ -1005,11 +1037,73 @@ fun PlayerScreen(
                     )
                 )
             }
+            // Periodic Watch Party viewer status heartbeat (~1.4s)
+            if (tickCount % 18 == 0 && latestWatchPartyState.isInRoom) {
+                onReportPlayerToParty(exoPlayer.isPlaying, positionMs, isBuffering, false)
+            }
             // Save watch progress every ~3 seconds so abrupt exits NEVER restart from 00:00!
             if (tickCount % 38 == 0 && exoPlayer.isPlaying && positionMs > 2_000L) {
                 onSaveProgress(positionMs, durationMs)
             }
             delay(80L)
+        }
+    }
+
+    // Watch Party 2.0: 3-Tier RTT-Compensated Smooth Soft-Sync + 3-2-1 Synchronized Countdown
+    LaunchedEffect(watchPartySyncCommand?.id) {
+        val cmd = watchPartySyncCommand ?: return@LaunchedEffect
+        onConsumeWatchPartySync(cmd.id)
+        val now = System.currentTimeMillis()
+        partyApplyingRemoteUntilMs = now + 750L
+
+        if (cmd.countdownStartAtLocalMs > now + 250L) {
+            exoPlayer.pause()
+            exoPlayer.seekTo(cmd.targetPositionMs)
+            positionMs = cmd.targetPositionMs
+            onUpdatePartySyncBadge("⏱️ Đếm ngược 3-2-1...")
+            val waitMs = (cmd.countdownStartAtLocalMs - System.currentTimeMillis()).coerceIn(200L, 6_000L)
+            delay(waitMs)
+            partyApplyingRemoteUntilMs = System.currentTimeMillis() + 750L
+            exoPlayer.setPlaybackSpeed(cmd.playbackRate.coerceIn(0.5f, 2.0f))
+            exoPlayer.playWhenReady = true
+            exoPlayer.play()
+            onUpdatePartySyncBadge("● Sync OK")
+            return@LaunchedEffect
+        }
+
+        val curPos = exoPlayer.currentPosition.coerceAtLeast(0L)
+        val driftMs = cmd.targetPositionMs - curPos
+        val absDrift = kotlin.math.abs(driftMs)
+        val baseRate = cmd.playbackRate.coerceIn(0.5f, 2.0f)
+
+        if (cmd.forceHardSeek || absDrift > 2_200L || !cmd.shouldPlay) {
+            if (absDrift > 450L || cmd.forceHardSeek) {
+                exoPlayer.seekTo(cmd.targetPositionMs)
+                positionMs = cmd.targetPositionMs
+            }
+            exoPlayer.setPlaybackSpeed(baseRate)
+            onUpdatePartySyncBadge(if (absDrift > 2_200L) "⚡ Re-Synced" else "● Sync OK")
+        } else if (absDrift > 450L) {
+            val nudge = if (driftMs > 0L) 1.05f else 0.95f
+            exoPlayer.setPlaybackSpeed((baseRate * nudge).coerceIn(0.5f, 2.0f))
+            val sign = if (driftMs > 0L) "+" else ""
+            onUpdatePartySyncBadge("⚡ Soft-Sync ($sign${"%.1f".format(driftMs / 1000.0)}s)")
+        } else {
+            exoPlayer.setPlaybackSpeed(baseRate)
+            onUpdatePartySyncBadge("● Sync OK")
+        }
+
+        if (cmd.shouldPlay && !exoPlayer.isPlaying && !isPreFlightBlocking) {
+            exoPlayer.playWhenReady = true
+            exoPlayer.play()
+        } else if (!cmd.shouldPlay && exoPlayer.isPlaying) {
+            exoPlayer.pause()
+        }
+    }
+
+    LaunchedEffect(watchPartyState.isInRoom) {
+        if (!watchPartyState.isInRoom) {
+            exoPlayer.setPlaybackSpeed(playbackSpeed)
         }
     }
 
@@ -1057,6 +1151,7 @@ fun PlayerScreen(
             }
             showFastSnapModal -> closeFastSnapModal(resumeIfWasPlaying = true)
             showSubtitleDrawer -> showSubtitleDrawer = false
+            watchPartyState.isInRoom && watchPartyState.panelVisible -> onTogglePartyPanel()
             isPreFlightBlocking -> onExitPlayer()
             else -> {
                 val finalPos = maxOf(exoPlayer.currentPosition.coerceAtLeast(0L), positionMs)
@@ -1165,6 +1260,9 @@ fun PlayerScreen(
                                 val nextPos = (exoPlayer.currentPosition - 10_000L).coerceAtLeast(0L)
                                 exoPlayer.seekTo(nextPos)
                                 positionMs = nextPos
+                                if (latestWatchPartyState.isInRoom && latestWatchPartyState.canControl) {
+                                    onReportPlayerToParty(exoPlayer.isPlaying, nextPos, isBuffering, true)
+                                }
                                 doubleTapSide = -1
                                 playerScope.launch {
                                     delay(550L)
@@ -1177,6 +1275,9 @@ fun PlayerScreen(
                                 }
                                 exoPlayer.seekTo(nextPos)
                                 positionMs = nextPos
+                                if (latestWatchPartyState.isInRoom && latestWatchPartyState.canControl) {
+                                    onReportPlayerToParty(exoPlayer.isPlaying, nextPos, isBuffering, true)
+                                }
                                 doubleTapSide = 1
                                 playerScope.launch {
                                     delay(550L)
@@ -1267,6 +1368,9 @@ fun PlayerScreen(
                             val target = (exoPlayer.currentPosition + seekOffsetSecs * 1000L).coerceAtLeast(0L)
                             exoPlayer.seekTo(target)
                             positionMs = target
+                            if (latestWatchPartyState.isInRoom && latestWatchPartyState.canControl) {
+                                onReportPlayerToParty(exoPlayer.isPlaying, target, isBuffering, true)
+                            }
                         }
                         dragMode = ChillGestureFeedback.NONE
                         gestureFeedback = ChillGestureFeedback.NONE
@@ -1749,6 +1853,31 @@ fun PlayerScreen(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        // 🍿 Watch Party 2.0 Pill (Opens Hub or Toggles Live Party Side Panel!)
+                        Row(
+                            modifier = Modifier
+                                .tvFocusableClickable(
+                                    shape = RoundedCornerShape(99.dp),
+                                    focusedBorderColor = EmeraldNeon,
+                                    unfocusedBorderColor = if (watchPartyState.isInRoom) EmeraldNeon else CinemaGlassBorder,
+                                    onClick = {
+                                        lastUserInteractionTick = System.currentTimeMillis()
+                                        if (watchPartyState.isInRoom) onTogglePartyPanel() else onOpenWatchPartyHub()
+                                    }
+                                )
+                                .background(if (watchPartyState.isInRoom) EmeraldPrimary.copy(alpha = 0.28f) else CinemaGlass)
+                                .padding(horizontal = 8.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = if (watchPartyState.isInRoom) "🍿 ${watchPartyState.roomCode}" else "🍿 Party",
+                                color = if (watchPartyState.isInRoom) EmeraldNeon else TextPrimary,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                maxLines = 1
+                            )
+                        }
+
                         // #3 1-Tap AI Voice Dubbing (Auto-Ducking) Pill
                         Row(
                             modifier = Modifier
@@ -1901,7 +2030,12 @@ fun PlayerScreen(
                         contentDesc = "Tua lùi 10s",
                         onClick = {
                             lastUserInteractionTick = System.currentTimeMillis()
-                            exoPlayer.seekTo((exoPlayer.currentPosition - 10_000L).coerceAtLeast(0L))
+                            val target = (exoPlayer.currentPosition - 10_000L).coerceAtLeast(0L)
+                            exoPlayer.seekTo(target)
+                            positionMs = target
+                            if (watchPartyState.isInRoom && watchPartyState.canControl) {
+                                onReportPlayerToParty(exoPlayer.isPlaying, target, isBuffering, true)
+                            }
                         }
                     )
 
@@ -1921,7 +2055,12 @@ fun PlayerScreen(
                         contentDesc = "Tua tới 10s",
                         onClick = {
                             lastUserInteractionTick = System.currentTimeMillis()
-                            exoPlayer.seekTo(exoPlayer.currentPosition + 10_000L)
+                            val target = exoPlayer.currentPosition + 10_000L
+                            exoPlayer.seekTo(target)
+                            positionMs = target
+                            if (watchPartyState.isInRoom && watchPartyState.canControl) {
+                                onReportPlayerToParty(exoPlayer.isPlaying, target, isBuffering, true)
+                            }
                         }
                     )
                 }
@@ -1958,6 +2097,11 @@ fun PlayerScreen(
                                     lastUserInteractionTick = System.currentTimeMillis()
                                     exoPlayer.seekTo(newVal.toLong())
                                     positionMs = newVal.toLong()
+                                },
+                                onValueChangeFinished = {
+                                    if (watchPartyState.isInRoom && watchPartyState.canControl) {
+                                        onReportPlayerToParty(exoPlayer.isPlaying, positionMs, isBuffering, true)
+                                    }
                                 },
                                 valueRange = 0f..durationMs.toFloat().coerceAtLeast(1f),
                                 modifier = Modifier
@@ -2281,7 +2425,28 @@ fun PlayerScreen(
             )
         }
 
-        // 6. Live Subtitle Customization Drawer
+        // 6. Watch Party 2.0 Live Overlay (Rendered BELOW SubtitleSettingsSheet so Subtitle Drawer ALWAYS opens cleanly on top!)
+        if (!isMinimized && watchPartyState.isInRoom) {
+            WatchPartyPlayerOverlay(
+                state = watchPartyState,
+                onTogglePanel = onTogglePartyPanel,
+                onForceResync = onForcePartyResync,
+                onSendChat = onSendPartyChat,
+                onSendReaction = onSendPartyReaction,
+                onStartCountdown = onStartPartyCountdown,
+                onToggleControlMode = onTogglePartyControlMode,
+                onToggleVisibility = onTogglePartyVisibility,
+                onClaimHost = onClaimPartyHost,
+                onQueueSearch = onQueueSearch,
+                onQueueAddMovie = onQueueAddMovie,
+                onQueueVote = onQueueVote,
+                onQueuePlay = onQueuePlay,
+                onQueueRemove = onQueueRemove,
+                onLeaveParty = onLeaveWatchParty
+            )
+        }
+
+        // 7. Live Subtitle Customization Drawer (ALWAYS strictly top-most in Fullscreen!)
         if (!isMinimized && showSubtitleDrawer) {
             val nearbySnapCues = remember(
                 positionMs,
