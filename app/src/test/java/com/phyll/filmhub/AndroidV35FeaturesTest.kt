@@ -158,4 +158,28 @@ class AndroidV35FeaturesTest {
         )
         assertEquals("nu-hoang-nuoc-mat__tap-1", OfflineDownloadManager.buildDownloadId(m1, ep1))
     }
+
+    @Test
+    fun mergeCuesChronological_neverExponentiallyDoublesEqualTimestampCues() {
+        val mgr = ThaiSubtitleManager(cacheDir = null)
+        try {
+            val base = listOf(
+                SubtitleCue(1, 12_000L, 14_500L, "Tiêu Viêm cẩn thận!"),
+                SubtitleCue(2, 12_000L, 15_000L, "Đấu Đế đã xuất hiện rồi!"),
+                SubtitleCue(3, 12_400L, 15_200L, "Chạy mau đi!")
+            )
+            var acc = base
+            // Merging the same overlapping cues 25 times previously exploded to 2^25 = 33M cues!
+            repeat(25) {
+                acc = mgr.mergeCuesChronological(acc, base)
+            }
+            assertEquals(3, acc.size)
+            // Slightly shifted boundary overlap (+600ms) with identical text also deduplicates cleanly
+            val shifted = listOf(SubtitleCue(99, 12_600L, 15_300L, "Tiêu Viêm cẩn thận!"))
+            val merged = mgr.mergeCuesChronological(acc, shifted)
+            assertEquals(3, merged.size)
+        } finally {
+            mgr.release()
+        }
+    }
 }

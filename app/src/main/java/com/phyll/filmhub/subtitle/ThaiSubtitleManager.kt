@@ -2590,22 +2590,43 @@ class ThaiSubtitleManager(
         return out
     }
 
-    private fun mergeCuesChronological(a: List<SubtitleCue>, b: List<SubtitleCue>): List<SubtitleCue> {
-        val combined = (a + b)
-            .filter { it.text.isNotBlank() }
-            .sortedBy { it.startMs }
-        val out = ArrayList<SubtitleCue>(combined.size)
-        for (c in combined) {
-            val prev = out.lastOrNull()
-            if (prev != null && kotlin.math.abs(prev.startMs - c.startMs) < 900L && prev.text == c.text) continue
-            out.add(
-                SubtitleCue(
-                    id = out.size + 1,
-                    startMs = c.startMs.coerceAtLeast(0L),
-                    endMs = c.endMs.coerceAtLeast(c.startMs + 450L),
-                    text = c.text.trim()
-                )
-            )
+    internal fun mergeCuesChronological(a: List<SubtitleCue>, b: List<SubtitleCue>): List<SubtitleCue> {
+        // Pass 1: O(N) exact (startMs + normalized text) dedup BEFORE sorting — prevents exponential 2^N doubling!
+        val seenExact = HashSet<String>((a.size + b.size).coerceAtLeast(16))
+        val unique = ArrayList<Pair<SubtitleCue, String>>(a.size + b.size)
+        for (list in listOf(a, b)) {
+            for (c in list) {
+                val txt = c.text.trim()
+                if (txt.isEmpty()) continue
+                val start = c.startMs.coerceAtLeast(0L)
+                val end = c.endMs.coerceAtLeast(start + 450L)
+                val norm = txt.replace(Regex("\\s+"), " ").lowercase()
+                if (seenExact.add("$start|$norm")) {
+                    unique.add(SubtitleCue(0, start, end, txt) to norm)
+                }
+            }
+        }
+        unique.sortWith(compareBy<Pair<SubtitleCue, String>> { it.first.startMs }.thenBy { it.second })
+
+        // Pass 2: Sliding 1400ms neighborhood dedup across ALL preceding nearby cues (overlap-safe!)
+        val out = ArrayList<SubtitleCue>(unique.size)
+        val outNorms = ArrayList<String>(unique.size)
+        for ((cue, norm) in unique) {
+            var isDup = false
+            var j = out.lastIndex
+            while (j >= 0 && (cue.startMs - out[j].startMs) <= 1_400L) {
+                if (outNorms[j] == norm) {
+                    if (cue.endMs > out[j].endMs) {
+                        out[j] = out[j].copy(endMs = cue.endMs)
+                    }
+                    isDup = true
+                    break
+                }
+                j--
+            }
+            if (isDup) continue
+            out.add(cue.copy(id = out.size + 1))
+            outNorms.add(norm)
         }
         return out
     }
@@ -2773,16 +2794,18 @@ class ThaiSubtitleManager(
         return runCatching {
             val raw = file.readText(Charsets.UTF_8)
             val obj = JSONObject(raw)
-            val primary = decodeCueListJson(obj.optJSONArray("primaryCues"))
-            if (primary.isEmpty()) return null
+            val rawPrimary = decodeCueListJson(obj.optJSONArray("primaryCues"))
+            if (rawPrimary.isEmpty()) return null
+            val primary = mergeCuesChronological(rawPrimary, emptyList())
             val resolvedLang = obj.optString("primaryLangCode", primaryLangCode)
             // Self-heal poisoned local cache (e.g. Chinese Hanzi saved under Vietnamese `vi`)!
             if (CloudSyncClient.hasWrongScriptForLang(primary, resolvedLang)) {
                 runCatching { file.delete() }
                 return null
             }
-            val source = decodeCueListJson(obj.optJSONArray("sourceCues")).ifEmpty { primary }
-            val secondary = decodeCueListJson(obj.optJSONArray("secondaryCues"))
+            val rawSource = decodeCueListJson(obj.optJSONArray("sourceCues"))
+            val source = if (rawSource.isNotEmpty()) mergeCuesChronological(rawSource, emptyList()) else primary
+            val secondary = mergeCuesChronological(decodeCueListJson(obj.optJSONArray("secondaryCues")), emptyList())
             val isFull = obj.optBoolean("isFullyTranslated", true)
             val slots = HashSet<Int>()
             obj.optJSONArray("completedAudioSlots")?.let { arr ->

@@ -1,6 +1,6 @@
 {
-  "versionName": "3.5.0",
-  "versionCode": 350,
+  "versionName": "3.5.1",
+  "versionCode": 351,
   "downloadUrl": "https://github.com/PrimiasArt/Chillfilm.net/releases/download/android-apk-latest/ChillFilm-latest.apk",
-  "releaseNotes": "ChillFilm 3.5.0 Complete Android & Smart TV Edition: Watch Party 2.0 (Public Lobby, Soft-Sync, 3-2-1 Countdown, Emoji Reactions, Up Next Queue & QR Invite), Offline Video + AI Subtitles Download (Media3 HLS + Airplane Mode + 1-Tap .SRT Export), Bulletproof Web ↔ Android AI Sub Sync & Wrong-Script Guard, Authoritative 2-Way My List Modal with Instant Delete"
+  "releaseNotes": "ChillFilm 3.5.1 Hotfix: Fix exponential duplicate subtitle cue explosion (auto-heals bloated caches), Surgical AI Gap-Repair without re-translating, Watch Party 2.0, Offline HLS + AI Subtitles Download"
 }

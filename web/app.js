@@ -10,6 +10,7 @@ import {
   buildLegacySubCacheKey,
   loadCachedEpisodeSub,
   saveCachedEpisodeSub,
+  dedupeAndMergeCues,
   hasWrongScriptForLang,
   mergeTimeRanges,
   parseHlsMediaSegments,
@@ -17,7 +18,7 @@ import {
   findMissingAudioGapWindows,
   extractHlsWindowAdtsBase64,
   downloadSrtFile,
-} from './subtitles.js?v=22';
+} from './subtitles.js?v=23';
 import { UI_LANGUAGES, resolveUiLang, t } from './i18n.js?v=16';
 import {
   normalizeMovieSlug,
@@ -3783,21 +3784,7 @@ function isCurrentPlayerMatch(movie, episode, langCode = '') {
 }
 
 function mergeCuesChronological(existingCues, newCues) {
-  const combined = [...(existingCues || []), ...(newCues || [])]
-    .filter((c) => c && c.text && Number.isFinite(c.startMs))
-    .sort((a, b) => a.startMs - b.startMs);
-  const deduped = [];
-  for (const c of combined) {
-    const prev = deduped[deduped.length - 1];
-    if (prev && Math.abs(prev.startMs - c.startMs) < 900 && prev.text === c.text) continue;
-    deduped.push({
-      id: deduped.length + 1,
-      startMs: Math.max(0, Math.round(c.startMs)),
-      endMs: Math.max(Math.round(c.endMs || c.startMs + 2500), Math.round(c.startMs) + 450),
-      text: String(c.text).trim(),
-    });
-  }
-  return deduped;
+  return dedupeAndMergeCues(existingCues, newCues);
 }
 
 function computeContiguousAheadMs(windows, doneSet, anchorMs) {

@@ -433,22 +433,54 @@ export function mergeTimeRanges(ranges) {
   return out.slice(0, 400);
 }
 
-function mergeCuesMonotonicLocal(a, b) {
-  const combined = [...(a || []), ...(b || [])]
-    .filter((c) => c && c.text && Number.isFinite(c.startMs))
-    .sort((x, y) => x.startMs - y.startMs);
+function normalizeCueDedupKey(text) {
+  return String(text || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+export function dedupeAndMergeCues(a, b = []) {
+  // Pass 1: O(N) exact (startMs + text) dedup BEFORE sorting — collapses millions of bloated duplicates in <40ms!
+  const seenExact = new Set();
+  const unique = [];
+  for (const list of [a, b]) {
+    if (!Array.isArray(list)) continue;
+    for (let i = 0; i < list.length; i++) {
+      const c = list[i];
+      if (!c || !c.text || !Number.isFinite(c.startMs)) continue;
+      const text = String(c.text).trim();
+      if (!text) continue;
+      const startMs = Math.max(0, Math.round(c.startMs));
+      const endMs = Math.max(Math.round(c.endMs || startMs + 2500), startMs + 450);
+      const normKey = normalizeCueDedupKey(text);
+      const exactKey = `${startMs}|${normKey}`;
+      if (seenExact.has(exactKey)) continue;
+      seenExact.add(exactKey);
+      unique.push({ startMs, endMs, text, normKey });
+    }
+  }
+  unique.sort((x, y) => (x.startMs - y.startMs) || (x.normKey < y.normKey ? -1 : x.normKey > y.normKey ? 1 : 0));
+
+  // Pass 2: Sliding 1400ms neighborhood dedup across ALL nearby cues (prevents equal-startMs doubling & boundary overlap dupes!)
   const out = [];
-  for (const c of combined) {
-    const prev = out[out.length - 1];
-    if (prev && Math.abs(prev.startMs - c.startMs) < 900 && prev.text === c.text) continue;
-    out.push({
-      id: out.length + 1,
-      startMs: Math.max(0, Math.round(c.startMs)),
-      endMs: Math.max(Math.round(c.endMs || c.startMs + 2500), Math.round(c.startMs) + 450),
-      text: String(c.text).trim(),
-    });
+  const outNorm = [];
+  for (let i = 0; i < unique.length; i++) {
+    const c = unique[i];
+    let isDup = false;
+    for (let j = out.length - 1; j >= 0 && (c.startMs - out[j].startMs) <= 1400; j--) {
+      if (outNorm[j] === c.normKey) {
+        if (c.endMs > out[j].endMs) out[j].endMs = c.endMs;
+        isDup = true;
+        break;
+      }
+    }
+    if (isDup) continue;
+    out.push({ id: out.length + 1, startMs: c.startMs, endMs: c.endMs, text: c.text });
+    outNorm.push(c.normKey);
   }
   return out;
+}
+
+function mergeCuesMonotonicLocal(a, b) {
+  return dedupeAndMergeCues(a, b);
 }
 
 export function buildSubCacheKey(movieSlug, episode, primaryLangCode) {
@@ -521,12 +553,23 @@ export async function loadCachedEpisodeSub(cacheKey, fallbackKey = '') {
     const validateEntry = (entry) => {
       if (!entry || !Array.isArray(entry.primaryCues) || entry.primaryCues.length < 3) return null;
       const targetLang = entry.primaryLangCode || keyLang;
-      if (hasWrongScriptForLang(entry.primaryCues, targetLang)) {
+      // Auto-heal bloated duplicate cache entries (e.g. exponential 2M duplicates) cleanly without re-translating!
+      const rawLen = entry.primaryCues.length;
+      const cleanPrimary = dedupeAndMergeCues(entry.primaryCues, []);
+      if (cleanPrimary.length < 3) return null;
+      if (hasWrongScriptForLang(cleanPrimary, targetLang)) {
         deleteCachedEpisodeSub(k).catch(() => {});
         return null;
       }
-      return {
+      const wasBloated = rawLen > cleanPrimary.length;
+      const cleanSource = entry.sourceCues?.length ? dedupeAndMergeCues(entry.sourceCues, []) : cleanPrimary;
+      const cleanSecondary = entry.secondaryCues?.length ? dedupeAndMergeCues(entry.secondaryCues, []) : [];
+      const healed = {
         ...entry,
+        primaryCues: cleanPrimary,
+        sourceCues: cleanSource,
+        secondaryCues: cleanSecondary,
+        translatedCount: Math.min(Number(entry.translatedCount || cleanPrimary.length), cleanPrimary.length),
         audioMode: Boolean(entry.audioMode || entry.isAiAudio),
         translatedWindows: Array.isArray(entry.translatedWindows)
           ? entry.translatedWindows
@@ -535,6 +578,10 @@ export async function loadCachedEpisodeSub(cacheKey, fallbackKey = '') {
             : [],
         translatedRanges: mergeTimeRanges(entry.translatedRanges),
       };
+      if (wasBloated) {
+        saveCachedEpisodeSub(k, healed, { forceOverwrite: true }).catch(() => {});
+      }
+      return healed;
     };
     try {
       const db = await openSubCacheDb();
