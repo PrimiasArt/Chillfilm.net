@@ -653,6 +653,7 @@ const $ = (id) => document.getElementById(id);
 const tr = (key, vars) => t(state.prefs.uiLang, key, vars);
 
 const MY_LIST_STORAGE_KEY = 'chillfilm_nki_mylist_v1';
+const MY_LIST_TOMBSTONES_KEY = 'chillfilm_nki_mylist_tombstones_v1';
 
 function getDisplayTitle(movie) {
   if (!movie) return '';
@@ -677,10 +678,62 @@ function makeMyListKey(movie) {
   return `${src}::${sid}::${slug}`;
 }
 
+function loadMyListTombstones() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(MY_LIST_TOMBSTONES_KEY) || '{}');
+    if (!raw || typeof raw !== 'object') return {};
+    const now = Date.now();
+    const clean = {};
+    for (const [k, ts] of Object.entries(raw)) {
+      if (Number(ts) > 0 && now - Number(ts) < 7 * 24 * 60 * 60 * 1000) {
+        clean[k] = Number(ts);
+      }
+    }
+    return clean;
+  } catch {
+    return {};
+  }
+}
+
+function markMyListTombstones(slugs = []) {
+  try {
+    const map = loadMyListTombstones();
+    const now = Date.now();
+    for (const s of slugs) {
+      const n = normalizeMovieSlug(s);
+      if (n && n !== 'unknown') map[n] = now;
+    }
+    localStorage.setItem(MY_LIST_TOMBSTONES_KEY, JSON.stringify(map));
+  } catch { /* ignore */ }
+}
+
+function clearMyListTombstone(slug) {
+  try {
+    const n = normalizeMovieSlug(slug);
+    if (!n) return;
+    const map = loadMyListTombstones();
+    if (map[n]) {
+      delete map[n];
+      localStorage.setItem(MY_LIST_TOMBSTONES_KEY, JSON.stringify(map));
+    }
+  } catch { /* ignore */ }
+}
+
 function loadMyList() {
   try {
     const arr = JSON.parse(localStorage.getItem(MY_LIST_STORAGE_KEY) || '[]');
-    return Array.isArray(arr) ? arr : [];
+    if (!Array.isArray(arr)) return [];
+    // Deduplicate by normalized slug (keep newest) so stale source-variant duplicates never stick
+    const seen = new Set();
+    const out = [];
+    for (const it of arr) {
+      if (!it || !it.slug) continue;
+      const ns = normalizeMovieSlug(it.slug);
+      if (ns && seen.has(ns)) continue;
+      if (ns) seen.add(ns);
+      out.push(it);
+    }
+    return out;
   } catch {
     return [];
   }
@@ -694,53 +747,136 @@ function saveMyList(list) {
   }
 }
 
+function isMyListEntryMatch(entry, movie) {
+  if (!entry || !movie) return false;
+  const key = makeMyListKey(movie);
+  const entryKey = entry.itemKey || makeMyListKey(entry);
+  if (entryKey && key && entryKey === key) return true;
+  const s1 = normalizeMovieSlug(entry.slug);
+  const s2 = normalizeMovieSlug(movie.slug);
+  return Boolean(s1 && s2 && s1 !== 'unknown' && s1 === s2);
+}
+
 function isInMyList(movie) {
   if (!movie || !movie.slug) return false;
-  const key = makeMyListKey(movie);
-  return loadMyList().some((it) => (it.itemKey || makeMyListKey(it)) === key);
+  return loadMyList().some((it) => isMyListEntryMatch(it, movie));
+}
+
+function syncMyListActionButtons() {
+  const heroBtn = $('heroMyListBtn');
+  if (heroBtn) {
+    const curHero = state.heroMovies?.[state.heroIndex] || state.movies?.[0];
+    if (curHero) {
+      const saved = isInMyList(curHero);
+      heroBtn.classList.toggle('saved', saved);
+      heroBtn.textContent = saved ? tr('inMyListBtn') : tr('addMyListBtn');
+    }
+  }
+  const detBtn = $('detailMyListBtn');
+  if (detBtn && state.currentMovie) {
+    const saved = isInMyList(state.currentMovie);
+    detBtn.classList.toggle('saved', saved);
+    detBtn.textContent = saved ? tr('inMyListBtn') : tr('addMyListBtn');
+  }
+}
+
+function removeFromMyList(movieOrItem, { silent = false } = {}) {
+  if (!movieOrItem || !movieOrItem.slug) return false;
+  const rawArr = (() => {
+    try {
+      const a = JSON.parse(localStorage.getItem(MY_LIST_STORAGE_KEY) || '[]');
+      return Array.isArray(a) ? a : [];
+    } catch { return []; }
+  })();
+  const normSlug = normalizeMovieSlug(movieOrItem.slug);
+  const keysToRemove = new Set();
+  if (movieOrItem.itemKey) keysToRemove.add(String(movieOrItem.itemKey));
+  keysToRemove.add(makeMyListKey(movieOrItem));
+  if (normSlug && normSlug !== 'unknown') keysToRemove.add(normSlug);
+
+  const kept = [];
+  let removedTitle = getDisplayTitle(movieOrItem);
+  for (const it of rawArr) {
+    if (isMyListEntryMatch(it, movieOrItem)) {
+      if (it.itemKey) keysToRemove.add(String(it.itemKey));
+      keysToRemove.add(makeMyListKey(it));
+      if (!removedTitle) removedTitle = getDisplayTitle(it);
+    } else {
+      kept.push(it);
+    }
+  }
+
+  saveMyList(kept);
+  markMyListTombstones([normSlug, movieOrItem.slug]);
+  if (isCloudSignedIn()) {
+    cloudPushState({ myListRemoved: Array.from(keysToRemove) }).catch(() => {});
+  }
+  renderMyListSection();
+  syncMyListActionButtons();
+  refreshEpisodeReleaseNotifications();
+  if (!silent) showToast(`🗑️ Đã xóa "${removedTitle || movieOrItem.slug}" khỏi Danh sách yêu thích`);
+  return true;
+}
+
+function clearAllMyList() {
+  const list = loadMyList();
+  if (!list.length) return;
+  const keysToRemove = new Set();
+  const slugs = [];
+  for (const it of list) {
+    if (it.itemKey) keysToRemove.add(String(it.itemKey));
+    keysToRemove.add(makeMyListKey(it));
+    const ns = normalizeMovieSlug(it.slug);
+    if (ns && ns !== 'unknown') {
+      keysToRemove.add(ns);
+      slugs.push(ns);
+    }
+  }
+  saveMyList([]);
+  markMyListTombstones(slugs);
+  if (isCloudSignedIn() && keysToRemove.size) {
+    cloudPushState({ myListRemoved: Array.from(keysToRemove) }).catch(() => {});
+  }
+  renderMyListSection();
+  syncMyListActionButtons();
+  refreshEpisodeReleaseNotifications();
+  showToast('🗑️ Đã xóa toàn bộ Danh sách yêu thích');
 }
 
 function toggleMyList(movie) {
   if (!movie || !movie.slug) return false;
-  const key = makeMyListKey(movie);
-  const list = loadMyList();
-  const existsIdx = list.findIndex((it) => (it.itemKey || makeMyListKey(it)) === key);
-  let added = false;
-
-  if (existsIdx >= 0) {
-    list.splice(existsIdx, 1);
-    saveMyList(list);
-    if (isCloudSignedIn()) {
-      cloudPushState({ myListRemoved: [key] }).catch(() => {});
-    }
-    showToast(`Removed "${getDisplayTitle(movie)}" from My List`);
-  } else {
-    const entry = {
-      itemKey: key,
-      source: movie.source || 'phimapi',
-      sourceId: movie.sourceId || '',
-      slug: movie.slug,
-      name: getDisplayTitle(movie),
-      nameEn: movie.nameEn || '',
-      nameVi: movie.nameVi || '',
-      origin_name: movie.origin_name || movie.name || '',
-      poster: movie.poster || '',
-      year: movie.year || '',
-      quality: movie.quality || 'HD',
-      lastKnownEpisode: movie.episode_current || movie.quality || '',
-      addedAt: Date.now(),
-    };
-    list.unshift(entry);
-    saveMyList(list);
-    added = true;
-    if (isCloudSignedIn()) {
-      cloudPushState({ myList: [entry] }).catch(() => {});
-    }
-    showToast(`❤️ Saved "${entry.name}" to My List!`);
+  if (isInMyList(movie)) {
+    removeFromMyList(movie);
+    return false;
   }
+  const key = makeMyListKey(movie);
+  const list = loadMyList().filter((it) => !isMyListEntryMatch(it, movie));
+  clearMyListTombstone(movie.slug);
+  const entry = {
+    itemKey: key,
+    source: movie.source || 'phimapi',
+    sourceId: movie.sourceId || '',
+    slug: movie.slug,
+    name: getDisplayTitle(movie),
+    nameEn: movie.nameEn || '',
+    nameVi: movie.nameVi || '',
+    origin_name: movie.origin_name || movie.name || '',
+    poster: movie.poster || '',
+    year: movie.year || '',
+    quality: movie.quality || 'HD',
+    lastKnownEpisode: movie.episode_current || movie.quality || '',
+    addedAt: Date.now(),
+  };
+  list.unshift(entry);
+  saveMyList(list);
+  if (isCloudSignedIn()) {
+    cloudPushState({ myList: [entry] }).catch(() => {});
+  }
+  showToast(`❤️ Đã thêm "${entry.name}" vào Danh sách yêu thích!`);
   renderMyListSection();
+  syncMyListActionButtons();
   refreshEpisodeReleaseNotifications();
-  return added;
+  return true;
 }
 
 /* ==================== #10 EPISODE RELEASE TRACKER (MY LIST BELL NOTIFICATIONS) ==================== */
@@ -836,15 +972,23 @@ function markAllNotifsRead() {
 }
 
 function renderMyListSection() {
-  const sec = $('myListSection');
-  const grid = $('myListGrid');
-  if (!sec || !grid) return;
   const list = loadMyList();
-  if (!list.length) {
-    sec.style.display = 'none';
-    return;
+  const countAll = list.length;
+
+  // Always update compact Topbar ❤️ icon badge & modal header counter (zero homepage clutter!)
+  const navBtn = $('openMyListBtn');
+  const dot = $('myListCountDot');
+  if (navBtn) navBtn.classList.toggle('has-items', countAll > 0);
+  if (dot) {
+    dot.style.display = countAll > 0 ? 'inline-block' : 'none';
+    dot.textContent = countAll > 99 ? '99+' : String(countAll);
   }
-  sec.style.display = 'block';
+  if ($('myListModalCount')) $('myListModalCount').textContent = String(countAll);
+  if ($('clearAllMyListBtn')) $('clearAllMyListBtn').style.display = countAll > 0 ? 'inline-flex' : 'none';
+
+  const grid = $('myListGrid');
+  if (!grid) return;
+
   const histSlugs = new Set(loadHistory().map((h) => normalizeMovieSlug(h.slug)));
   const isNewEpItem = (item) => {
     const latestEp = item.latestEpisode || state.latestEpisodeMap[item.slug] || '';
@@ -854,7 +998,6 @@ function renderMyListSection() {
     return Boolean(item.hasNewEpisode || (latestEp && newNum > 0 && ((oldNum > 0 && newNum > oldNum) || (!oldNum && /tập|ep|第/i.test(latestEp) && latestEp !== knownEp))));
   };
 
-  const countAll = list.length;
   const countNew = list.filter(isNewEpItem).length;
   const countWatching = list.filter((it) => histSlugs.has(normalizeMovieSlug(it.slug))).length;
   const countUnwatched = list.filter((it) => !histSlugs.has(normalizeMovieSlug(it.slug))).length;
@@ -883,16 +1026,55 @@ function renderMyListSection() {
   else if (state.myListTab === 'watching') filtered = list.filter((it) => histSlugs.has(normalizeMovieSlug(it.slug)));
   else if (state.myListTab === 'unwatched') filtered = list.filter((it) => !histSlugs.has(normalizeMovieSlug(it.slug)));
 
+  const q = String($('myListSearchInput')?.value || '').trim().toLowerCase();
+  if (q) {
+    filtered = filtered.filter((it) => {
+      const hay = `${getDisplayTitle(it)} ${it.origin_name || ''} ${it.slug || ''}`.toLowerCase();
+      return hay.includes(q);
+    });
+  }
+
   grid.innerHTML = '';
-  if (!filtered.length) {
-    grid.innerHTML = `<div style="padding:18px 10px;color:#9ca3af;font-size:12.5px;">${escapeHtml(tr('noResults'))}</div>`;
+  if (!list.length) {
+    grid.innerHTML = '<div class="mylist-empty-state">❤️ Danh sách yêu thích đang trống.<br><span style="opacity:.75;font-size:12px;">Bấm nút <strong>+ My List</strong> trong bất kỳ bộ phim nào để lưu lại xem sau (tự đồng bộ Web ↔ Android).</span></div>';
     return;
   }
-  filtered.slice(0, 36).forEach((item) => {
+  if (!filtered.length) {
+    grid.innerHTML = `<div class="mylist-empty-state">${escapeHtml(tr('noResults'))}</div>`;
+    return;
+  }
+
+  filtered.slice(0, 120).forEach((item) => {
     const card = createMovieCardElement(item);
-    card.onclick = () => openMovieDetail(item, false);
+    const rmBtn = document.createElement('button');
+    rmBtn.type = 'button';
+    rmBtn.className = 'card-remove-history-btn';
+    rmBtn.title = 'Xóa khỏi Danh sách yêu thích';
+    rmBtn.setAttribute('aria-label', 'Xóa khỏi Danh sách yêu thích');
+    rmBtn.textContent = '✕';
+    rmBtn.onclick = (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      removeFromMyList(item);
+    };
+    card.querySelector('.poster-wrap')?.appendChild(rmBtn);
+    card.onclick = () => {
+      $('myListModal')?.classList.remove('open');
+      openMovieDetail(item, false);
+    };
     grid.appendChild(card);
   });
+}
+
+function openMyListModal() {
+  renderMyListSection();
+  $('myListModal')?.classList.add('open');
+  // Refresh from NKI Cloud when opening so any deletions done on Android sync immediately!
+  const now = Date.now();
+  if (isCloudSignedIn() && now - (state.lastMyListPullTs || 0) > 8000) {
+    state.lastMyListPullTs = now;
+    pullCloudStateAndMerge({ silent: true, force: true }).catch(() => {});
+  }
 }
 
 function getCategoryLabel(catId) {
@@ -1241,7 +1423,7 @@ function flushPendingCloudProgress(useBeacon = false) {
   cloudPushState({ watchProgress: items, useBeacon }).catch(() => {});
 }
 
-async function pullCloudStateAndMerge({ silent = true, force = false } = {}) {
+async function pullCloudStateAndMerge({ silent = true, force = false, migrateLocalMyList = false } = {}) {
   if (!isCloudSignedIn()) return false;
   const now = Date.now();
   if (!force && now - state.lastCloudPullTs < 15000) return false;
@@ -1321,25 +1503,48 @@ async function pullCloudStateAndMerge({ silent = true, force = false } = {}) {
       }
     }
 
-    // Merge 2-way Cloud My List (union local + server, push any local-only items up)
+    // Authoritative Cloud My List Sync:
+    // Cloud `data.myList` is always the single source of truth so deletions on Android or other browsers
+    // immediately sync to Web and are NEVER resurrected back to Cloud!
+    // Pre-login guest favorites are only migrated upward on brand-new account registration (`migrateLocalMyList: true`).
     if (Array.isArray(data.myList)) {
-      const localList = loadMyList();
-      const mapMy = new Map();
+      const tombstones = loadMyListTombstones();
+      const nowMs = Date.now();
+
+      const bySlug = new Map();
       for (const it of data.myList) {
+        if (!it || !it.slug) continue;
+        const ns = normalizeMovieSlug(it.slug);
+        // Protect against an in-flight delete that happened locally moments ago
+        const tombTs = tombstones[ns] || 0;
+        if (tombTs && nowMs - tombTs < 60_000 && tombTs >= Number(it.addedAt || 0)) continue;
         const k = it.itemKey || makeMyListKey(it);
-        mapMy.set(k, { ...it, itemKey: k });
-      }
-      const localOnly = [];
-      for (const it of localList) {
-        const k = it.itemKey || makeMyListKey(it);
-        if (!mapMy.has(k)) {
-          mapMy.set(k, { ...it, itemKey: k });
-          localOnly.push({ ...it, itemKey: k });
+        if (!bySlug.has(ns)) {
+          bySlug.set(ns, { ...it, itemKey: k });
         }
       }
-      const mergedMy = Array.from(mapMy.values()).sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+
+      const localOnly = [];
+      if (migrateLocalMyList) {
+        const localList = loadMyList();
+        for (const it of localList) {
+          if (!it || !it.slug) continue;
+          const ns = normalizeMovieSlug(it.slug);
+          if (tombstones[ns]) continue;
+          if (!bySlug.has(ns)) {
+            const k = it.itemKey || makeMyListKey(it);
+            const entry = { ...it, itemKey: k };
+            bySlug.set(ns, entry);
+            localOnly.push(entry);
+          }
+        }
+      }
+
+      const mergedMy = Array.from(bySlug.values()).sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
       saveMyList(mergedMy);
       renderMyListSection();
+      syncMyListActionButtons();
+      refreshEpisodeReleaseNotifications();
       if (localOnly.length) {
         cloudPushState({ myList: localOnly }).catch(() => {});
       }
@@ -1671,7 +1876,6 @@ async function executeAdvancedFilter() {
   closeDetailView();
   $('heroBox').style.display = 'none';
   $('historySection').style.display = 'none';
-  if ($('myListSection')) $('myListSection').style.display = 'none';
   $('homeSwimlanes').style.display = 'none';
   $('catalogGridSection').style.display = 'block';
   document.querySelector('.content-lift')?.classList.add('no-hero');
@@ -2133,13 +2337,10 @@ async function openMovieDetail(movieOrSlug, autoPlayFirst = false, resumeSec = 0
         const myList = loadMyList();
         let myUpdated = false;
         for (const it of myList) {
-          if (normalizeMovieSlug(it.slug) === normalizeMovieSlug(detail.slug) && (!it.sourceId || it.source !== detail.source || it.name === it.slug)) {
-            it.source = detail.source;
-            it.sourceId = detail.sourceId || '';
-            it.itemKey = makeMyListKey(detail);
-            it.name = getDisplayTitle(detail);
-            if (detail.poster) it.poster = detail.poster;
-            if (detail.year) it.year = detail.year;
+          if (normalizeMovieSlug(it.slug) === normalizeMovieSlug(detail.slug) && (!it.poster || it.name === it.slug)) {
+            if (!it.name || it.name === it.slug) it.name = getDisplayTitle(detail);
+            if (!it.poster && detail.poster) it.poster = detail.poster;
+            if (!it.year && detail.year) it.year = detail.year;
             myUpdated = true;
           }
         }
@@ -7574,6 +7775,13 @@ function init() {
   });
 
   $('openCloudBtn')?.addEventListener('click', openSettingsModal);
+  $('openMyListBtn')?.addEventListener('click', () => openMyListModal());
+  $('clearAllMyListBtn')?.addEventListener('click', () => {
+    if (confirm('Xóa toàn bộ phim trong Danh sách yêu thích?')) {
+      clearAllMyList();
+    }
+  });
+  $('myListSearchInput')?.addEventListener('input', () => renderMyListSection());
   $('openPartyBtn')?.addEventListener('click', () => openPartyHubModal('lobby'));
   $('hudPartyBtn')?.addEventListener('click', () => {
     if (state.party.roomCode) {
@@ -7761,7 +7969,7 @@ function init() {
       }
       if ($('cloudPasswordInput')) $('cloudPasswordInput').value = '';
       if ($('cloudConfirmPasswordInput')) $('cloudConfirmPasswordInput').value = '';
-      await pullCloudStateAndMerge({ silent: true, force: true });
+      await pullCloudStateAndMerge({ silent: true, force: true, migrateLocalMyList: state.cloudAuthMode === 'register' });
       renderCloudCard();
       loadLiveGeminiModels({ silent: true });
     } catch (err) {

@@ -3461,6 +3461,124 @@ button > svg {
   color: #86efac;
 }
 
+.mylist-nav-btn {
+  position: relative;
+}
+
+.mylist-nav-btn.has-items svg {
+  color: #f43f5e;
+  fill: rgba(244, 63, 94, 0.25);
+}
+
+.mylist-count-dot {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border-radius: 99px;
+  background: linear-gradient(135deg, #f43f5e, #e11d48);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 17px;
+  text-align: center;
+  box-shadow: 0 2px 8px rgba(244, 63, 94, 0.45);
+  pointer-events: none;
+}
+
+.mylist-modal-card {
+  max-width: 860px;
+  width: min(94vw, 860px);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.mylist-modal-count {
+  font-size: 11.5px;
+  font-weight: 800;
+  padding: 2px 8px;
+  border-radius: 99px;
+  background: rgba(244, 63, 94, 0.16);
+  border: 1px solid rgba(244, 63, 94, 0.35);
+  color: #fda4af;
+}
+
+.mylist-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  min-height: 220px;
+}
+
+.mylist-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.mylist-search-input {
+  width: 210px;
+  max-width: 100%;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 99px;
+  color: #fff;
+  padding: 6px 12px;
+  font-size: 12px;
+  outline: none;
+}
+
+.mylist-search-input:focus {
+  border-color: var(--emerald-neon);
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.mylist-modal-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(136px, 1fr));
+  gap: 14px;
+  padding-bottom: 6px;
+}
+
+.mylist-modal-grid .movie-card {
+  width: 100%;
+  min-width: 0;
+}
+
+.mylist-modal-grid .card-remove-history-btn {
+  opacity: 0.92;
+  width: 26px;
+  height: 26px;
+  background: rgba(15, 15, 20, 0.86);
+  border-color: rgba(248, 113, 113, 0.45);
+  color: #fecaca;
+}
+
+.mylist-empty-state {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: 42px 16px;
+  color: #9ca3af;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+@media (max-width: 640px) {
+  .mylist-modal-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .mylist-search-input {
+    width: 100%;
+  }
+}
+
 /* Smart Episode Grouping, Search, Sort & Watched Checkmarks */
 .ep-toolbar {
   display: flex;

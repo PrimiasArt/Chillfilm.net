@@ -18,7 +18,7 @@
   <link rel="preconnect" href="https://phimapi.com" />
   <link rel="dns-prefetch" href="https://cdn.jsdelivr.net" />
   <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Sarabun:wght@500;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=18" />
+  <link rel="stylesheet" href="./styles.css?v=20" />
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js" defer></script>
 </head>
 <body>
@@ -45,6 +45,10 @@
         <div class="search-dropdown" id="searchDropdownDesktop" role="listbox" aria-label="Search suggestions"></div>
       </div>
       <button class="pwa-install-btn" id="pwaInstallBtn" type="button" style="display:none;" title="Cài đặt ChillFilm ra màn hình chính">📲 Cài App</button>
+      <button class="icon-btn mylist-nav-btn" id="openMyListBtn" type="button" title="Danh sách yêu thích (My List)" aria-label="My List">
+        <svg class="ui-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+        <span class="mylist-count-dot" id="myListCountDot" style="display:none;">0</span>
+      </button>
       <div class="notif-wrap">
         <button class="icon-btn" id="notifBellBtn" title="Thông báo tập mới từ My List" aria-label="Notifications">
           <svg class="ui-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
@@ -161,22 +165,6 @@
           </div>
           <div class="row-rail-wrap">
             <div class="row-rail" id="historyGrid"></div>
-          </div>
-        </section>
-
-        <!-- My List (Saved for Later — Local + Cloud Synced) -->
-        <section id="myListSection" style="display:none;" class="nf-row-section">
-          <div class="section-head mylist-head-wrap">
-            <div class="section-title">❤️ <span id="myListSectionTitle">My List</span></div>
-            <div class="mylist-filter-bar" id="myListFilterBar">
-              <button class="mylist-tab active" data-mylist-tab="all" type="button">Tất cả</button>
-              <button class="mylist-tab" data-mylist-tab="new" type="button">🆕 Có tập mới</button>
-              <button class="mylist-tab" data-mylist-tab="watching" type="button">▶ Đang xem</button>
-              <button class="mylist-tab" data-mylist-tab="unwatched" type="button">📌 Chưa xem</button>
-            </div>
-          </div>
-          <div class="row-rail-wrap">
-            <div class="row-rail" id="myListGrid"></div>
           </div>
         </section>
 
@@ -1120,6 +1108,34 @@
     </div>
   </div>
 
+  <!-- MY LIST / FAVORITES DRAWER MODAL (Clean 1-click access without cluttering Home!) -->
+  <div class="backdrop" id="myListModal">
+    <div class="modal-card mylist-modal-card">
+      <div class="modal-head">
+        <div style="display:flex;align-items:center;gap:8px;min-width:0;">
+          <h3>❤️ <span id="myListSectionTitle">Danh sách yêu thích</span></h3>
+          <span class="mylist-modal-count" id="myListModalCount">0</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <button class="section-ghost-btn" id="clearAllMyListBtn" type="button" style="display:none;">🗑️ Xóa hết</button>
+          <button class="icon-btn" data-close="myListModal" aria-label="Close"><svg class="ui-ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+        </div>
+      </div>
+      <div class="modal-body mylist-modal-body">
+        <div class="mylist-toolbar">
+          <div class="mylist-filter-bar" id="myListFilterBar">
+            <button class="mylist-tab active" data-mylist-tab="all" type="button">Tất cả</button>
+            <button class="mylist-tab" data-mylist-tab="new" type="button">🆕 Có tập mới</button>
+            <button class="mylist-tab" data-mylist-tab="watching" type="button">▶ Đang xem</button>
+            <button class="mylist-tab" data-mylist-tab="unwatched" type="button">📌 Chưa xem</button>
+          </div>
+          <input class="mylist-search-input" id="myListSearchInput" type="search" autocomplete="off" placeholder="🔍 Lọc nhanh trong danh sách..." />
+        </div>
+        <div class="mylist-modal-grid" id="myListGrid"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- KEYBOARD SHORTCUTS CHEAT-SHEET MODAL -->
   <div class="backdrop" id="shortcutsModal">
     <div class="modal-card" style="max-width:520px;">
@@ -1149,6 +1165,6 @@
 
   <div class="toast" id="toast"></div>
 
-  <script type="module" src="./app.js?v=19"></script>
+  <script type="module" src="./app.js?v=20"></script>
 </body>
 </html>

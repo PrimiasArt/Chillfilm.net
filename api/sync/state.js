@@ -78,6 +78,16 @@ export async function GET(request) {
       return m ? Number(m[1]) : 0;
     };
 
+    // Deduplicate My List by slug (keep newest added_at) so cross-source duplicates never accumulate
+    const seenMySlugs = new Set();
+    const dedupedMyListRows = [];
+    for (const r of myListRows) {
+      const normSlug = normalizeMovieSlug(r.slug || r.item_key);
+      if (normSlug && seenMySlugs.has(normSlug)) continue;
+      if (normSlug) seenMySlugs.add(normSlug);
+      dedupedMyListRows.push(r);
+    }
+
     metric('sync.state', 1, { direction: 'pull', outcome: 'success' });
     return jsonResponse({
       ok: true,
@@ -94,7 +104,7 @@ export async function GET(request) {
         durationMs: Number(r.duration_ms || 0),
         updatedAt: Number(r.updated_at || 0),
       })),
-      myList: myListRows.map((r) => {
+      myList: dedupedMyListRows.map((r) => {
         const latestEpisode = latestEpBySlug.get(r.slug) || '';
         const knownEp = String(r.last_known_episode || r.quality || '');
         const newNum = extractEpNum(latestEpisode);
@@ -209,6 +219,7 @@ export async function POST(request) {
         const source = String(raw.source || 'phimapi').trim().slice(0, 24);
         const sourceId = String(raw.sourceId || '').trim().slice(0, 64);
         const slug = String(raw.slug).trim().slice(0, 140);
+        const normSlug = normalizeMovieSlug(slug);
         const itemKey = String(raw.itemKey || `${source}::${sourceId}::${slug}`).slice(0, 220);
         const name = String(raw.name || slug).trim().slice(0, 180);
         const originName = String(raw.origin_name || '').trim().slice(0, 180);
@@ -217,6 +228,13 @@ export async function POST(request) {
         const quality = String(raw.quality || 'HD').trim().slice(0, 24);
         const lastKnownEpisode = String(raw.lastKnownEpisode || raw.episode_current || raw.quality || '').trim().slice(0, 48);
         const addedAt = Math.min(now + 60_000, Math.max(1, Math.round(Number(raw.addedAt || now))));
+        // Remove any older variant of the same movie slug under a different source/item_key
+        if (normSlug && normSlug !== 'unknown') {
+          await sql`
+            DELETE FROM nki_my_list
+            WHERE user_id = ${user.id} AND lower(slug) = ${normSlug} AND item_key <> ${itemKey}
+          `;
+        }
         await sql`
           INSERT INTO nki_my_list (user_id, item_key, source, source_id, slug, name, origin_name, poster, year, quality, last_known_episode, added_at)
           VALUES (${user.id}, ${itemKey}, ${source}, ${sourceId}, ${slug}, ${name}, ${originName}, ${poster}, ${year}, ${quality}, ${lastKnownEpisode}, ${addedAt})
@@ -230,10 +248,26 @@ export async function POST(request) {
     }
 
     if (Array.isArray(body.myListRemoved) && body.myListRemoved.length > 0) {
-      const removeKeys = body.myListRemoved.map((k) => String(k || '').trim()).filter(Boolean).slice(0, 100);
-      if (removeKeys.length) {
+      const removeKeys = body.myListRemoved.map((k) => String(k || '').trim()).filter(Boolean).slice(0, 200);
+      const removeSlugs = [...new Set(
+        removeKeys
+          .map((k) => {
+            const parts = k.split('::');
+            const tail = parts.length >= 3 ? parts.slice(2).join('::') : parts[parts.length - 1];
+            return normalizeMovieSlug(tail);
+          })
+          .filter((s) => s && s !== 'unknown')
+      )];
+      if (removeKeys.length && removeSlugs.length) {
+        await sql`
+          DELETE FROM nki_my_list
+          WHERE user_id = ${user.id}
+            AND (item_key = ANY(${removeKeys}) OR lower(slug) = ANY(${removeSlugs}))
+        `;
+      } else if (removeKeys.length) {
         await sql`DELETE FROM nki_my_list WHERE user_id = ${user.id} AND item_key = ANY(${removeKeys})`;
       }
+      metric('sync.state.removed_mylist', removeKeys.length, { outcome: 'success' });
     }
 
     if (Array.isArray(body.watchProgressRemoved) && body.watchProgressRemoved.length > 0) {
