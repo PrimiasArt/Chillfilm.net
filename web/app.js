@@ -18,7 +18,7 @@ import {
   findMissingAudioGapWindows,
   extractHlsWindowAdtsBase64,
   downloadSrtFile,
-} from './subtitles.js?v=23';
+} from './subtitles.js?v=24';
 import { UI_LANGUAGES, resolveUiLang, t } from './i18n.js?v=16';
 import {
   normalizeMovieSlug,
@@ -3783,8 +3783,8 @@ function isCurrentPlayerMatch(movie, episode, langCode = '') {
   return true;
 }
 
-function mergeCuesChronological(existingCues, newCues) {
-  return dedupeAndMergeCues(existingCues, newCues);
+function mergeCuesChronological(existingCues, newCues, isAudioMode = true) {
+  return dedupeAndMergeCues(existingCues, newCues, { isAudioMode });
 }
 
 function computeContiguousAheadMs(windows, doneSet, anchorMs) {
@@ -3848,6 +3848,9 @@ function syncAudioSubUi(statusMsg = '') {
       promptTxt.textContent = statusMsg || j.message || `🎙 AI đang dịch trước 10 phút (${state.primaryCues.length} câu)...`;
     } else {
       promptBtn.classList.remove('recording');
+      if (state.primaryCues.length >= 3) {
+        promptBtn.style.display = 'none';
+      }
       promptTxt.textContent = hasAiAudioCredentials()
         ? 'Chưa có SRT • Bấm dịch trước 10 phút Audio AI'
         : 'Chưa có SRT • Đăng nhập Cloud để AI dịch 10 phút';
@@ -4755,9 +4758,24 @@ async function repairMissingSubGaps({ movie, episode, langCode = '', initiatedFr
           j.hlsDoneWindowSet.add(win.index);
           j.hlsDoneRanges = mergeTimeRanges([...j.hlsDoneRanges, [win.startMs, win.endMs]]);
           if (newCues.length) {
-            const prevLen = j.cues.length;
-            j.cues = mergeCuesChronological(j.cues, newCues);
-            addedCues += Math.max(0, j.cues.length - prevLen);
+            // Only insert cues that fill genuinely uncovered timestamps (never double over already-translated lines!)
+            const existingSnap = j.cues;
+            const nonColliding = newCues.filter((nc) => {
+              const ns = nc.startMs || 0;
+              const ne = Math.max(nc.endMs || ns + 2200, ns + 450);
+              const nDur = Math.max(400, ne - ns);
+              return !existingSnap.some((ec) => {
+                const es = ec.startMs || 0;
+                const ee = Math.max(ec.endMs || es + 2200, es + 450);
+                const ov = Math.min(ne, ee) - Math.max(ns, es);
+                return ov > 0 && ov / Math.min(nDur, Math.max(400, ee - es)) >= 0.52;
+              });
+            });
+            if (nonColliding.length) {
+              const prevLen = j.cues.length;
+              j.cues = mergeCuesChronological(j.cues, nonColliding, true);
+              addedCues += Math.max(0, j.cues.length - prevLen);
+            }
           }
           j.doneCount = j.cues.length;
           j.percent = Math.min(99, Math.max(8, Math.round((fixedWins / gaps.length) * 100)));
@@ -6943,6 +6961,15 @@ async function autoLoadSubtitlesForMovie(movie, episode, startSec = 0) {
   }
 
   if (cached && cached.primaryCues?.length >= 3) {
+    // If local cache just auto-healed duplicate/overlapping lines, push the cleaned single-line track to NKI Cloud too!
+    if (cached._wasHealed && isCloudSignedIn()) {
+      cloudSaveSubtitle({
+        movieSlug: movie.slug,
+        episodeNameOrSlug: episode.name || episode.slug,
+        forceOverwrite: true,
+        ...cached,
+      }).catch(() => {});
+    }
     state.sourceCues = cached.sourceCues?.length ? cached.sourceCues : cached.primaryCues;
     state.primaryCues = cached.primaryCues;
     state.lastSubSourceLang = cached.sourceLangCode || 'auto';

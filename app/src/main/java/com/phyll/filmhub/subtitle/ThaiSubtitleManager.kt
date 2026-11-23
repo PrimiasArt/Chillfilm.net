@@ -2590,7 +2590,11 @@ class ThaiSubtitleManager(
         return out
     }
 
-    internal fun mergeCuesChronological(a: List<SubtitleCue>, b: List<SubtitleCue>): List<SubtitleCue> {
+    internal fun mergeCuesChronological(
+        a: List<SubtitleCue>,
+        b: List<SubtitleCue>,
+        isAudioMode: Boolean = false
+    ): List<SubtitleCue> {
         // Pass 1: O(N) exact (startMs + normalized text) dedup BEFORE sorting — prevents exponential 2^N doubling!
         val seenExact = HashSet<String>((a.size + b.size).coerceAtLeast(16))
         val unique = ArrayList<Pair<SubtitleCue, String>>(a.size + b.size)
@@ -2608,17 +2612,29 @@ class ThaiSubtitleManager(
         }
         unique.sortWith(compareBy<Pair<SubtitleCue, String>> { it.first.startMs }.thenBy { it.second })
 
-        // Pass 2: Sliding 1400ms neighborhood dedup across ALL preceding nearby cues (overlap-safe!)
+        // Pass 2: Sliding 2600ms fuzzy & time-overlap dedup (eliminates rephrased overlap/repair duplicates!)
         val out = ArrayList<SubtitleCue>(unique.size)
         val outNorms = ArrayList<String>(unique.size)
         for ((cue, norm) in unique) {
             var isDup = false
             var j = out.lastIndex
-            while (j >= 0 && (cue.startMs - out[j].startMs) <= 1_400L) {
-                if (outNorms[j] == norm) {
-                    if (cue.endMs > out[j].endMs) {
-                        out[j] = out[j].copy(endMs = cue.endMs)
-                    }
+            while (j >= 0 && (cue.startMs - out[j].startMs) <= 2_600L) {
+                val prev = out[j]
+                val ovRatio = SubtitleParser.cueOverlapRatio(prev.startMs, prev.endMs, cue.startMs, cue.endMs)
+                val sim = SubtitleParser.cueTextSimilarity(prev.text, cue.text)
+                val exactNear = outNorms[j] == norm && (cue.startMs - prev.startMs) <= 2_200L
+                val fuzzyNear = (ovRatio >= 0.20 || (cue.startMs - prev.startMs) <= 2_000L) && sim >= 0.48
+                val sameSlotOverlap = isAudioMode && (
+                    (ovRatio >= 0.55 && kotlin.math.abs(cue.startMs - prev.startMs) <= 1_300L) ||
+                        (ovRatio >= 0.35 && sim >= 0.30)
+                    )
+                if (exactNear || fuzzyNear || sameSlotOverlap) {
+                    val mergedEnd = maxOf(prev.endMs, cue.endMs)
+                    val curBetter = SubtitleParser.scoreSubtitleCueQuality(cue.text, cue.endMs - cue.startMs) >
+                        SubtitleParser.scoreSubtitleCueQuality(prev.text, prev.endMs - prev.startMs)
+                    val mergedText = if (curBetter) cue.text else prev.text
+                    out[j] = prev.copy(endMs = mergedEnd, text = mergedText)
+                    if (mergedText != prev.text) outNorms[j] = norm
                     isDup = true
                     break
                 }

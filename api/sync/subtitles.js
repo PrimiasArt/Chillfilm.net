@@ -86,7 +86,57 @@ function normalizeCueTextKey(text) {
   return String(text || '').trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
-function mergeCuesMonotonic(a, b) {
+function scoreSubtitleCueQualityServer(text, durMs = 2500) {
+  const s = String(text || '').trim();
+  if (!s) return -100;
+  let score = Math.min(s.length, 95) * 0.6;
+  if (s.length > 140) score -= (s.length - 140) * 0.5;
+  if (/[.?!…]$/.test(s)) score += 6;
+  if (/[,:;?!]/.test(s)) score += 3;
+  if (/[àáảãạăắằẳẵặâấầẩẫậđèéẻẽẹêếềểễệìíỉĩịòóỏõọôốồổỗộơớờởỡợùúủũụưứừửữựỳýỷỹỵ]/i.test(s)) score += 5;
+  if (durMs >= 900 && durMs <= 5500) score += 4;
+  return score;
+}
+
+function cueTextSimilarityServer(a, b) {
+  const na = normalizeCueTextKey(a);
+  const nb = normalizeCueTextKey(b);
+  if (!na || !nb) return 0;
+  if (na === nb) return 1;
+  const pa = na.replace(/[^\p{L}\p{N}]+/gu, '');
+  const pb = nb.replace(/[^\p{L}\p{N}]+/gu, '');
+  if (!pa || !pb) return 0;
+  if (pa === pb) return 1;
+  if (pa.length >= 6 && pb.length >= 6 && (pa.includes(pb) || pb.includes(pa))) {
+    return Math.max(0.75, Math.min(pa.length, pb.length) / Math.max(pa.length, pb.length));
+  }
+  const tok = (s) => {
+    const clean = s.replace(/[^\p{L}\p{N}\s]+/gu, ' ').replace(/\s+/g, ' ').trim();
+    if (!clean.includes(' ') && clean.length >= 4) {
+      const g = [];
+      for (let i = 0; i < clean.length - 1; i++) g.push(clean.slice(i, i + 2));
+      return g;
+    }
+    return clean.split(' ').filter(Boolean);
+  };
+  const setA = new Set(tok(na));
+  const setB = new Set(tok(nb));
+  let inter = 0;
+  for (const w of setA) if (setB.has(w)) inter += 1;
+  const union = setA.size + setB.size - inter;
+  const jaccard = union > 0 ? inter / union : 0;
+  const minSize = Math.min(setA.size, setB.size);
+  const overlapCoeff = minSize >= 3 ? inter / minSize : 0;
+  return Math.max(jaccard, overlapCoeff * 0.92);
+}
+
+function cueOverlapRatioServer(s1, e1, s2, e2) {
+  const ov = Math.min(e1, e2) - Math.max(s1, s2);
+  if (ov <= 0) return 0;
+  return ov / Math.max(400, Math.min(e1 - s1, e2 - s2));
+}
+
+function mergeCuesMonotonic(a, b, isAudioMode = false) {
   // Pass 1: O(N) exact (startMs + text) dedup BEFORE sorting — instantly collapses 2M bloated duplicates in <30ms!
   const seenExact = new Set();
   const unique = [];
@@ -106,18 +156,32 @@ function mergeCuesMonotonic(a, b) {
       unique.push({ startMs, endMs, text, normKey });
     }
   }
-  // Sort deterministically by (startMs, normKey) so equal-timestamp cues never interleave!
   unique.sort((x, y) => (x.startMs - y.startMs) || (x.normKey < y.normKey ? -1 : x.normKey > y.normKey ? 1 : 0));
 
-  // Pass 2: Sliding 1400ms neighborhood dedup across ALL preceding nearby cues (prevents boundary overlap dupes too!)
+  // Pass 2: Sliding 2600ms fuzzy & AI same-timestamp quality-winner dedup!
   const out = [];
   const outNorm = [];
   for (let i = 0; i < unique.length; i++) {
     const c = unique[i];
     let isDup = false;
-    for (let j = out.length - 1; j >= 0 && (c.startMs - out[j].startMs) <= 1400; j--) {
-      if (outNorm[j] === c.normKey) {
-        if (c.endMs > out[j].endMs) out[j].endMs = c.endMs;
+    for (let j = out.length - 1; j >= 0 && (c.startMs - out[j].startMs) <= 2600; j--) {
+      const prev = out[j];
+      const ovRatio = cueOverlapRatioServer(prev.startMs, prev.endMs, c.startMs, c.endMs);
+      const sim = cueTextSimilarityServer(prev.text, c.text);
+      const exactNear = outNorm[j] === c.normKey && (c.startMs - prev.startMs) <= 2200;
+      const fuzzyNear = (ovRatio >= 0.20 || (c.startMs - prev.startMs) <= 2000) && sim >= 0.48;
+      const audioSameSlot = isAudioMode && (
+        (ovRatio >= 0.55 && Math.abs(c.startMs - prev.startMs) <= 1300) ||
+        (ovRatio >= 0.35 && sim >= 0.30)
+      );
+      if (exactNear || fuzzyNear || audioSameSlot) {
+        const prevScore = scoreSubtitleCueQualityServer(prev.text, prev.endMs - prev.startMs);
+        const curScore = scoreSubtitleCueQualityServer(c.text, c.endMs - c.startMs);
+        if (c.endMs > prev.endMs) prev.endMs = c.endMs;
+        if (curScore > prevScore) {
+          prev.text = c.text;
+          outNorm[j] = c.normKey;
+        }
         isDup = true;
         break;
       }
@@ -175,14 +239,13 @@ export async function GET(request) {
       return jsonResponse({ ok: true, hit: false, cacheKey, rejectedWrongScript: true });
     }
 
-    // Self-heal bloated duplicate cues on read so old corrupted Cloud blobs return clean cues immediately!
-    const cleanPrimary = mergeCuesMonotonic(normalizeCues(bundle.primaryCues), []);
-    const cleanSource = bundle.sourceCues?.length
-      ? mergeCuesMonotonic(normalizeCues(bundle.sourceCues), [])
-      : cleanPrimary;
-
     // Normalize audio progress metadata so Web & Android resume from exact translated frontier!
     const audioMode = Boolean(bundle.audioMode || bundle.isAiAudio || row.is_ai_audio);
+    // Self-heal bloated & near-duplicate cues on read so old corrupted Cloud blobs return clean cues immediately!
+    const cleanPrimary = mergeCuesMonotonic(normalizeCues(bundle.primaryCues), [], audioMode);
+    const cleanSource = bundle.sourceCues?.length
+      ? mergeCuesMonotonic(normalizeCues(bundle.sourceCues), [], audioMode)
+      : cleanPrimary;
     const translatedWindows = Array.isArray(bundle.translatedWindows)
       ? bundle.translatedWindows
       : Array.isArray(bundle.completedAudioSlots)
@@ -240,7 +303,9 @@ async function handleSaveSubtitle(request) {
       return jsonResponse({ ok: false, skipped: 'Non-catalog local stream' }, 200);
     }
 
-    let primaryCues = mergeCuesMonotonic(normalizeCues(body.primaryCues), []);
+    let isFullyTranslated = Boolean(body.isFullyTranslated);
+    let isAiAudio = Boolean(body.isAiAudio || body.audioMode);
+    let primaryCues = mergeCuesMonotonic(normalizeCues(body.primaryCues), [], isAiAudio);
     if (primaryCues.length < 3) {
       return jsonResponse({ error: 'At least 3 translated cues are required' }, 400);
     }
@@ -248,10 +313,8 @@ async function handleSaveSubtitle(request) {
       metric('sync.subtitles', 1, { action: 'put', outcome: 'rejected_wrong_script' });
       return jsonResponse({ ok: false, skipped: `Subtitle text does not match target language (${lang})` }, 200);
     }
-    let sourceCues = mergeCuesMonotonic(normalizeCues(body.sourceCues), []);
-    const secondaryCues = mergeCuesMonotonic(normalizeCues(body.secondaryCues), []);
-    let isFullyTranslated = Boolean(body.isFullyTranslated);
-    let isAiAudio = Boolean(body.isAiAudio || body.audioMode);
+    let sourceCues = mergeCuesMonotonic(normalizeCues(body.sourceCues), [], isAiAudio);
+    const secondaryCues = mergeCuesMonotonic(normalizeCues(body.secondaryCues), [], isAiAudio);
     let completedAudioSlots = Array.isArray(body.completedAudioSlots)
       ? body.completedAudioSlots.slice(0, 500)
       : Array.isArray(body.translatedWindows)
@@ -291,8 +354,9 @@ async function handleSaveSubtitle(request) {
       }
       if (!existingPoisoned) {
         const exFull = Boolean(existing[0].is_fully_translated);
-        const dedupedOldPrimary = oldBundle ? mergeCuesMonotonic(normalizeCues(oldBundle.primaryCues), []) : [];
-        const oldWasBloated = Boolean(oldBundle?.primaryCues && oldBundle.primaryCues.length > dedupedOldPrimary.length * 1.25);
+        const oldIsAudio = Boolean(isAiAudio || oldBundle?.isAiAudio || oldBundle?.audioMode);
+        const dedupedOldPrimary = oldBundle ? mergeCuesMonotonic(normalizeCues(oldBundle.primaryCues), [], oldIsAudio) : [];
+        const oldWasBloated = Boolean(oldBundle?.primaryCues && oldBundle.primaryCues.length > dedupedOldPrimary.length);
         const exCount = dedupedOldPrimary.length || Number(existing[0].cue_count || 0);
         if (!oldWasBloated && exFull && !isFullyTranslated) {
           return jsonResponse({ ok: true, skipped: 'Cloud already has a complete subtitle', cacheKey });
@@ -301,10 +365,10 @@ async function handleSaveSubtitle(request) {
           return jsonResponse({ ok: true, skipped: 'Cloud already has a richer complete subtitle', cacheKey });
         }
         // Monotonic merge for partial/incremental AI Audio subtitles
-        if (oldBundle && (isAiAudio || oldBundle.isAiAudio || oldBundle.audioMode)) {
+        if (oldBundle && oldIsAudio) {
           if (dedupedOldPrimary.length) {
-            primaryCues = mergeCuesMonotonic(dedupedOldPrimary, primaryCues);
-            sourceCues = sourceCues.length ? mergeCuesMonotonic(normalizeCues(oldBundle.sourceCues), sourceCues) : primaryCues;
+            primaryCues = mergeCuesMonotonic(dedupedOldPrimary, primaryCues, true);
+            sourceCues = sourceCues.length ? mergeCuesMonotonic(normalizeCues(oldBundle.sourceCues), sourceCues, true) : primaryCues;
           }
           const oldSlots = Array.isArray(oldBundle.translatedWindows)
             ? oldBundle.translatedWindows

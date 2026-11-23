@@ -174,7 +174,7 @@ export function findActiveCueText(cues, effectiveMs) {
   }
   if (candidate < 0) return '';
 
-  // Overlap-safe backward window scan (up to 16 preceding cues) so overlapping AI/ASS cues NEVER drop out!
+  // Overlap-safe backward window scan (up to 16 preceding cues) with fuzzy near-duplicate suppression!
   const windowStart = Math.max(0, candidate - 16);
   const matched = [];
   for (let i = windowStart; i <= candidate; i++) {
@@ -183,13 +183,28 @@ export function findActiveCueText(cues, effectiveMs) {
     const sMs = c.startMs || 0;
     const eMs = Math.max(c.endMs || sMs + 2000, sMs + 450);
     if (effectiveMs >= sMs - 60 && effectiveMs <= eMs + 140) {
-      if (!matched.includes(c.text)) {
-        matched.push(c.text);
+      const dupIdx = matched.findIndex((m) => {
+        if (m.text === c.text) return true;
+        const sim = cueTextSimilarity(m.text, c.text);
+        if (sim >= 0.48) return true;
+        const ov = timeOverlapRatio(m.startMs, m.endMs, sMs, eMs);
+        // Same spoken moment translated twice by 2 different AI passes -> keep only the better line!
+        if (Math.abs(m.startMs - sMs) <= 850 && ov >= 0.65 && (Math.abs(m.endMs - eMs) <= 950 || sim >= 0.36)) {
+          return true;
+        }
+        return false;
+      });
+      if (dupIdx >= 0) {
+        if (scoreSubtitleCueQuality(c.text, eMs - sMs) > scoreSubtitleCueQuality(matched[dupIdx].text, matched[dupIdx].endMs - matched[dupIdx].startMs)) {
+          matched[dupIdx] = { startMs: sMs, endMs: eMs, text: c.text };
+        }
+      } else {
+        matched.push({ startMs: sMs, endMs: eMs, text: c.text });
       }
     }
   }
   if (!matched.length) return '';
-  return matched.slice(-2).join('\n');
+  return matched.slice(-2).map((m) => m.text).join('\n');
 }
 
 export async function fetchOpenSubtitlesV3(imdbId, isSeries, season = 1, episode = 1) {
@@ -437,7 +452,78 @@ function normalizeCueDedupKey(text) {
   return String(text || '').trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
-export function dedupeAndMergeCues(a, b = []) {
+function tokenizeCueForSimilarity(text) {
+  const clean = String(text || '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!clean) return [];
+  // Only fall back to character bigrams for unspaced scripts (CJK / Thai), never short spaced English/Vietnamese!
+  if (!clean.includes(' ') && clean.length >= 4) {
+    const grams = [];
+    for (let i = 0; i < clean.length - 1; i++) grams.push(clean.slice(i, i + 2));
+    return grams;
+  }
+  return clean.split(' ').filter(Boolean);
+}
+
+/**
+ * Scores a subtitle line so when two AI passes translate the same spoken moment differently,
+ * we ALWAYS keep the fuller, cleaner, better-punctuated natural translation!
+ */
+export function scoreSubtitleCueQuality(text, durMs = 2500) {
+  const s = String(text || '').trim();
+  if (!s) return -100;
+  let score = 0;
+  const len = s.length;
+  // Sweet spot: complete natural subtitle sentence (12..105 chars), gently penalize tiny fragments or huge walls
+  score += Math.min(len, 95) * 0.6;
+  if (len > 140) score -= (len - 140) * 0.5;
+  if (/[.?!…]$/.test(s)) score += 6;
+  if (/[,:;?!]/.test(s)) score += 3;
+  // Reward natural Vietnamese diacritics / rich phrasing over stripped ASCII
+  if (/[àáảãạăắằẳẵặâấầẩẫậđèéẻẽẹêếềểễệìíỉĩịòóỏõọôốồổỗộơớờởỡợùúủũụưứừửữựỳýỷỹỵ]/i.test(s)) score += 5;
+  // Natural duration bonus (1.0s..5.5s)
+  if (durMs >= 900 && durMs <= 5500) score += 4;
+  return score;
+}
+
+export function cueTextSimilarity(a, b) {
+  const na = normalizeCueDedupKey(a);
+  const nb = normalizeCueDedupKey(b);
+  if (!na || !nb) return 0;
+  if (na === nb) return 1;
+  const pa = na.replace(/[^\p{L}\p{N}]+/gu, '');
+  const pb = nb.replace(/[^\p{L}\p{N}]+/gu, '');
+  if (!pa || !pb) return 0;
+  if (pa === pb) return 1;
+  if (pa.length >= 6 && pb.length >= 6 && (pa.includes(pb) || pb.includes(pa))) {
+    return Math.max(0.75, Math.min(pa.length, pb.length) / Math.max(pa.length, pb.length));
+  }
+  const ta = tokenizeCueForSimilarity(na);
+  const tb = tokenizeCueForSimilarity(nb);
+  if (!ta.length || !tb.length) return 0;
+  const setA = new Set(ta);
+  const setB = new Set(tb);
+  let inter = 0;
+  for (const w of setA) if (setB.has(w)) inter += 1;
+  const union = setA.size + setB.size - inter;
+  const jaccard = union > 0 ? inter / union : 0;
+  // Overlap coefficient catches partial-vs-complete re-translations (e.g. "Này, đằng kia có thứ gì vậy?" inside "Này, đằng kia có thứ gì thế? Mau đi xem thử!")
+  const minSize = Math.min(setA.size, setB.size);
+  const overlapCoeff = minSize >= 3 ? inter / minSize : 0;
+  return Math.max(jaccard, overlapCoeff * 0.92);
+}
+
+function timeOverlapRatio(s1, e1, s2, e2) {
+  const ov = Math.min(e1, e2) - Math.max(s1, s2);
+  if (ov <= 0) return 0;
+  const minDur = Math.max(400, Math.min(e1 - s1, e2 - s2));
+  return ov / minDur;
+}
+
+export function dedupeAndMergeCues(a, b = [], { isAudioMode = false } = {}) {
   // Pass 1: O(N) exact (startMs + text) dedup BEFORE sorting — collapses millions of bloated duplicates in <40ms!
   const seenExact = new Set();
   const unique = [];
@@ -459,15 +545,31 @@ export function dedupeAndMergeCues(a, b = []) {
   }
   unique.sort((x, y) => (x.startMs - y.startMs) || (x.normKey < y.normKey ? -1 : x.normKey > y.normKey ? 1 : 0));
 
-  // Pass 2: Sliding 1400ms neighborhood dedup across ALL nearby cues (prevents equal-startMs doubling & boundary overlap dupes!)
+  // Pass 2: Sliding 2600ms fuzzy & AI same-timestamp quality-winner dedup!
   const out = [];
   const outNorm = [];
   for (let i = 0; i < unique.length; i++) {
     const c = unique[i];
     let isDup = false;
-    for (let j = out.length - 1; j >= 0 && (c.startMs - out[j].startMs) <= 1400; j--) {
-      if (outNorm[j] === c.normKey) {
-        if (c.endMs > out[j].endMs) out[j].endMs = c.endMs;
+    for (let j = out.length - 1; j >= 0 && (c.startMs - out[j].startMs) <= 2600; j--) {
+      const prev = out[j];
+      const ovRatio = timeOverlapRatio(prev.startMs, prev.endMs, c.startMs, c.endMs);
+      const sim = cueTextSimilarity(prev.text, c.text);
+      const exactNear = outNorm[j] === c.normKey && (c.startMs - prev.startMs) <= 2200;
+      const fuzzyNear = (ovRatio >= 0.20 || (c.startMs - prev.startMs) <= 2000) && sim >= 0.48;
+      // In AI Audio mode, two passes translating the same spoken window (>= 55% time overlap) collapse to the BETTER translation!
+      const audioSameSlot = isAudioMode && (
+        (ovRatio >= 0.55 && Math.abs(c.startMs - prev.startMs) <= 1300) ||
+        (ovRatio >= 0.35 && sim >= 0.30)
+      );
+      if (exactNear || fuzzyNear || audioSameSlot) {
+        const prevScore = scoreSubtitleCueQuality(prev.text, prev.endMs - prev.startMs);
+        const curScore = scoreSubtitleCueQuality(c.text, c.endMs - c.startMs);
+        if (c.endMs > prev.endMs) prev.endMs = c.endMs;
+        if (curScore > prevScore) {
+          prev.text = c.text;
+          outNorm[j] = c.normKey;
+        }
         isDup = true;
         break;
       }
@@ -479,8 +581,8 @@ export function dedupeAndMergeCues(a, b = []) {
   return out;
 }
 
-function mergeCuesMonotonicLocal(a, b) {
-  return dedupeAndMergeCues(a, b);
+function mergeCuesMonotonicLocal(a, b, isAudioMode = false) {
+  return dedupeAndMergeCues(a, b, { isAudioMode });
 }
 
 export function buildSubCacheKey(movieSlug, episode, primaryLangCode) {
@@ -555,15 +657,16 @@ export async function loadCachedEpisodeSub(cacheKey, fallbackKey = '') {
       const targetLang = entry.primaryLangCode || keyLang;
       // Auto-heal bloated duplicate cache entries (e.g. exponential 2M duplicates) cleanly without re-translating!
       const rawLen = entry.primaryCues.length;
-      const cleanPrimary = dedupeAndMergeCues(entry.primaryCues, []);
+      const isAudioEntry = Boolean(entry.audioMode || entry.isAiAudio);
+      const cleanPrimary = dedupeAndMergeCues(entry.primaryCues, [], { isAudioMode: isAudioEntry });
       if (cleanPrimary.length < 3) return null;
       if (hasWrongScriptForLang(cleanPrimary, targetLang)) {
         deleteCachedEpisodeSub(k).catch(() => {});
         return null;
       }
       const wasBloated = rawLen > cleanPrimary.length;
-      const cleanSource = entry.sourceCues?.length ? dedupeAndMergeCues(entry.sourceCues, []) : cleanPrimary;
-      const cleanSecondary = entry.secondaryCues?.length ? dedupeAndMergeCues(entry.secondaryCues, []) : [];
+      const cleanSource = entry.sourceCues?.length ? dedupeAndMergeCues(entry.sourceCues, [], { isAudioMode: isAudioEntry }) : cleanPrimary;
+      const cleanSecondary = entry.secondaryCues?.length ? dedupeAndMergeCues(entry.secondaryCues, [], { isAudioMode: isAudioEntry }) : [];
       const healed = {
         ...entry,
         primaryCues: cleanPrimary,
@@ -580,6 +683,7 @@ export async function loadCachedEpisodeSub(cacheKey, fallbackKey = '') {
       };
       if (wasBloated) {
         saveCachedEpisodeSub(k, healed, { forceOverwrite: true }).catch(() => {});
+        healed._wasHealed = true;
       }
       return healed;
     };
@@ -638,9 +742,9 @@ export async function saveCachedEpisodeSub(cacheKey, payload, { forceOverwrite =
     const existingAudio = Boolean(existing?.audioMode || existing?.isAiAudio);
 
     if (canMerge && (incomingAudio || existingAudio)) {
-      const mergedPrimary = mergeCuesMonotonicLocal(existing.primaryCues, payload.primaryCues);
+      const mergedPrimary = mergeCuesMonotonicLocal(existing.primaryCues, payload.primaryCues, true);
       const mergedSource = payload.sourceCues?.length
-        ? mergeCuesMonotonicLocal(existing.sourceCues || existing.primaryCues, payload.sourceCues)
+        ? mergeCuesMonotonicLocal(existing.sourceCues || existing.primaryCues, payload.sourceCues, true)
         : mergedPrimary;
       const mergedWins = [...new Set([
         ...(Array.isArray(existing.translatedWindows) ? existing.translatedWindows : []),

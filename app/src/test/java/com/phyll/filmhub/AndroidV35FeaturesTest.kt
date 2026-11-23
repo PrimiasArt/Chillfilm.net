@@ -178,6 +178,27 @@ class AndroidV35FeaturesTest {
             val shifted = listOf(SubtitleCue(99, 12_600L, 15_300L, "Tiêu Viêm cẩn thận!"))
             val merged = mgr.mergeCuesChronological(acc, shifted)
             assertEquals(3, merged.size)
+
+            // Exact screenshot cases: rephrased duplicate lines collapse to 1 single best line!
+            val pair1 = listOf(
+                SubtitleCue(1, 2_558_500L, 2_561_500L, "Tiêu Viêm đâu? Mọi người có thấy huynh ấy không?"),
+                SubtitleCue(2, 2_558_700L, 2_561_800L, "Tiêu Viêm đâu rồi? Mọi người có thấy huynh ấy không?")
+            )
+            assertEquals(1, mgr.mergeCuesChronological(pair1, emptyList(), isAudioMode = true).size)
+
+            val pair2 = listOf(
+                SubtitleCue(1, 2_739_000L, 2_741_800L, "Này, đằng kia có thứ gì vậy?"),
+                SubtitleCue(2, 2_739_200L, 2_742_200L, "Này, đằng kia có thứ gì thế? Mau đi xem thử!")
+            )
+            val cleaned2 = mgr.mergeCuesChronological(pair2, emptyList(), isAudioMode = true)
+            assertEquals(1, cleaned2.size)
+            assertEquals("Này, đằng kia có thứ gì thế? Mau đi xem thử!", cleaned2[0].text)
+
+            val pair3 = listOf(
+                SubtitleCue(1, 2_735_000L, 2_737_500L, "Sắp xảy ra đại sự rồi."),
+                SubtitleCue(2, 2_735_200L, 2_737_600L, "Sắp xảy ra đại họa rồi.")
+            )
+            assertEquals(1, mgr.mergeCuesChronological(pair3, emptyList(), isAudioMode = true).size)
         } finally {
             mgr.release()
         }

@@ -1,6 +1,6 @@
 {
-  "versionName": "3.5.1",
-  "versionCode": 351,
+  "versionName": "3.5.2",
+  "versionCode": 352,
   "downloadUrl": "https://github.com/PrimiasArt/Chillfilm.net/releases/download/android-apk-latest/ChillFilm-latest.apk",
-  "releaseNotes": "ChillFilm 3.5.1 Hotfix: Fix exponential duplicate subtitle cue explosion (auto-heals bloated caches), Surgical AI Gap-Repair without re-translating, Watch Party 2.0, Offline HLS + AI Subtitles Download"
+  "releaseNotes": "ChillFilm 3.5.2 Hotfix: Smart Fuzzy & Overlap Subtitle Deduplication (eliminates double rephrased AI lines at the same timestamp), Surgical Gap-Repair, Watch Party 2.0, Offline HLS + AI Subtitles"
 }

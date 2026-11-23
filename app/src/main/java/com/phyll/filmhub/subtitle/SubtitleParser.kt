@@ -407,17 +407,86 @@ object SubtitleParser {
         }
         if (candidate < 0) return null
 
-        // Check small window backwards in case an earlier long cue overlaps current position
-        val windowStart = (candidate - 5).coerceAtLeast(0)
-        val matched = ArrayList<String>(2)
+        // Check small window backwards in case an earlier long cue overlaps current position,
+        // suppressing near-duplicate rephrased AI lines at the exact same timestamp!
+        val windowStart = (candidate - 10).coerceAtLeast(0)
+        val matched = ArrayList<SubtitleCue>(2)
         for (idx in windowStart..candidate) {
             val cue = cues[idx]
             if (effectivePositionMs in cue.startMs..cue.endMs) {
-                if (!matched.contains(cue.text)) {
-                    matched.add(cue.text)
+                val dupIdx = matched.indexOfFirst { existing ->
+                    if (existing.text == cue.text) return@indexOfFirst true
+                    val sim = cueTextSimilarity(existing.text, cue.text)
+                    if (sim >= 0.48) return@indexOfFirst true
+                    val ov = cueOverlapRatio(existing.startMs, existing.endMs, cue.startMs, cue.endMs)
+                    kotlin.math.abs(existing.startMs - cue.startMs) <= 850L &&
+                        ov >= 0.65 &&
+                        (kotlin.math.abs(existing.endMs - cue.endMs) <= 950L || sim >= 0.36)
+                }
+                if (dupIdx >= 0) {
+                    val prev = matched[dupIdx]
+                    if (scoreSubtitleCueQuality(cue.text, cue.endMs - cue.startMs) >
+                        scoreSubtitleCueQuality(prev.text, prev.endMs - prev.startMs)
+                    ) {
+                        matched[dupIdx] = cue
+                    }
+                } else {
+                    matched.add(cue)
                 }
             }
         }
-        return if (matched.isEmpty()) null else matched.joinToString("\n")
+        return if (matched.isEmpty()) null else matched.takeLast(2).joinToString("\n") { it.text }
+    }
+
+    internal fun scoreSubtitleCueQuality(text: String, durMs: Long = 2_500L): Double {
+        val s = text.trim()
+        if (s.isEmpty()) return -100.0
+        var score = minOf(s.length, 95) * 0.6
+        if (s.length > 140) score -= (s.length - 140) * 0.5
+        if (s.endsWith(".") || s.endsWith("?") || s.endsWith("!") || s.endsWith("…")) score += 6.0
+        if (s.any { it == ',' || it == ':' || it == ';' || it == '?' || it == '!' }) score += 3.0
+        if (s.any { it.code > 127 }) score += 5.0
+        if (durMs in 900L..5_500L) score += 4.0
+        return score
+    }
+
+    internal fun cueOverlapRatio(s1: Long, e1: Long, s2: Long, e2: Long): Double {
+        val ov = minOf(e1, e2) - maxOf(s1, s2)
+        if (ov <= 0L) return 0.0
+        val minDur = minOf(e1 - s1, e2 - s2).coerceAtLeast(400L)
+        return ov.toDouble() / minDur.toDouble()
+    }
+
+    internal fun cueTextSimilarity(a: String, b: String): Double {
+        val na = a.trim().replace(Regex("\\s+"), " ").lowercase()
+        val nb = b.trim().replace(Regex("\\s+"), " ").lowercase()
+        if (na.isEmpty() || nb.isEmpty()) return 0.0
+        if (na == nb) return 1.0
+        val pa = na.replace(Regex("[^\\p{L}\\p{N}]+"), "")
+        val pb = nb.replace(Regex("[^\\p{L}\\p{N}]+"), "")
+        if (pa.isEmpty() || pb.isEmpty()) return 0.0
+        if (pa == pb) return 1.0
+        if (pa.length >= 6 && pb.length >= 6 && (pa.contains(pb) || pb.contains(pa))) {
+            return maxOf(0.75, minOf(pa.length, pb.length).toDouble() / maxOf(pa.length, pb.length).toDouble())
+        }
+        fun tokenize(s: String): Set<String> {
+            val cleaned = s.replace(Regex("[^\\p{L}\\p{N}\\s]+"), " ").replace(Regex("\\s+"), " ").trim()
+            if (!cleaned.contains(' ') && cleaned.length >= 4) {
+                val grams = HashSet<String>(cleaned.length)
+                for (i in 0 until cleaned.length - 1) grams.add(cleaned.substring(i, i + 2))
+                return grams
+            }
+            return cleaned.split(' ').filter { it.isNotEmpty() }.toHashSet()
+        }
+        val setA = tokenize(na)
+        val setB = tokenize(nb)
+        if (setA.isEmpty() || setB.isEmpty()) return 0.0
+        var inter = 0
+        for (w in setA) if (w in setB) inter++
+        val union = setA.size + setB.size - inter
+        val jaccard = if (union > 0) inter.toDouble() / union.toDouble() else 0.0
+        val minSize = minOf(setA.size, setB.size)
+        val overlapCoeff = if (minSize >= 3) inter.toDouble() / minSize.toDouble() else 0.0
+        return maxOf(jaccard, overlapCoeff * 0.92)
     }
 }
