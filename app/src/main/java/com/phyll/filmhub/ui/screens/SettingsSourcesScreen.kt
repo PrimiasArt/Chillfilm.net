@@ -125,6 +125,12 @@ fun SettingsSourcesScreen(
     onAdminCreateInvite: ((String) -> Unit) -> Unit = {},
     onAdminRevokeInvite: (String) -> Unit = {},
     onAdminToggleMemberStatus: (String, String) -> Unit = { _, _ -> },
+    onAdminCreateUser: (String, String, String, String, Int, () -> Unit) -> Unit = { _, _, _, _, _, _ -> },
+    onAdminUpdateMember: (String, String?, String?, Int?) -> Unit = { _, _, _, _ -> },
+    onAdminResetMemberPassword: (String, (String) -> Unit) -> Unit = { _, _ -> },
+    onAdminResetMemberQuota: (String) -> Unit = {},
+    onAdminForceLogoutMember: (String) -> Unit = {},
+    onAdminDeleteMember: (String) -> Unit = {},
     appUpdateState: AppUpdateUiState = AppUpdateUiState(),
     hasSelectedTv: Boolean = false,
     isTvHardware: Boolean = false,
@@ -915,34 +921,309 @@ fun SettingsSourcesScreen(
                                             }
                                         }
 
-                                        snap.users.filter { it.role != "ADMIN" }.take(8).forEach { member ->
-                                            val nextStatus = if (member.status == "ACTIVE") "REVOKED" else "ACTIVE"
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                horizontalArrangement = Arrangement.SpaceBetween,
-                                                verticalAlignment = Alignment.CenterVertically
+                                        // 👑 Full Admin Account Management Suite (KPI + Search + Create + Edit Role/Quota + Reset PW + Logout + Lock + Delete)
+                                        var showCreateMemberForm by remember { mutableStateOf(false) }
+                                        var newUname by remember { mutableStateOf("") }
+                                        var newDname by remember { mutableStateOf("") }
+                                        var newUpass by remember { mutableStateOf("") }
+                                        var newURole by remember { mutableStateOf("MEMBER") }
+                                        var newUQuota by remember { mutableStateOf("150") }
+                                        var userSearchQuery by remember { mutableStateOf("") }
+                                        var confirmDeleteId by remember { mutableStateOf<String?>(null) }
+
+                                        Spacer(modifier = Modifier.height(6.dp))
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = "👑 Quản Lý Tài Khoản (${snap.totalUsers})",
+                                                    color = EmeraldNeon,
+                                                    fontSize = 12.5.sp,
+                                                    fontWeight = FontWeight.ExtraBold
+                                                )
+                                                Text(
+                                                    text = "🟢 ${snap.activeUsers} hoạt động • 🔴 ${snap.revokedUsers} khóa • ⚡ ${snap.todayAiRequests} lượt AI hôm nay",
+                                                    color = TextSecondary,
+                                                    fontSize = 10.5.sp
+                                                )
+                                            }
+                                            Box(
+                                                modifier = Modifier
+                                                    .tvFocusableClickable(
+                                                        shape = RoundedCornerShape(8.dp),
+                                                        focusedBorderColor = EmeraldNeon,
+                                                        unfocusedBorderColor = EmeraldPrimary,
+                                                        onClick = { showCreateMemberForm = !showCreateMemberForm }
+                                                    )
+                                                    .background(EmeraldPrimary.copy(alpha = 0.22f))
+                                                    .padding(horizontal = 10.dp, vertical = 6.dp)
                                             ) {
                                                 Text(
-                                                    text = "@${member.username} (${member.status} • ${member.todayRequests}/${member.dailyAiLimit})",
-                                                    color = TextPrimary,
-                                                    fontSize = 11.5.sp
+                                                    text = if (showCreateMemberForm) "▲ Đóng" else "➕ Tạo TK",
+                                                    color = EmeraldNeon,
+                                                    fontSize = 11.5.sp,
+                                                    fontWeight = FontWeight.ExtraBold
                                                 )
+                                            }
+                                        }
+
+                                        if (showCreateMemberForm) {
+                                            Column(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clip(RoundedCornerShape(10.dp))
+                                                    .background(EmeraldPrimary.copy(alpha = 0.08f))
+                                                    .border(1.dp, EmeraldNeon.copy(alpha = 0.35f), RoundedCornerShape(10.dp))
+                                                    .padding(10.dp),
+                                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                OutlinedTextField(
+                                                    value = newUname,
+                                                    onValueChange = { newUname = it },
+                                                    singleLine = true,
+                                                    label = { Text("Username (VD: nam_tv)", fontSize = 11.sp) },
+                                                    modifier = Modifier.fillMaxWidth()
+                                                )
+                                                OutlinedTextField(
+                                                    value = newDname,
+                                                    onValueChange = { newDname = it },
+                                                    singleLine = true,
+                                                    label = { Text("Tên hiển thị", fontSize = 11.sp) },
+                                                    modifier = Modifier.fillMaxWidth()
+                                                )
+                                                OutlinedTextField(
+                                                    value = newUpass,
+                                                    onValueChange = { newUpass = it },
+                                                    singleLine = true,
+                                                    label = { Text("Mật khẩu (>= 6 ký tự)", fontSize = 11.sp) },
+                                                    modifier = Modifier.fillMaxWidth()
+                                                )
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    OutlinedTextField(
+                                                        value = newUQuota,
+                                                        onValueChange = { newUQuota = it.filter { ch -> ch.isDigit() } },
+                                                        singleLine = true,
+                                                        label = { Text("Quota AI/ngày (0=∞)", fontSize = 10.5.sp) },
+                                                        modifier = Modifier.weight(1f)
+                                                    )
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .tvFocusableClickable(
+                                                                shape = RoundedCornerShape(8.dp),
+                                                                onClick = { newURole = if (newURole == "ADMIN") "MEMBER" else "ADMIN" }
+                                                            )
+                                                            .background(CinemaSurfaceElevated)
+                                                            .padding(horizontal = 10.dp, vertical = 12.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = if (newURole == "ADMIN") "👑 ADMIN" else "👤 MEMBER",
+                                                            color = if (newURole == "ADMIN") Color(0xFFFDE68A) else TextPrimary,
+                                                            fontSize = 11.5.sp,
+                                                            fontWeight = FontWeight.Bold
+                                                        )
+                                                    }
+                                                }
                                                 Box(
                                                     modifier = Modifier
+                                                        .fillMaxWidth()
                                                         .tvFocusableClickable(
-                                                            shape = RoundedCornerShape(6.dp),
-                                                            focusedBorderColor = EmeraldNeon,
-                                                            unfocusedBorderColor = CinemaGlassBorder,
-                                                            onClick = { onAdminToggleMemberStatus(member.id, nextStatus) }
+                                                            shape = RoundedCornerShape(8.dp),
+                                                            focusedBorderColor = Color.White,
+                                                            unfocusedBorderColor = EmeraldNeon,
+                                                            onClick = {
+                                                                val q = newUQuota.toIntOrNull() ?: 150
+                                                                onAdminCreateUser(newUname, newDname, newUpass, newURole, q) {
+                                                                    newUname = ""
+                                                                    newDname = ""
+                                                                    newUpass = ""
+                                                                    showCreateMemberForm = false
+                                                                }
+                                                            }
                                                         )
-                                                        .background(CinemaSurfaceElevated)
-                                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                                        .background(EmeraldPrimary)
+                                                        .padding(vertical = 9.dp),
+                                                    contentAlignment = Alignment.Center
                                                 ) {
-                                                    Text(
-                                                        text = if (member.status == "ACTIVE") "Revoke" else "Restore",
-                                                        color = if (member.status == "ACTIVE") LiveRed else EmeraldNeon,
-                                                        fontSize = 11.sp
+                                                    Text("✅ Tạo tài khoản ngay", color = CinemaObsidian, fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                                                }
+                                            }
+                                        }
+
+                                        if (snap.users.size > 4) {
+                                            OutlinedTextField(
+                                                value = userSearchQuery,
+                                                onValueChange = { userSearchQuery = it },
+                                                singleLine = true,
+                                                placeholder = { Text("🔍 Tìm @username hoặc tên...", fontSize = 11.5.sp) },
+                                                modifier = Modifier.fillMaxWidth()
+                                            )
+                                        }
+
+                                        val qLow = userSearchQuery.trim().lowercase()
+                                        val filteredMembers = snap.users.filter { u ->
+                                            qLow.isEmpty() ||
+                                                u.username.lowercase().contains(qLow) ||
+                                                u.displayName.lowercase().contains(qLow)
+                                        }
+                                        val selfId = cloudSession?.userId.orEmpty()
+
+                                        filteredMembers.forEach { member ->
+                                            val isSelf = member.id == selfId
+                                            val isAdmin = member.role == "ADMIN"
+                                            val isActive = member.status == "ACTIVE"
+                                            val nextStatus = if (isActive) "REVOKED" else "ACTIVE"
+                                            val limText = if (isAdmin || member.dailyAiLimit <= 0) "∞" else member.dailyAiLimit.toString()
+
+                                            Column(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clip(RoundedCornerShape(10.dp))
+                                                    .background(if (isActive) CinemaSurfaceElevated.copy(alpha = 0.72f) else LiveRed.copy(alpha = 0.09f))
+                                                    .border(
+                                                        1.dp,
+                                                        if (isActive) CinemaGlassBorder else LiveRed.copy(alpha = 0.4f),
+                                                        RoundedCornerShape(10.dp)
                                                     )
+                                                    .padding(9.dp),
+                                                verticalArrangement = Arrangement.spacedBy(5.dp)
+                                            ) {
+                                                Text(
+                                                    text = "${if (isAdmin) "👑" else "👤"} ${member.displayName.ifBlank { member.username }} (@${member.username}) • ${if (isActive) "🟢 ACTIVE" else "🔴 KHÓA"}${if (isSelf) " [Bạn]" else ""}",
+                                                    color = TextPrimary,
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                                Text(
+                                                    text = "⚡ AI: ${member.todayRequests}/$limText (🎙 ${member.todayAudioChunks}) • 🎬 ${member.watchCount} xem • ❤️ ${member.myListCount} lưu",
+                                                    color = TextSecondary,
+                                                    fontSize = 10.5.sp
+                                                )
+                                                FlowRow(
+                                                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                                    verticalArrangement = Arrangement.spacedBy(5.dp)
+                                                ) {
+                                                    // Cycle Quota preset (150 -> 500 -> ∞ -> 50)
+                                                    if (!isAdmin) {
+                                                        val nextQuota = when {
+                                                            member.dailyAiLimit <= 0 -> 150
+                                                            member.dailyAiLimit < 500 -> 500
+                                                            else -> 0
+                                                        }
+                                                        val nextQuotaLabel = if (nextQuota == 0) "Quota → ∞" else "Quota → $nextQuota"
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .tvFocusableClickable(
+                                                                    shape = RoundedCornerShape(6.dp),
+                                                                    onClick = { onAdminUpdateMember(member.id, null, null, nextQuota) }
+                                                                )
+                                                                .background(CinemaSurface)
+                                                                .padding(horizontal = 7.dp, vertical = 4.dp)
+                                                        ) {
+                                                            Text("⚡ $nextQuotaLabel", color = EmeraldNeon, fontSize = 10.5.sp, fontWeight = FontWeight.Bold)
+                                                        }
+                                                    }
+                                                    // Reset Password + Copy
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .tvFocusableClickable(
+                                                                shape = RoundedCornerShape(6.dp),
+                                                                onClick = {
+                                                                    onAdminResetMemberPassword(member.id) { tempPw ->
+                                                                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                                                        cm?.setPrimaryClip(ClipData.newPlainText("NKI Password", "@${member.username} / $tempPw"))
+                                                                    }
+                                                                }
+                                                            )
+                                                            .background(CinemaSurface)
+                                                            .padding(horizontal = 7.dp, vertical = 4.dp)
+                                                    ) {
+                                                        Text("🔑 Reset MK", color = Color(0xFFFDE68A), fontSize = 10.5.sp, fontWeight = FontWeight.Bold)
+                                                    }
+                                                    if (member.todayRequests > 0) {
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .tvFocusableClickable(
+                                                                    shape = RoundedCornerShape(6.dp),
+                                                                    onClick = { onAdminResetMemberQuota(member.id) }
+                                                                )
+                                                                .background(CinemaSurface)
+                                                                .padding(horizontal = 7.dp, vertical = 4.dp)
+                                                        ) {
+                                                            Text("♻️ Reset AI", color = EmeraldNeon, fontSize = 10.5.sp, fontWeight = FontWeight.Bold)
+                                                        }
+                                                    }
+                                                    if (!isSelf) {
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .tvFocusableClickable(
+                                                                    shape = RoundedCornerShape(6.dp),
+                                                                    onClick = { onAdminUpdateMember(member.id, null, if (isAdmin) "MEMBER" else "ADMIN", null) }
+                                                                )
+                                                                .background(CinemaSurface)
+                                                                .padding(horizontal = 7.dp, vertical = 4.dp)
+                                                        ) {
+                                                            Text(if (isAdmin) "↓ Member" else "↑ Admin", color = Color(0xFFDDD6FE), fontSize = 10.5.sp, fontWeight = FontWeight.Bold)
+                                                        }
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .tvFocusableClickable(
+                                                                    shape = RoundedCornerShape(6.dp),
+                                                                    onClick = { onAdminForceLogoutMember(member.id) }
+                                                                )
+                                                                .background(CinemaSurface)
+                                                                .padding(horizontal = 7.dp, vertical = 4.dp)
+                                                        ) {
+                                                            Text("🚪 Thoát", color = TextPrimary, fontSize = 10.5.sp)
+                                                        }
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .tvFocusableClickable(
+                                                                    shape = RoundedCornerShape(6.dp),
+                                                                    onClick = { onAdminToggleMemberStatus(member.id, nextStatus) }
+                                                                )
+                                                                .background(CinemaSurface)
+                                                                .padding(horizontal = 7.dp, vertical = 4.dp)
+                                                        ) {
+                                                            Text(
+                                                                text = if (isActive) "🔒 Khóa" else "🔓 Mở",
+                                                                color = if (isActive) LiveRed else EmeraldNeon,
+                                                                fontSize = 10.5.sp,
+                                                                fontWeight = FontWeight.Bold
+                                                            )
+                                                        }
+                                                        if (!isAdmin) {
+                                                            val confirming = confirmDeleteId == member.id
+                                                            Box(
+                                                                modifier = Modifier
+                                                                    .tvFocusableClickable(
+                                                                        shape = RoundedCornerShape(6.dp),
+                                                                        onClick = {
+                                                                            if (!confirming) confirmDeleteId = member.id
+                                                                            else {
+                                                                                confirmDeleteId = null
+                                                                                onAdminDeleteMember(member.id)
+                                                                            }
+                                                                        }
+                                                                    )
+                                                                    .background(if (confirming) LiveRed.copy(alpha = 0.25f) else CinemaSurface)
+                                                                    .padding(horizontal = 7.dp, vertical = 4.dp)
+                                                            ) {
+                                                                Text(
+                                                                    text = if (confirming) "⚠️ Xác nhận XÓA" else "🗑️ Xóa",
+                                                                    color = LiveRed,
+                                                                    fontSize = 10.5.sp,
+                                                                    fontWeight = FontWeight.Bold
+                                                                )
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }

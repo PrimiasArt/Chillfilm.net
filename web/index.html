@@ -72,6 +72,9 @@
       <button class="icon-btn mobile-only" id="mobileSearchToggle" title="Search" aria-label="Search">
         <svg class="ui-ico" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
       </button>
+      <button class="admin-header-pill" id="openAdminPortalBtn" type="button" style="display:none;" title="Hệ thống Quản lý Tài khoản &amp; Phân quyền Admin">
+        <span>👑</span><span class="hide-xs">Admin</span>
+      </button>
       <button class="cloud-pill-btn" id="openCloudBtn" title="NKI Cloud Sync & AI">
         <span class="cloud-dot" id="cloudStatusDot"></span>
         <span id="cloudBtnText">Cloud</span>
@@ -843,6 +846,9 @@
             <details class="admin-vault-box" id="adminVaultDetails" style="display:none;">
               <summary>🔐 NKI Admin Vault &amp; Access Control</summary>
               <div class="admin-vault-body">
+                <button class="btn-grad" id="adminOpenAccountsFromVaultBtn" type="button" style="width:100%;justify-content:center;padding:9px 14px;font-size:13px;">
+                  👑 Mở Hệ Thống Quản Lý Tài Khoản &amp; Phân Quyền (Đầy đủ)
+                </button>
                 <div class="info-box" id="adminVaultStatusBox" style="font-size:12px;">
                   Loading Admin Vault...
                 </div>
@@ -1183,8 +1189,107 @@
     </div>
   </div>
 
+  <!-- DEDICATED ADMIN ACCOUNT MANAGEMENT PORTAL (VISIBLE ONLY TO ADMIN) -->
+  <div class="backdrop" id="adminAccountsModal">
+    <div class="modal-card admin-portal-card">
+      <div class="modal-head">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <h3>👑 Quản Lý Tài Khoản &amp; Phân Quyền (NKI Admin)</h3>
+          <button class="btn-glass" id="adminPortalRefreshBtn" type="button" style="padding:4px 9px;font-size:11.5px;">🔄 Làm mới</button>
+        </div>
+        <button class="icon-btn" data-close="adminAccountsModal" aria-label="Đóng"><svg class="ui-ico" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      </div>
+      <div class="modal-body">
+        <!-- KPI Overview Strip -->
+        <div class="admin-kpi-grid" id="adminKpiGrid">
+          <div class="admin-kpi-tile"><div class="admin-kpi-label">Tổng tài khoản</div><div class="admin-kpi-val" id="admKpiTotal">-</div><div class="admin-kpi-sub" id="admKpiStatus">-</div></div>
+          <div class="admin-kpi-tile"><div class="admin-kpi-label">Quản trị viên</div><div class="admin-kpi-val" id="admKpiAdmins">-</div><div class="admin-kpi-sub">Toàn quyền hệ thống</div></div>
+          <div class="admin-kpi-tile"><div class="admin-kpi-label">AI Sub hôm nay</div><div class="admin-kpi-val" id="admKpiAiReqs">-</div><div class="admin-kpi-sub" id="admKpiAiDetail">-</div></div>
+          <div class="admin-kpi-tile"><div class="admin-kpi-label">Kho Sub Cloud</div><div class="admin-kpi-val" id="admKpiSubs">-</div><div class="admin-kpi-sub" id="admKpiRegMode">-</div></div>
+        </div>
+
+        <!-- Temporary Password Banner (after Reset Password or Create User) -->
+        <div class="admin-temp-pw-banner" id="adminTempPwBanner" style="display:none;">
+          <span id="adminTempPwText"></span>
+          <div style="display:flex;gap:6px;">
+            <button class="btn-grad" id="adminTempPwCopyBtn" type="button" style="padding:4px 10px;font-size:11.5px;">📋 Copy thông tin</button>
+            <button class="btn-glass" id="adminTempPwCloseBtn" type="button" style="padding:4px 8px;font-size:11.5px;">✕</button>
+          </div>
+        </div>
+
+        <!-- Tabs -->
+        <div class="admin-portal-tabs">
+          <button class="admin-tab-btn active" type="button" data-admin-tab="users">👥 Danh sách Tài khoản</button>
+          <button class="admin-tab-btn" type="button" data-admin-tab="invites">🎟️ Mã mời &amp; Chính sách</button>
+        </div>
+
+        <!-- TAB 1: USERS -->
+        <div id="adminPaneUsers">
+          <div class="admin-toolbar">
+            <input class="field-input" id="adminUserSearchInput" type="search" placeholder="🔍 Tìm @username hoặc tên hiển thị..." style="flex:1;min-width:190px;" />
+            <div class="admin-filter-chips" id="adminUserFilterChips">
+              <button class="admin-filter-chip active" type="button" data-ufilter="ALL">Tất cả</button>
+              <button class="admin-filter-chip" type="button" data-ufilter="ACTIVE">🟢 Hoạt động</button>
+              <button class="admin-filter-chip" type="button" data-ufilter="REVOKED">🔴 Đã khóa</button>
+              <button class="admin-filter-chip" type="button" data-ufilter="ADMIN">👑 Admin</button>
+            </div>
+            <button class="btn-grad" id="adminToggleCreateUserBtn" type="button" style="padding:7px 12px;font-size:12px;white-space:nowrap;">➕ Tạo tài khoản</button>
+          </div>
+
+          <!-- Inline Create Account Form -->
+          <div class="admin-create-panel" id="adminCreateUserForm" style="display:none;">
+            <div style="font-size:12.5px;font-weight:800;color:#86efac;">✨ Tạo tài khoản thành viên / quản trị viên mới</div>
+            <div class="admin-create-grid">
+              <input class="field-input" id="admNewUsername" type="text" placeholder="Username (VD: nam_tv)" autocomplete="off" />
+              <input class="field-input" id="admNewDisplayName" type="text" placeholder="Tên hiển thị (VD: Anh Nam)" />
+              <div style="display:flex;gap:4px;">
+                <input class="field-input" id="admNewPassword" type="text" placeholder="Mật khẩu (>= 6 ký tự)" autocomplete="new-password" style="flex:1;" />
+                <button class="btn-glass" id="admGenPasswordBtn" type="button" title="Tạo mật khẩu ngẫu nhiên mạnh" style="padding:0 9px;">🎲</button>
+              </div>
+              <select class="field-select" id="admNewRole">
+                <option value="MEMBER">👤 Thành viên (MEMBER)</option>
+                <option value="ADMIN">👑 Quản trị (ADMIN)</option>
+              </select>
+              <input class="field-input" id="admNewQuota" type="number" min="0" max="10000" value="150" placeholder="Quota AI/ngày (0 = Không giới hạn)" title="Hạn mức lượt AI mỗi ngày (nhập 0 = Không giới hạn ∞)" />
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;">
+              <button class="btn-glass" id="admCancelCreateUserBtn" type="button" style="padding:6px 12px;font-size:12px;">Hủy</button>
+              <button class="btn-grad" id="admSubmitCreateUserBtn" type="button" style="padding:6px 14px;font-size:12px;">✅ Tạo tài khoản ngay</button>
+            </div>
+          </div>
+
+          <div id="adminPortalUsersList" style="display:flex;flex-direction:column;gap:8px;max-height:52vh;overflow-y:auto;padding-right:2px;"></div>
+        </div>
+
+        <!-- TAB 2: INVITES & REGISTRATION POLICY -->
+        <div id="adminPaneInvites" style="display:none;">
+          <div class="admin-create-panel" style="margin-bottom:10px;">
+            <div style="font-size:12.5px;font-weight:800;color:#86efac;">🎟️ Tạo mã mời thành viên tùy chỉnh</div>
+            <div class="admin-create-grid">
+              <input class="field-input" id="admInvLabel" type="text" placeholder="Nhãn (VD: Gia đình / Bạn bè)" value="Family & Friends" />
+              <input class="field-input" id="admInvMaxUses" type="number" min="1" max="500" value="5" placeholder="Số lượt dùng tối đa" />
+              <input class="field-input" id="admInvDailyLimit" type="number" min="0" max="10000" value="200" placeholder="Quota AI/ngày (0 = ∞)" />
+              <button class="btn-grad" id="admPortalCreateInviteBtn" type="button" style="padding:7px 12px;font-size:12px;">+ Tạo mã mời</button>
+            </div>
+          </div>
+          <div class="admin-toolbar" style="justify-content:space-between;">
+            <span style="font-size:12px;color:#d1d5db;font-weight:700;">Chế độ đăng ký toàn hệ thống:</span>
+            <div style="display:flex;gap:6px;">
+              <select class="field-select" id="admPortalRegModeSelect" style="min-width:170px;">
+                <option value="INVITE_ONLY">🔒 Chỉ cho đăng ký bằng Mã mời</option>
+                <option value="OPEN">🌐 Mở đăng ký tự do</option>
+              </select>
+              <button class="btn-grad" id="admPortalSaveRegModeBtn" type="button" style="padding:6px 12px;font-size:12px;">Áp dụng</button>
+            </div>
+          </div>
+          <div id="adminPortalInvitesList" style="display:flex;flex-direction:column;gap:7px;max-height:46vh;overflow-y:auto;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="toast" id="toast"></div>
 
-  <script type="module" src="./app.js?v=25"></script>
+  <script type="module" src="./app.js?v=26"></script>
 </body>
 </html>

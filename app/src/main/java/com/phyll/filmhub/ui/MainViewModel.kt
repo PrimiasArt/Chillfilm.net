@@ -508,10 +508,86 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             CloudSyncClient.adminUpdateUserStatus(userId, nextStatus)
                 .onSuccess {
-                    showBanner("Updated member -> $nextStatus")
+                    showBanner(if (nextStatus == "REVOKED") "🔒 Đã khóa tài khoản!" else "🔓 Đã mở khóa tài khoản!")
                     loadAdminVault()
                 }
-                .onFailure { err -> showBanner("Failed: ${err.message.orEmpty()}") }
+                .onFailure { err -> showBanner("⚠️ ${err.message.orEmpty()}") }
+        }
+    }
+
+    fun adminCreateUser(
+        username: String,
+        displayName: String,
+        password: String,
+        role: String,
+        dailyAiLimit: Int,
+        onCreated: () -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            CloudSyncClient.adminCreateUser(username, displayName, password, role, dailyAiLimit)
+                .onSuccess {
+                    showBanner("✅ Đã tạo tài khoản @$username ($role)!")
+                    onCreated()
+                    loadAdminVault()
+                }
+                .onFailure { err -> showBanner("⚠️ ${err.message.orEmpty()}") }
+        }
+    }
+
+    fun adminUpdateMember(
+        userId: String,
+        displayName: String? = null,
+        role: String? = null,
+        dailyAiLimit: Int? = null
+    ) {
+        viewModelScope.launch {
+            CloudSyncClient.adminUpdateUserDetails(userId, displayName, role, dailyAiLimit)
+                .onSuccess {
+                    showBanner("✅ Đã cập nhật thông tin & phân quyền tài khoản!")
+                    loadAdminVault()
+                }
+                .onFailure { err -> showBanner("⚠️ ${err.message.orEmpty()}") }
+        }
+    }
+
+    fun adminResetMemberPassword(userId: String, onTempPassword: (String) -> Unit) {
+        viewModelScope.launch {
+            CloudSyncClient.adminResetUserPassword(userId)
+                .onSuccess { tempPw ->
+                    showBanner("🔑 Mật khẩu mới: $tempPw (đã copy & thoát phiên cũ)")
+                    onTempPassword(tempPw)
+                }
+                .onFailure { err -> showBanner("⚠️ ${err.message.orEmpty()}") }
+        }
+    }
+
+    fun adminResetMemberQuota(userId: String) {
+        viewModelScope.launch {
+            CloudSyncClient.adminResetUserQuota(userId)
+                .onSuccess {
+                    showBanner("♻️ Đã reset lượt AI hôm nay về 0!")
+                    loadAdminVault()
+                }
+                .onFailure { err -> showBanner("⚠️ ${err.message.orEmpty()}") }
+        }
+    }
+
+    fun adminForceLogoutMember(userId: String) {
+        viewModelScope.launch {
+            CloudSyncClient.adminForceLogoutUser(userId)
+                .onSuccess { showBanner("🚪 Đã đăng xuất tài khoản khỏi mọi thiết bị!") }
+                .onFailure { err -> showBanner("⚠️ ${err.message.orEmpty()}") }
+        }
+    }
+
+    fun adminDeleteMember(userId: String) {
+        viewModelScope.launch {
+            CloudSyncClient.adminDeleteUser(userId)
+                .onSuccess {
+                    showBanner("🗑️ Đã xóa vĩnh viễn tài khoản!")
+                    loadAdminVault()
+                }
+                .onFailure { err -> showBanner("⚠️ ${err.message.orEmpty()}") }
         }
     }
 

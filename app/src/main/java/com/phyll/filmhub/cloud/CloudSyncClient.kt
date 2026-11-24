@@ -56,7 +56,11 @@ data class CloudMemberSummary(
     val role: String,
     val status: String,
     val dailyAiLimit: Int,
-    val todayRequests: Int
+    val todayRequests: Int,
+    val todayAudioChunks: Int = 0,
+    val watchCount: Int = 0,
+    val myListCount: Int = 0,
+    val lastSeenAt: Long = 0L
 )
 
 data class AdminVaultSnapshot(
@@ -67,6 +71,10 @@ data class AdminVaultSnapshot(
     val defaultModel: String = "gemini-3-flash-preview",
     val registrationMode: String = "INVITE_ONLY",
     val cachedSubtitlesCount: Int = 0,
+    val totalUsers: Int = 0,
+    val activeUsers: Int = 0,
+    val revokedUsers: Int = 0,
+    val todayAiRequests: Int = 0,
     val invites: List<CloudInvite> = emptyList(),
     val users: List<CloudMemberSummary> = emptyList()
 )
@@ -453,10 +461,15 @@ object CloudSyncClient {
                         role = u.optString("role", "MEMBER"),
                         status = u.optString("status", "ACTIVE"),
                         dailyAiLimit = u.optInt("dailyAiLimit", 150),
-                        todayRequests = usage?.optInt("requests", 0) ?: 0
+                        todayRequests = usage?.optInt("requests", 0) ?: 0,
+                        todayAudioChunks = usage?.optInt("audioChunks", 0) ?: 0,
+                        watchCount = u.optInt("watchCount", 0),
+                        myListCount = u.optInt("myListCount", 0),
+                        lastSeenAt = u.optLong("lastSeenAt", 0L)
                     )
                 )
             }
+            val stats = obj.optJSONObject("accountStats")
             AdminVaultSnapshot(
                 serverAiReady = cfg.optBoolean("serverAiReady", false),
                 hasEnvKey = cfg.optBoolean("hasEnvKey", false),
@@ -465,6 +478,10 @@ object CloudSyncClient {
                 defaultModel = cfg.optString("defaultModel", "gemini-3-flash-preview"),
                 registrationMode = cfg.optString("registrationMode", "INVITE_ONLY"),
                 cachedSubtitlesCount = cfg.optInt("cachedSubtitlesCount", 0),
+                totalUsers = stats?.optInt("totalUsers", users.size) ?: users.size,
+                activeUsers = stats?.optInt("activeUsers", users.count { it.status == "ACTIVE" }) ?: users.count { it.status == "ACTIVE" },
+                revokedUsers = stats?.optInt("revokedUsers", users.count { it.status != "ACTIVE" }) ?: users.count { it.status != "ACTIVE" },
+                todayAiRequests = stats?.optInt("todayAiRequests", 0) ?: 0,
                 invites = invites,
                 users = users
             )
@@ -524,6 +541,85 @@ object CloudSyncClient {
                 .put("action", "updateUser")
                 .put("userId", userId)
                 .put("status", nextStatus)
+            postJson("/api/admin/config", body, requireAuth = true)
+            Unit
+        }
+    }
+
+    suspend fun adminCreateUser(
+        username: String,
+        displayName: String,
+        password: String,
+        role: String = "MEMBER",
+        dailyAiLimit: Int = 150
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val body = JSONObject()
+                .put("action", "createUser")
+                .put("username", username.trim().lowercase())
+                .put("displayName", displayName.trim().ifBlank { username.trim() })
+                .put("password", password)
+                .put("role", if (role == "ADMIN") "ADMIN" else "MEMBER")
+                .put("dailyAiLimit", dailyAiLimit.coerceIn(0, 10000))
+            postJson("/api/admin/config", body, requireAuth = true)
+            Unit
+        }
+    }
+
+    suspend fun adminUpdateUserDetails(
+        userId: String,
+        displayName: String? = null,
+        role: String? = null,
+        dailyAiLimit: Int? = null
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val body = JSONObject()
+                .put("action", "updateUser")
+                .put("userId", userId)
+            if (!displayName.isNullOrBlank()) body.put("displayName", displayName.trim())
+            if (role == "ADMIN" || role == "MEMBER") body.put("role", role)
+            if (dailyAiLimit != null) body.put("dailyAiLimit", dailyAiLimit.coerceIn(0, 10000))
+            postJson("/api/admin/config", body, requireAuth = true)
+            Unit
+        }
+    }
+
+    suspend fun adminResetUserPassword(userId: String, newPassword: String = ""): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val body = JSONObject()
+                .put("action", "resetUserPassword")
+                .put("userId", userId)
+            if (newPassword.isNotBlank()) body.put("newPassword", newPassword.trim())
+            val res = postJson("/api/admin/config", body, requireAuth = true)
+            res.optString("tempPassword")
+        }
+    }
+
+    suspend fun adminResetUserQuota(userId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val body = JSONObject()
+                .put("action", "resetUserQuota")
+                .put("userId", userId)
+            postJson("/api/admin/config", body, requireAuth = true)
+            Unit
+        }
+    }
+
+    suspend fun adminForceLogoutUser(userId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val body = JSONObject()
+                .put("action", "forceLogoutUser")
+                .put("userId", userId)
+            postJson("/api/admin/config", body, requireAuth = true)
+            Unit
+        }
+    }
+
+    suspend fun adminDeleteUser(userId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val body = JSONObject()
+                .put("action", "deleteUser")
+                .put("userId", userId)
             postJson("/api/admin/config", body, requireAuth = true)
             Unit
         }

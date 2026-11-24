@@ -1,6 +1,6 @@
 {
-  "versionName": "3.6.0",
-  "versionCode": 360,
+  "versionName": "3.6.1",
+  "versionCode": 361,
   "downloadUrl": "https://github.com/PrimiasArt/Chillfilm.net/releases/download/android-apk-latest/ChillFilm-latest.apk",
-  "releaseNotes": "ChillFilm 3.6.0 AI Subtitle Pro Suite: Rolling Dialogue Context, Anti-Hallucination & Silence Filter, Cinema CPS Timing Polisher, 1-Click AI Cinema Polish, Seek Bar Coverage Heatmap + Instant 30s Translate, Per-Server Offset, Tap-to-Edit Inline Sub Sync & Resilient Background Foreground Service"
+  "releaseNotes": "ChillFilm 3.6.1: Complete Admin Account Management System (Create/Edit/Role/Quota/Reset Password/Force Logout/Delete Users + KPI Stats on Web, Android & TV) + AI Subtitle Pro Suite"
 }

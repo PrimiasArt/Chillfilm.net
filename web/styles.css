@@ -4370,3 +4370,251 @@ button > svg {
   gap: 8px;
   flex-wrap: wrap;
 }
+
+/* ==================== v26 ADMIN ACCOUNT MANAGEMENT DASHBOARD ==================== */
+.admin-header-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  border-radius: 99px;
+  border: 1px solid rgba(251, 191, 36, 0.55);
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.22), rgba(217, 119, 6, 0.14));
+  color: #fde68a;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+.admin-header-pill:hover {
+  background: rgba(245, 158, 11, 0.34);
+  transform: translateY(-1px);
+}
+.admin-portal-card {
+  width: min(880px, 95vw) !important;
+  max-height: 90vh;
+}
+.admin-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.admin-kpi-tile {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+}
+.admin-kpi-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.admin-kpi-val {
+  font-size: 20px;
+  font-weight: 900;
+  color: #ffffff;
+  margin-top: 2px;
+}
+.admin-kpi-sub {
+  font-size: 11px;
+  color: #86efac;
+  margin-top: 2px;
+}
+.admin-portal-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  padding-bottom: 8px;
+  flex-wrap: wrap;
+}
+.admin-tab-btn {
+  padding: 7px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: #d1d5db;
+  font-size: 12.5px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.admin-tab-btn.active {
+  background: linear-gradient(135deg, #10b981, #059669);
+  border-color: #34d399;
+  color: #04150a;
+}
+.admin-toolbar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.admin-filter-chips {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.admin-filter-chip {
+  padding: 5px 10px;
+  border-radius: 99px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+  color: #d1d5db;
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.admin-filter-chip.active {
+  background: rgba(16, 185, 129, 0.2);
+  border-color: #34d399;
+  color: #86efac;
+}
+.admin-create-panel {
+  padding: 12px;
+  border-radius: 10px;
+  background: rgba(16, 185, 129, 0.07);
+  border: 1px solid rgba(52, 211, 153, 0.35);
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.admin-create-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px;
+}
+.admin-user-card {
+  padding: 11px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.admin-user-card.revoked {
+  border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.05);
+}
+.admin-user-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.admin-user-ident {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.admin-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #10b981, #7c3aed);
+  color: #fff;
+  font-weight: 900;
+  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.admin-avatar.is-admin {
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+  color: #1c1102;
+}
+.admin-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 99px;
+  font-size: 10px;
+  font-weight: 800;
+}
+.admin-badge.role-admin { background: rgba(245, 158, 11, 0.22); color: #fde68a; border: 1px solid rgba(251, 191, 36, 0.45); }
+.admin-badge.role-member { background: rgba(139, 92, 246, 0.2); color: #ddd6fe; border: 1px solid rgba(167, 139, 250, 0.35); }
+.admin-badge.st-active { background: rgba(16, 185, 129, 0.2); color: #86efac; }
+.admin-badge.st-revoked { background: rgba(239, 68, 68, 0.22); color: #fca5a5; }
+.admin-user-meta {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: #9ca3af;
+}
+.admin-quota-bar {
+  width: 100%;
+  height: 5px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+.admin-quota-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #10b981, #34d399);
+}
+.admin-quota-fill.warn {
+  background: linear-gradient(90deg, #f59e0b, #ef4444);
+}
+.admin-user-actions {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.admin-act-btn {
+  padding: 4px 9px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05);
+  color: #e5e7eb;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.admin-act-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+.admin-act-btn.danger {
+  border-color: rgba(239, 68, 68, 0.4);
+  color: #fca5a5;
+}
+.admin-act-btn.success {
+  border-color: rgba(52, 211, 153, 0.45);
+  color: #86efac;
+}
+.admin-act-btn.amber {
+  border-color: rgba(251, 191, 36, 0.45);
+  color: #fde68a;
+}
+.admin-inline-edit {
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(52, 211, 153, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.admin-temp-pw-banner {
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: rgba(245, 158, 11, 0.16);
+  border: 1px solid rgba(251, 191, 36, 0.55);
+  color: #fef3c7;
+  font-size: 12.5px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}

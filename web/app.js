@@ -8231,6 +8231,9 @@ function updateCloudHeaderBadge() {
   if ($('aiDot')) {
     $('aiDot').style.display = (session?.serverAiReady || state.prefs.geminiApiKey) ? 'block' : 'none';
   }
+  if ($('openAdminPortalBtn')) {
+    $('openAdminPortalBtn').style.display = session?.user?.role === 'ADMIN' ? 'inline-flex' : 'none';
+  }
 }
 
 async function renderCloudCard() {
@@ -8522,6 +8525,364 @@ async function loadAdminVaultPanel() {
   } catch (err) {
     box.textContent = `Admin Vault error: ${err.message}`;
   }
+}
+
+/* ==================== v26 ADMIN ACCOUNT MANAGEMENT PORTAL ==================== */
+const adminPortalState = {
+  data: null,
+  filter: 'ALL',
+  search: '',
+  editingUserId: '',
+  confirmDeleteUserId: '',
+  lastTempCopyText: '',
+};
+
+function formatRelativeTimeVi(tsMs) {
+  const ts = Number(tsMs || 0);
+  if (!ts) return 'Chưa rõ';
+  const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (diffSec < 60) return 'Vừa xong';
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} phút trước`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} giờ trước`;
+  if (diffSec < 86400 * 30) return `${Math.floor(diffSec / 86400)} ngày trước`;
+  return new Date(ts).toLocaleDateString('vi-VN');
+}
+
+function generateStrongAdminPassword(len = 10) {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+  let out = '';
+  for (let i = 0; i < len; i++) {
+    out += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return out;
+}
+
+function showAdminTempPasswordBanner(text, copyText) {
+  const banner = $('adminTempPwBanner');
+  const txtEl = $('adminTempPwText');
+  if (!banner || !txtEl) return;
+  adminPortalState.lastTempCopyText = copyText || text;
+  txtEl.innerHTML = text;
+  banner.style.display = 'flex';
+}
+
+function switchAdminPortalTab(tab = 'users') {
+  const isUsers = tab !== 'invites';
+  document.querySelectorAll('[data-admin-tab]').forEach((b) => {
+    b.classList.toggle('active', b.dataset.adminTab === (isUsers ? 'users' : 'invites'));
+  });
+  if ($('adminPaneUsers')) $('adminPaneUsers').style.display = isUsers ? 'block' : 'none';
+  if ($('adminPaneInvites')) $('adminPaneInvites').style.display = isUsers ? 'none' : 'block';
+}
+
+async function openAdminAccountsPortal(initialTab = 'users') {
+  const session = getCloudSession();
+  if (!session?.user || session.user.role !== 'ADMIN') {
+    showToast('⚠️ Chỉ tài khoản ADMIN mới có quyền truy cập mục này');
+    return;
+  }
+  closeModal('settingsModal');
+  switchAdminPortalTab(initialTab);
+  openOverlayModal('adminAccountsModal');
+  await loadAdminPortalData();
+}
+
+async function loadAdminPortalData() {
+  const listEl = $('adminPortalUsersList');
+  if (listEl && !adminPortalState.data) {
+    listEl.innerHTML = '<div style="padding:18px;text-align:center;color:var(--muted);font-size:12.5px;">⏳ Đang tải danh sách tài khoản...</div>';
+  }
+  try {
+    const data = await cloudFetchAdminConfig();
+    adminPortalState.data = data;
+    const stats = data.accountStats || {};
+    const cfg = data.config || {};
+    if ($('admKpiTotal')) $('admKpiTotal').textContent = String(stats.totalUsers ?? (data.users || []).length);
+    if ($('admKpiStatus')) $('admKpiStatus').textContent = `🟢 ${stats.activeUsers ?? 0} hoạt động • 🔴 ${stats.revokedUsers ?? 0} khóa`;
+    if ($('admKpiAdmins')) $('admKpiAdmins').textContent = String(stats.adminCount ?? 1);
+    if ($('admKpiAiReqs')) $('admKpiAiReqs').textContent = String(stats.todayAiRequests ?? 0);
+    if ($('admKpiAiDetail')) $('admKpiAiDetail').textContent = `🎙 ${stats.todayAudioChunks ?? 0} audio • ${stats.todayCues ?? 0} câu`;
+    if ($('admKpiSubs')) $('admKpiSubs').textContent = String(cfg.cachedSubtitlesCount ?? 0);
+    if ($('admKpiRegMode')) $('admKpiRegMode').textContent = cfg.registrationMode === 'OPEN' ? '🌐 Đăng ký tự do' : '🔒 Chỉ qua Mã mời';
+    if ($('admPortalRegModeSelect') && cfg.registrationMode) {
+      $('admPortalRegModeSelect').value = cfg.registrationMode;
+    }
+    renderAdminPortalUsers();
+    renderAdminPortalInvites();
+  } catch (err) {
+    if (listEl) {
+      listEl.innerHTML = `<div style="padding:16px;color:#fca5a5;font-size:12.5px;">⚠️ Lỗi tải dữ liệu Admin: ${escapeHtml(err.message || String(err))}</div>`;
+    }
+  }
+}
+
+function renderAdminPortalUsers() {
+  const wrap = $('adminPortalUsersList');
+  if (!wrap) return;
+  const users = Array.isArray(adminPortalState.data?.users) ? adminPortalState.data.users : [];
+  const selfId = getCloudSession()?.user?.id || '';
+  const q = adminPortalState.search.trim().toLowerCase();
+  const f = adminPortalState.filter;
+
+  const filtered = users.filter((u) => {
+    if (f === 'ACTIVE' && u.status !== 'ACTIVE') return false;
+    if (f === 'REVOKED' && u.status === 'ACTIVE') return false;
+    if (f === 'ADMIN' && u.role !== 'ADMIN') return false;
+    if (q) {
+      const hay = `${u.username || ''} ${u.displayName || ''} ${u.role || ''}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+
+  if (!filtered.length) {
+    wrap.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted);font-size:12.5px;">Không tìm thấy tài khoản nào khớp bộ lọc.</div>';
+    return;
+  }
+
+  wrap.innerHTML = filtered.map((u) => {
+    const isSelf = u.id === selfId;
+    const isAdmin = u.role === 'ADMIN';
+    const isActive = u.status === 'ACTIVE';
+    const isEditing = adminPortalState.editingUserId === u.id;
+    const isConfirmDel = adminPortalState.confirmDeleteUserId === u.id;
+    const reqUsed = Number(u.todayUsage?.requests || 0);
+    const audioUsed = Number(u.todayUsage?.audioChunks || 0);
+    const lim = Number(u.dailyAiLimit || 0);
+    const isUnlimited = isAdmin || lim <= 0;
+    const pct = isUnlimited ? (reqUsed > 0 ? 15 : 0) : Math.min(100, Math.round((reqUsed / Math.max(1, lim)) * 100));
+    const initials = (u.displayName || u.username || '?').trim().slice(0, 2).toUpperCase();
+
+    return `
+      <div class="admin-user-card ${isActive ? '' : 'revoked'}">
+        <div class="admin-user-head">
+          <div class="admin-user-ident">
+            <div class="admin-avatar ${isAdmin ? 'is-admin' : ''}">${escapeHtml(initials)}</div>
+            <div style="min-width:0;">
+              <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                <strong style="font-size:13.5px;color:#fff;">${escapeHtml(u.displayName || u.username)}</strong>
+                <span style="font-size:11.5px;color:#9ca3af;">@${escapeHtml(u.username)}</span>
+                <span class="admin-badge ${isAdmin ? 'role-admin' : 'role-member'}">${isAdmin ? '👑 ADMIN' : '👤 MEMBER'}</span>
+                <span class="admin-badge ${isActive ? 'st-active' : 'st-revoked'}">${isActive ? '🟢 Hoạt động' : '🔴 Đã khóa'}</span>
+                ${isSelf ? '<span class="admin-badge st-active">Bạn</span>' : ''}
+              </div>
+              <div class="admin-user-meta" style="margin-top:3px;">
+                <span>⚡ AI hôm nay: <strong style="color:#e5e7eb;">${reqUsed} / ${isUnlimited ? '∞' : lim}</strong> (🎙 ${audioUsed})</span>
+                <span>🎬 Đang xem: ${Number(u.watchCount || 0)}</span>
+                <span>❤️ Đã lưu: ${Number(u.myListCount || 0)}</span>
+                <span>🕒 Hoạt động: ${escapeHtml(formatRelativeTimeVi(u.lastSeenAt))}</span>
+                <span>📅 Tạo: ${u.createdAt ? new Date(u.createdAt).toLocaleDateString('vi-VN') : '—'}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="admin-quota-bar">
+          <div class="admin-quota-fill ${pct >= 85 && !isUnlimited ? 'warn' : ''}" style="width:${pct}%;"></div>
+        </div>
+
+        <div class="admin-user-actions">
+          <button class="admin-act-btn" type="button" data-adm-edit="${escapeHtml(u.id)}">${isEditing ? '▲ Đóng sửa' : '✏️ Sửa quyền / Quota'}</button>
+          <button class="admin-act-btn amber" type="button" data-adm-resetpw="${escapeHtml(u.id)}" data-adm-uname="${escapeHtml(u.username)}">🔑 Đặt lại MK</button>
+          ${reqUsed > 0 ? `<button class="admin-act-btn success" type="button" data-adm-resetquota="${escapeHtml(u.id)}">♻️ Reset AI (${reqUsed})</button>` : ''}
+          ${!isSelf ? `<button class="admin-act-btn" type="button" data-adm-logout="${escapeHtml(u.id)}">🚪 Ép đăng xuất</button>` : ''}
+          ${!isSelf ? `
+            <button class="admin-act-btn ${isActive ? 'danger' : 'success'}" type="button" data-adm-toggle="${escapeHtml(u.id)}" data-adm-next="${isActive ? 'REVOKED' : 'ACTIVE'}">
+              ${isActive ? '🔒 Khóa TK' : '🔓 Mở khóa'}
+            </button>
+          ` : ''}
+          ${!isSelf && !isAdmin ? `
+            <button class="admin-act-btn danger" type="button" data-adm-del="${escapeHtml(u.id)}" data-adm-uname="${escapeHtml(u.username)}">
+              ${isConfirmDel ? '⚠️ Bấm lại để XÓA VĨNH VIỄN' : '🗑️ Xóa'}
+            </button>
+          ` : ''}
+        </div>
+
+        ${isEditing ? `
+          <div class="admin-inline-edit">
+            <div class="admin-create-grid">
+              <label style="display:flex;flex-direction:column;gap:3px;font-size:11px;color:#9ca3af;">
+                Tên hiển thị
+                <input class="field-input" id="admEditName_${escapeHtml(u.id)}" value="${escapeHtml(u.displayName || u.username)}" />
+              </label>
+              <label style="display:flex;flex-direction:column;gap:3px;font-size:11px;color:#9ca3af;">
+                Hạn mức AI/ngày (0 = Không giới hạn ∞)
+                <input class="field-input" id="admEditQuota_${escapeHtml(u.id)}" type="number" min="0" max="10000" value="${lim}" />
+              </label>
+              <label style="display:flex;flex-direction:column;gap:3px;font-size:11px;color:#9ca3af;">
+                Phân quyền
+                <select class="field-select" id="admEditRole_${escapeHtml(u.id)}" ${isSelf ? 'disabled' : ''}>
+                  <option value="MEMBER" ${u.role === 'MEMBER' ? 'selected' : ''}>👤 Thành viên (MEMBER)</option>
+                  <option value="ADMIN" ${u.role === 'ADMIN' ? 'selected' : ''}>👑 Quản trị viên (ADMIN)</option>
+                </select>
+              </label>
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:6px;">
+              <button class="btn-glass" type="button" data-adm-cancel-edit="1" style="padding:5px 10px;font-size:11.5px;">Hủy</button>
+              <button class="btn-grad" type="button" data-adm-save-edit="${escapeHtml(u.id)}" style="padding:5px 12px;font-size:11.5px;">💾 Lưu thay đổi</button>
+            </div>
+          </div>
+        ` : ''}
+      </div>
+    `;
+  }).join('');
+
+  wrap.querySelectorAll('[data-adm-edit]').forEach((btn) => {
+    btn.onclick = () => {
+      const uid = btn.dataset.admEdit;
+      adminPortalState.editingUserId = adminPortalState.editingUserId === uid ? '' : uid;
+      adminPortalState.confirmDeleteUserId = '';
+      renderAdminPortalUsers();
+    };
+  });
+  wrap.querySelectorAll('[data-adm-cancel-edit]').forEach((btn) => {
+    btn.onclick = () => {
+      adminPortalState.editingUserId = '';
+      renderAdminPortalUsers();
+    };
+  });
+  wrap.querySelectorAll('[data-adm-save-edit]').forEach((btn) => {
+    btn.onclick = async () => {
+      const uid = btn.dataset.admSaveEdit;
+      const displayName = $(`admEditName_${uid}`)?.value?.trim();
+      const quotaRaw = Number($(`admEditQuota_${uid}`)?.value);
+      const role = $(`admEditRole_${uid}`)?.value;
+      try {
+        await cloudAdminAction({
+          action: 'updateUser',
+          userId: uid,
+          displayName,
+          dailyAiLimit: Number.isFinite(quotaRaw) ? quotaRaw : undefined,
+          role: uid === selfId ? undefined : role,
+        });
+        adminPortalState.editingUserId = '';
+        showToast('✅ Đã cập nhật thông tin & phân quyền tài khoản!');
+        await loadAdminPortalData();
+      } catch (err) {
+        showToast(`⚠️ ${err.message || 'Cập nhật thất bại'}`);
+      }
+    };
+  });
+  wrap.querySelectorAll('[data-adm-resetpw]').forEach((btn) => {
+    btn.onclick = async () => {
+      const uid = btn.dataset.admResetpw;
+      const uname = btn.dataset.admUname;
+      const customPw = window.prompt(`Nhập mật khẩu mới cho @${uname} (để trống = hệ thống tự tạo mật khẩu ngẫu nhiên mạnh):`, '');
+      if (customPw === null) return;
+      try {
+        const res = await cloudAdminAction({
+          action: 'resetUserPassword',
+          userId: uid,
+          newPassword: customPw.trim(),
+        });
+        const pw = res?.tempPassword || '';
+        const copyStr = `Tài khoản ChillFilm: @${uname} | Mật khẩu mới: ${pw}`;
+        showAdminTempPasswordBanner(
+          `🔑 Đã đặt lại mật khẩu cho <strong>@${escapeHtml(uname)}</strong>: <code style="background:rgba(0,0,0,0.4);padding:2px 7px;border-radius:5px;color:#34d399;font-size:13px;">${escapeHtml(pw)}</code> (đã đăng xuất thiết bị cũ)`,
+          copyStr
+        );
+        showToast(`🔑 Đã đặt lại mật khẩu cho @${uname}!`);
+      } catch (err) {
+        showToast(`⚠️ ${err.message || 'Không thể đặt lại mật khẩu'}`);
+      }
+    };
+  });
+  wrap.querySelectorAll('[data-adm-resetquota]').forEach((btn) => {
+    btn.onclick = async () => {
+      try {
+        await cloudAdminAction({ action: 'resetUserQuota', userId: btn.dataset.admResetquota });
+        showToast('♻️ Đã đặt lại lượt dùng AI hôm nay về 0!');
+        await loadAdminPortalData();
+      } catch (err) {
+        showToast(`⚠️ ${err.message || 'Lỗi reset quota'}`);
+      }
+    };
+  });
+  wrap.querySelectorAll('[data-adm-logout]').forEach((btn) => {
+    btn.onclick = async () => {
+      try {
+        await cloudAdminAction({ action: 'forceLogoutUser', userId: btn.dataset.admLogout });
+        showToast('🚪 Đã đăng xuất tài khoản khỏi mọi thiết bị Web/Phone/TV!');
+      } catch (err) {
+        showToast(`⚠️ ${err.message || 'Lỗi ép đăng xuất'}`);
+      }
+    };
+  });
+  wrap.querySelectorAll('[data-adm-toggle]').forEach((btn) => {
+    btn.onclick = async () => {
+      try {
+        const nextStatus = btn.dataset.admNext;
+        await cloudAdminAction({ action: 'updateUser', userId: btn.dataset.admToggle, status: nextStatus });
+        showToast(nextStatus === 'REVOKED' ? '🔒 Đã khóa tài khoản & thu hồi phiên!' : '🔓 Đã mở khóa tài khoản!');
+        await loadAdminPortalData();
+      } catch (err) {
+        showToast(`⚠️ ${err.message || 'Lỗi cập nhật trạng thái'}`);
+      }
+    };
+  });
+  wrap.querySelectorAll('[data-adm-del]').forEach((btn) => {
+    btn.onclick = async () => {
+      const uid = btn.dataset.admDel;
+      const uname = btn.dataset.admUname;
+      if (adminPortalState.confirmDeleteUserId !== uid) {
+        adminPortalState.confirmDeleteUserId = uid;
+        renderAdminPortalUsers();
+        return;
+      }
+      try {
+        await cloudAdminAction({ action: 'deleteUser', userId: uid });
+        adminPortalState.confirmDeleteUserId = '';
+        showToast(`🗑️ Đã xóa vĩnh viễn tài khoản @${uname}!`);
+        await loadAdminPortalData();
+      } catch (err) {
+        showToast(`⚠️ ${err.message || 'Không thể xóa tài khoản'}`);
+      }
+    };
+  });
+}
+
+function renderAdminPortalInvites() {
+  const wrap = $('adminPortalInvitesList');
+  if (!wrap) return;
+  const invites = Array.isArray(adminPortalState.data?.invites) ? adminPortalState.data.invites : [];
+  if (!invites.length) {
+    wrap.innerHTML = '<div style="padding:16px;text-align:center;color:var(--muted);font-size:12px;">Chưa có mã mời nào. Tạo mã mời ở khung trên để chia sẻ cho gia đình/bạn bè.</div>';
+    return;
+  }
+  wrap.innerHTML = invites.map((inv) => `
+    <div class="admin-row">
+      <div>
+        <div style="font-weight:800;color:${inv.active ? '#86efac' : '#9ca3af'};">${escapeHtml(inv.code)} ${inv.active ? '' : '(Đã thu hồi)'}</div>
+        <div style="font-size:11px;color:var(--muted);">${escapeHtml(inv.label)} • Đã dùng ${inv.usedCount}/${inv.maxUses} • Quota AI: ${inv.dailyAiLimit <= 0 ? '∞' : `${inv.dailyAiLimit}/ngày`}</div>
+      </div>
+      <div style="display:flex;gap:5px;">
+        <button class="admin-act-btn" type="button" data-pinv-copy="${escapeHtml(inv.code)}">📋 Copy</button>
+        ${inv.active ? `<button class="admin-act-btn amber" type="button" data-pinv-revoke="${escapeHtml(inv.code)}">Thu hồi</button>` : ''}
+        <button class="admin-act-btn danger" type="button" data-pinv-del="${escapeHtml(inv.code)}">Xóa</button>
+      </div>
+    </div>
+  `).join('');
+
+  wrap.querySelectorAll('[data-pinv-copy]').forEach((b) => {
+    b.onclick = () => {
+      navigator.clipboard?.writeText(b.dataset.pinvCopy).catch(() => {});
+      showToast(`📋 Đã copy mã mời: ${b.dataset.pinvCopy}`);
+    };
+  });
+  wrap.querySelectorAll('[data-pinv-revoke]').forEach((b) => {
+    b.onclick = async () => {
+      await cloudAdminAction({ action: 'revokeInvite', code: b.dataset.pinvRevoke });
+      showToast(`Đã thu hồi mã ${b.dataset.pinvRevoke}`);
+      await loadAdminPortalData();
+    };
+  });
+  wrap.querySelectorAll('[data-pinv-del]').forEach((b) => {
+    b.onclick = async () => {
+      await cloudAdminAction({ action: 'deleteInvite', code: b.dataset.pinvDel });
+      showToast(`Đã xóa mã mời ${b.dataset.pinvDel}`);
+      await loadAdminPortalData();
+    };
+  });
 }
 
 function populateModelSelects() {
@@ -9183,6 +9544,101 @@ function init() {
   });
   $('adminVaultDetails')?.addEventListener('toggle', () => {
     if ($('adminVaultDetails').open) loadAdminVaultPanel();
+  });
+  $('openAdminPortalBtn')?.addEventListener('click', () => openAdminAccountsPortal('users'));
+  $('adminOpenAccountsFromVaultBtn')?.addEventListener('click', () => openAdminAccountsPortal('users'));
+  $('adminPortalRefreshBtn')?.addEventListener('click', () => loadAdminPortalData());
+  document.querySelectorAll('[data-admin-tab]').forEach((btn) => {
+    btn.addEventListener('click', () => switchAdminPortalTab(btn.dataset.adminTab));
+  });
+  $('adminUserSearchInput')?.addEventListener('input', (e) => {
+    adminPortalState.search = e.target.value || '';
+    renderAdminPortalUsers();
+  });
+  document.querySelectorAll('[data-ufilter]').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      adminPortalState.filter = chip.dataset.ufilter || 'ALL';
+      document.querySelectorAll('[data-ufilter]').forEach((c) => c.classList.toggle('active', c === chip));
+      renderAdminPortalUsers();
+    });
+  });
+  $('adminToggleCreateUserBtn')?.addEventListener('click', () => {
+    const form = $('adminCreateUserForm');
+    if (!form) return;
+    const nextOpen = form.style.display === 'none';
+    form.style.display = nextOpen ? 'flex' : 'none';
+    if (nextOpen && $('admNewPassword') && !$('admNewPassword').value) {
+      $('admNewPassword').value = generateStrongAdminPassword(10);
+    }
+    if (nextOpen) $('admNewUsername')?.focus();
+  });
+  $('admCancelCreateUserBtn')?.addEventListener('click', () => {
+    if ($('adminCreateUserForm')) $('adminCreateUserForm').style.display = 'none';
+  });
+  $('admGenPasswordBtn')?.addEventListener('click', () => {
+    if ($('admNewPassword')) $('admNewPassword').value = generateStrongAdminPassword(10);
+  });
+  $('admSubmitCreateUserBtn')?.addEventListener('click', async () => {
+    const username = ($('admNewUsername')?.value || '').trim().toLowerCase();
+    const displayName = ($('admNewDisplayName')?.value || '').trim() || username;
+    const password = ($('admNewPassword')?.value || '').trim();
+    const role = $('admNewRole')?.value === 'ADMIN' ? 'ADMIN' : 'MEMBER';
+    const dailyAiLimit = Number($('admNewQuota')?.value ?? 150);
+    if (!username || password.length < 6) {
+      showToast('⚠️ Nhập username (3–32 ký tự) và mật khẩu >= 6 ký tự');
+      return;
+    }
+    try {
+      await cloudAdminAction({ action: 'createUser', username, displayName, password, role, dailyAiLimit });
+      if ($('admNewUsername')) $('admNewUsername').value = '';
+      if ($('admNewDisplayName')) $('admNewDisplayName').value = '';
+      if ($('admNewPassword')) $('admNewPassword').value = '';
+      if ($('adminCreateUserForm')) $('adminCreateUserForm').style.display = 'none';
+      const copyStr = `Tài khoản ChillFilm: @${username} | Mật khẩu: ${password}`;
+      showAdminTempPasswordBanner(
+        `✅ Đã tạo tài khoản <strong>@${escapeHtml(username)}</strong> (${role}) • Mật khẩu: <code style="background:rgba(0,0,0,0.4);padding:2px 7px;border-radius:5px;color:#34d399;font-size:13px;">${escapeHtml(password)}</code>`,
+        copyStr
+      );
+      showToast(`✅ Đã tạo tài khoản @${username}!`);
+      await loadAdminPortalData();
+    } catch (err) {
+      showToast(`⚠️ ${err.message || 'Không thể tạo tài khoản'}`);
+    }
+  });
+  $('adminTempPwCopyBtn')?.addEventListener('click', () => {
+    navigator.clipboard?.writeText(adminPortalState.lastTempCopyText || '').catch(() => {});
+    showToast('📋 Đã copy tài khoản & mật khẩu!');
+  });
+  $('adminTempPwCloseBtn')?.addEventListener('click', () => {
+    if ($('adminTempPwBanner')) $('adminTempPwBanner').style.display = 'none';
+  });
+  $('admPortalCreateInviteBtn')?.addEventListener('click', async () => {
+    try {
+      const label = ($('admInvLabel')?.value || 'Member Invite').trim();
+      const maxUses = Math.max(1, Math.min(500, Number($('admInvMaxUses')?.value || 5)));
+      const dailyAiLimit = Math.max(0, Math.min(10000, Number($('admInvDailyLimit')?.value ?? 200)));
+      const res = await cloudAdminAction({ action: 'createInvite', label, maxUses, dailyAiLimit });
+      const code = res?.invite?.code;
+      if (code) {
+        navigator.clipboard?.writeText(code).catch(() => {});
+        showToast(`🎟️ Đã tạo & Copy mã mời: ${code}`);
+      }
+      await loadAdminPortalData();
+    } catch (err) {
+      showToast(`⚠️ ${err.message || 'Không thể tạo mã mời'}`);
+    }
+  });
+  $('admPortalSaveRegModeBtn')?.addEventListener('click', async () => {
+    try {
+      await cloudAdminAction({
+        action: 'updateConfig',
+        registrationMode: $('admPortalRegModeSelect')?.value,
+      });
+      showToast('✅ Đã cập nhật chính sách đăng ký toàn hệ thống!');
+      await loadAdminPortalData();
+    } catch (err) {
+      showToast(`⚠️ ${err.message || 'Cập nhật thất bại'}`);
+    }
   });
   $('adminSaveVaultBtn')?.addEventListener('click', async () => {
     const keyVal = $('adminVaultKeyInput')?.value.trim() || '';

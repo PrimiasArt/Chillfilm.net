@@ -8,6 +8,7 @@ import {
 } from '../_lib/db.js';
 import {
   generateInviteCode,
+  hashPassword,
   jsonResponse,
   optionsResponse,
   readJsonBody,
@@ -36,11 +37,25 @@ export async function GET(request) {
     const sql = getSql();
     const day = todayDayKey();
 
-    const [aiCfg, invites, users, usageToday, poolStats, catalogStats, sources, customBlockedTerms, crawlRuns] = await Promise.all([
+    const [
+      aiCfg,
+      invites,
+      users,
+      usageToday,
+      watchCounts,
+      myListCounts,
+      poolStats,
+      catalogStats,
+      sources,
+      customBlockedTerms,
+      crawlRuns,
+    ] = await Promise.all([
       getServerGeminiConfig({ bypassCache: true }),
-      sql`SELECT code, label, max_uses, used_count, daily_ai_limit, active, created_at FROM nki_invites ORDER BY created_at DESC LIMIT 50`,
-      sql`SELECT id, username, display_name, role, status, daily_ai_limit, token_version, created_at, last_seen_at FROM nki_users ORDER BY created_at ASC LIMIT 100`,
+      sql`SELECT code, label, max_uses, used_count, daily_ai_limit, active, created_at FROM nki_invites ORDER BY created_at DESC LIMIT 80`,
+      sql`SELECT id, username, display_name, role, status, daily_ai_limit, token_version, created_at, last_seen_at FROM nki_users ORDER BY CASE WHEN role = 'ADMIN' THEN 0 ELSE 1 END, created_at ASC LIMIT 300`,
       sql`SELECT user_id, requests_count, cues_count, audio_chunks FROM nki_ai_usage WHERE day_key = ${day}`,
+      sql`SELECT user_id, COUNT(*)::int AS cnt FROM nki_watch_progress GROUP BY user_id`.catch(() => []),
+      sql`SELECT user_id, COUNT(*)::int AS cnt FROM nki_my_list GROUP BY user_id`.catch(() => []),
       sql`SELECT COUNT(*)::int AS total_subs FROM nki_subtitle_pool`,
       sql`SELECT COUNT(*)::int AS total_items FROM nki_catalog_items`,
       listDynamicSources({ onlyEnabled: false, bypassCache: true }),
@@ -49,10 +64,38 @@ export async function GET(request) {
     ]);
 
     const usageMap = new Map(usageToday.map((u) => [u.user_id, u]));
+    const watchMap = new Map((watchCounts || []).map((r) => [r.user_id, Number(r.cnt || 0)]));
+    const listMap = new Map((myListCounts || []).map((r) => [r.user_id, Number(r.cnt || 0)]));
     const healthyCount = sources.filter((s) => s.enabled && s.lastStatus === 'ONLINE').length;
+
+    const enrichedUsers = users.map((u) => ({
+      ...sanitizeUserPublic(u, usageMap.get(u.id) || { requests_count: 0, cues_count: 0, audio_chunks: 0 }),
+      watchCount: watchMap.get(u.id) || 0,
+      myListCount: listMap.get(u.id) || 0,
+    }));
+
+    let todayAiRequests = 0;
+    let todayAudioChunks = 0;
+    let todayCues = 0;
+    for (const u of usageToday) {
+      todayAiRequests += Number(u.requests_count || 0);
+      todayAudioChunks += Number(u.audio_chunks || 0);
+      todayCues += Number(u.cues_count || 0);
+    }
+
+    const accountStats = {
+      totalUsers: enrichedUsers.length,
+      activeUsers: enrichedUsers.filter((u) => u.status === 'ACTIVE').length,
+      revokedUsers: enrichedUsers.filter((u) => u.status !== 'ACTIVE').length,
+      adminCount: enrichedUsers.filter((u) => u.role === 'ADMIN').length,
+      todayAiRequests,
+      todayAudioChunks,
+      todayCues,
+    };
 
     return jsonResponse({
       ok: true,
+      accountStats,
       config: {
         serverAiReady: Boolean(aiCfg.apiKey),
         hasEnvKey: aiCfg.hasEnvKey,
@@ -81,9 +124,7 @@ export async function GET(request) {
         active: Boolean(i.active),
         createdAt: Number(i.created_at),
       })),
-      users: users.map((u) =>
-        sanitizeUserPublic(u, usageMap.get(u.id) || { requests_count: 0, cues_count: 0, audio_chunks: 0 })
-      ),
+      users: enrichedUsers,
     });
   } catch (err) {
     console.error('[api/admin/config GET] error:', err);
@@ -156,11 +197,76 @@ export async function POST(request) {
       return jsonResponse({ ok: true, code });
     }
 
+    if (action === 'deleteInvite') {
+      const code = String(body.code || '').trim().toUpperCase();
+      if (!code) return jsonResponse({ error: 'Invite code required' }, 400);
+      await sql`DELETE FROM nki_invites WHERE code = ${code}`;
+      return jsonResponse({ ok: true, code });
+    }
+
+    if (action === 'createUser') {
+      const username = String(body.username || '').trim().toLowerCase();
+      const displayName = String(body.displayName || username).trim().slice(0, 50) || username;
+      const password = String(body.password || '');
+      const role = body.role === 'ADMIN' ? 'ADMIN' : 'MEMBER';
+      const dailyAiLimit = Math.max(0, Math.min(10000, Math.round(Number(body.dailyAiLimit ?? (role === 'ADMIN' ? 0 : 150)))));
+
+      if (!/^[a-z0-9_.-]{3,32}$/.test(username)) {
+        return jsonResponse({ error: 'Tên đăng nhập phải từ 3–32 ký tự (chữ thường, số, _, ., -)' }, 400);
+      }
+      if (password.length < 6 || password.length > 128) {
+        return jsonResponse({ error: 'Mật khẩu phải từ 6 ký tự trở lên' }, 400);
+      }
+      const existing = await sql`SELECT id FROM nki_users WHERE username = ${username} LIMIT 1`;
+      if (existing.length) {
+        return jsonResponse({ error: `Tài khoản @${username} đã tồn tại` }, 409);
+      }
+      const id = `usr_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+      const now = Date.now();
+      const pwHash = hashPassword(password);
+      await sql`
+        INSERT INTO nki_users (id, username, display_name, password_hash, role, status, daily_ai_limit, token_version, created_at, last_seen_at)
+        VALUES (${id}, ${username}, ${displayName}, ${pwHash}, ${role}, 'ACTIVE', ${dailyAiLimit}, 1, ${now}, ${now})
+      `;
+      return jsonResponse({
+        ok: true,
+        user: sanitizeUserPublic(
+          { id, username, display_name: displayName, role, status: 'ACTIVE', daily_ai_limit: dailyAiLimit, created_at: now, last_seen_at: now },
+          { requests_count: 0, cues_count: 0, audio_chunks: 0 }
+        ),
+      }, 201);
+    }
+
     if (action === 'updateUser') {
       const targetUserId = String(body.userId || '').trim();
       if (!targetUserId) return jsonResponse({ error: 'userId required' }, 400);
+      const targetRows = await sql`SELECT id, username, role, status FROM nki_users WHERE id = ${targetUserId} LIMIT 1`;
+      if (!targetRows.length) return jsonResponse({ error: 'Không tìm thấy tài khoản' }, 404);
+      const target = targetRows[0];
+
       if (targetUserId === adminUser.id && body.status === 'REVOKED') {
-        return jsonResponse({ error: 'Cannot revoke your own admin account' }, 400);
+        return jsonResponse({ error: 'Không thể tự khóa tài khoản Admin đang đăng nhập' }, 400);
+      }
+      if (targetUserId === adminUser.id && body.role === 'MEMBER') {
+        return jsonResponse({ error: 'Không thể tự hạ quyền Admin của chính mình' }, 400);
+      }
+      if (target.role === 'ADMIN' && (body.role === 'MEMBER' || body.status === 'REVOKED')) {
+        const admins = await sql`SELECT COUNT(*)::int AS cnt FROM nki_users WHERE role = 'ADMIN' AND status = 'ACTIVE'`;
+        if (Number(admins?.[0]?.cnt || 0) <= 1) {
+          return jsonResponse({ error: 'Phải giữ lại ít nhất 1 tài khoản ADMIN đang hoạt động' }, 400);
+        }
+      }
+
+      if (typeof body.displayName === 'string' && body.displayName.trim()) {
+        const cleanName = body.displayName.trim().slice(0, 50);
+        await sql`UPDATE nki_users SET display_name = ${cleanName} WHERE id = ${targetUserId}`;
+      }
+      if (body.role === 'ADMIN' || body.role === 'MEMBER') {
+        await sql`
+          UPDATE nki_users
+          SET role = ${body.role}, token_version = token_version + 1
+          WHERE id = ${targetUserId}
+        `;
       }
       if (body.status === 'ACTIVE' || body.status === 'REVOKED') {
         // Bumping token_version immediately invalidates all active tokens across phones/web/TV!
@@ -175,6 +281,75 @@ export async function POST(request) {
         await sql`UPDATE nki_users SET daily_ai_limit = ${clamped} WHERE id = ${targetUserId}`;
       }
       return jsonResponse({ ok: true, userId: targetUserId });
+    }
+
+    if (action === 'resetUserPassword') {
+      const targetUserId = String(body.userId || '').trim();
+      if (!targetUserId) return jsonResponse({ error: 'userId required' }, 400);
+      const targetRows = await sql`SELECT id, username FROM nki_users WHERE id = ${targetUserId} LIMIT 1`;
+      if (!targetRows.length) return jsonResponse({ error: 'Không tìm thấy tài khoản' }, 404);
+
+      const provided = typeof body.newPassword === 'string' ? body.newPassword.trim() : '';
+      let nextPassword = provided;
+      if (!nextPassword) {
+        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+        const bytes = crypto.randomBytes(10);
+        nextPassword = Array.from(bytes, (b) => chars[b % chars.length]).join('');
+      }
+      if (nextPassword.length < 6 || nextPassword.length > 128) {
+        return jsonResponse({ error: 'Mật khẩu mới phải từ 6 ký tự trở lên' }, 400);
+      }
+      const pwHash = hashPassword(nextPassword);
+      await sql`
+        UPDATE nki_users
+        SET password_hash = ${pwHash}, token_version = token_version + 1
+        WHERE id = ${targetUserId}
+      `;
+      return jsonResponse({
+        ok: true,
+        userId: targetUserId,
+        username: targetRows[0].username,
+        tempPassword: nextPassword,
+      });
+    }
+
+    if (action === 'forceLogoutUser') {
+      const targetUserId = String(body.userId || '').trim();
+      if (!targetUserId) return jsonResponse({ error: 'userId required' }, 400);
+      if (targetUserId === adminUser.id) {
+        return jsonResponse({ error: 'Dùng nút Đăng xuất trong hồ sơ để thoát phiên của chính bạn' }, 400);
+      }
+      await sql`UPDATE nki_users SET token_version = token_version + 1 WHERE id = ${targetUserId}`;
+      return jsonResponse({ ok: true, userId: targetUserId });
+    }
+
+    if (action === 'resetUserQuota') {
+      const targetUserId = String(body.userId || '').trim();
+      if (!targetUserId) return jsonResponse({ error: 'userId required' }, 400);
+      const day = todayDayKey();
+      await sql`DELETE FROM nki_ai_usage WHERE user_id = ${targetUserId} AND day_key = ${day}`;
+      return jsonResponse({ ok: true, userId: targetUserId, dayKey: day });
+    }
+
+    if (action === 'deleteUser') {
+      const targetUserId = String(body.userId || '').trim();
+      if (!targetUserId) return jsonResponse({ error: 'userId required' }, 400);
+      if (targetUserId === adminUser.id) {
+        return jsonResponse({ error: 'Không thể tự xóa tài khoản Admin đang đăng nhập' }, 400);
+      }
+      const targetRows = await sql`SELECT id, username, role FROM nki_users WHERE id = ${targetUserId} LIMIT 1`;
+      if (!targetRows.length) return jsonResponse({ error: 'Không tìm thấy tài khoản' }, 404);
+      if (targetRows[0].role === 'ADMIN') {
+        return jsonResponse({ error: 'Hãy hạ quyền về MEMBER trước khi xóa tài khoản ADMIN' }, 400);
+      }
+      await Promise.all([
+        sql`DELETE FROM nki_ai_usage WHERE user_id = ${targetUserId}`.catch(() => {}),
+        sql`DELETE FROM nki_watch_progress WHERE user_id = ${targetUserId}`.catch(() => {}),
+        sql`DELETE FROM nki_user_prefs WHERE user_id = ${targetUserId}`.catch(() => {}),
+        sql`DELETE FROM nki_my_list WHERE user_id = ${targetUserId}`.catch(() => {}),
+      ]);
+      await sql`DELETE FROM nki_users WHERE id = ${targetUserId}`;
+      return jsonResponse({ ok: true, deletedUserId: targetUserId, username: targetRows[0].username });
     }
 
     if (action === 'addSource') {
