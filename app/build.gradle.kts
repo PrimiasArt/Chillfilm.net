@@ -6,8 +6,8 @@ plugins {
 }
 
 val runNumEnv = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull()
-var computedVersionCode = 352
-var computedVersionName = "3.5.2"
+var computedVersionCode = 360
+var computedVersionName = "3.6.0"
 
 val versionFile = rootProject.file("version.json")
 if (versionFile.exists()) {

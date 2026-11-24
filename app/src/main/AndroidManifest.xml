@@ -79,6 +79,12 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </service>
+
+        <!-- #8 Resilient Foreground Service for Uninterrupted Background AI Subtitle Translation -->
+        <service
+            android:name=".subtitle.SubtitleTranslationService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 
 </manifest>

@@ -1,6 +1,6 @@
 {
-  "versionName": "3.5.2",
-  "versionCode": 352,
+  "versionName": "3.6.0",
+  "versionCode": 360,
   "downloadUrl": "https://github.com/PrimiasArt/Chillfilm.net/releases/download/android-apk-latest/ChillFilm-latest.apk",
-  "releaseNotes": "ChillFilm 3.5.2 Hotfix: Smart Fuzzy & Overlap Subtitle Deduplication (eliminates double rephrased AI lines at the same timestamp), Surgical Gap-Repair, Watch Party 2.0, Offline HLS + AI Subtitles"
+  "releaseNotes": "ChillFilm 3.6.0 AI Subtitle Pro Suite: Rolling Dialogue Context, Anti-Hallucination & Silence Filter, Cinema CPS Timing Polisher, 1-Click AI Cinema Polish, Seek Bar Coverage Heatmap + Instant 30s Translate, Per-Server Offset, Tap-to-Edit Inline Sub Sync & Resilient Background Foreground Service"
 }

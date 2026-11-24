@@ -211,7 +211,18 @@
 
       <!-- Dual-Language AI Subtitle Overlay -->
       <div class="sub-layer" id="subLayer">
-        <div class="sub-pill" id="subPill"></div>
+        <div class="inline-sub-editor" id="inlineSubEditor" style="display:none;">
+          <div class="inline-sub-editor-head">
+            <span id="inlineSubEditorTime">✏️ Sửa phụ đề tại 00:00</span>
+            <button type="button" class="inline-sub-close" id="inlineSubCloseBtn" aria-label="Đóng">✕</button>
+          </div>
+          <input type="text" class="inline-sub-input" id="inlineSubInput" maxlength="220" placeholder="Nhập câu phụ đề chuẩn..." />
+          <div class="inline-sub-actions">
+            <button type="button" class="btn-grad" id="inlineSubSaveBtn" style="padding:5px 10px;font-size:11.5px;">💾 Lưu &amp; Đồng bộ Cloud</button>
+            <button type="button" class="btn-glass" id="inlineSubRetranslateBtn" style="padding:5px 10px;font-size:11.5px;border-color:rgba(251,191,36,0.5);color:#fde68a;">🎙 Dịch lại 15s đoạn này</button>
+          </div>
+        </div>
+        <div class="sub-pill" id="subPill" title="Bấm vào phụ đề khi tạm dừng để sửa nhanh hoặc dịch lại 15s"></div>
       </div>
 
       <!-- Gesture Feedback -->
@@ -446,6 +457,7 @@
               <canvas id="scrubCanvas" class="scrub-thumb-canvas" width="160" height="90" style="display:none;"></canvas>
               <span id="seekTooltipTime">00:00</span>
             </div>
+            <div class="seek-coverage-bar" id="subCoverageBar" title="Bản đồ phủ phụ đề AI (Xanh: Đã có • Vàng: Đang dịch • Đỏ: Thiếu — bấm để dịch ngay 30s)"></div>
             <input type="range" id="seekRange" class="cinema-range seek-slider" min="0" max="1000" value="0" aria-label="Seek timeline" />
           </div>
           <div class="hud-ctrl-bar">
@@ -473,6 +485,12 @@
               </div>
             </div>
             <div class="hud-ctrl-right">
+              <div class="hud-quick-sync-group hide-xs" id="hudQuickSyncGroup" title="Chỉnh lệch giờ sub nhanh (tự lưu riêng theo từng server)">
+                <button class="hud-sync-step" id="hudQuickSyncMinusBtn" type="button" title="Sub sớm hơn 0.5s">-0.5s</button>
+                <span class="hud-sync-val" id="hudQuickSyncVal">0s</span>
+                <button class="hud-sync-step" id="hudQuickSyncPlusBtn" type="button" title="Sub trễ hơn 0.5s">+0.5s</button>
+              </div>
+              <button class="hud-mini-pill hud-instant-sub-btn" id="hudInstant30sBtn" type="button" title="Dịch nhanh ngay 30 giây tại vị trí đang xem (ưu tiên tức thì)">🎙 +30s</button>
               <button class="hud-mini-pill" id="hudSpeedBoostBtn" title="Playback Speed & Audio">1x</button>
               <button class="hud-icon-btn" id="hudEpisodesBtn" title="Episodes & Servers (E)" aria-label="Episodes and Servers">
                 <svg class="ui-ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="3.5" cy="6" r="1" fill="currentColor"/><circle cx="3.5" cy="12" r="1" fill="currentColor"/><circle cx="3.5" cy="18" r="1" fill="currentColor"/></svg>
@@ -539,6 +557,7 @@
               <button class="btn-grad" id="aiAudioSubBtn" type="button" style="padding:7px 12px;font-size:12px;">🎙 Dịch trước 10 phút</button>
               <button class="btn-glass" id="aiAudioSubFullBtn" type="button" style="padding:7px 10px;font-size:11.5px;">🎬 Dịch Full 100%</button>
               <button class="btn-glass" id="aiAudioSubRepairBtn" type="button" style="padding:7px 10px;font-size:11.5px;border-color:rgba(251,191,36,0.55);color:#fde68a;">🔧 Dịch bù đoạn thiếu</button>
+              <button class="btn-glass" id="aiAudioSubPolishBtn" type="button" style="padding:7px 10px;font-size:11.5px;border-color:rgba(192,132,252,0.55);color:#e9d5ff;" title="Chuốt văn phong điện ảnh, sửa tên nhân vật & đồng nhất xưng hô toàn phim">✨ Chuốt lời điện ảnh</button>
               <button class="btn-glass" id="downloadSubSrtBtn" type="button" style="padding:7px 10px;font-size:11.5px;">⬇️ Tải .SRT</button>
             </div>
           </div>
@@ -1166,6 +1185,6 @@
 
   <div class="toast" id="toast"></div>
 
-  <script type="module" src="./app.js?v=24"></script>
+  <script type="module" src="./app.js?v=25"></script>
 </body>
 </html>

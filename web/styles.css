@@ -4219,3 +4219,154 @@ button > svg {
   border-radius: 4px;
   object-fit: cover;
 }
+
+/* ==================== v25 AI SUBTITLE PRO SUITE (HEATMAP, QUICK SYNC, INSTANT 30s, INLINE EDIT) ==================== */
+.seek-coverage-bar {
+  position: relative;
+  width: 100%;
+  height: 5px;
+  margin-bottom: 4px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+  display: none;
+  pointer-events: auto;
+  cursor: pointer;
+}
+.seek-coverage-bar.visible {
+  display: block;
+}
+.seek-cov-seg {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 2px;
+  transition: opacity 0.16s ease;
+}
+.seek-cov-seg.covered {
+  background: linear-gradient(90deg, rgba(16, 185, 129, 0.85), rgba(52, 211, 153, 0.92));
+}
+.seek-cov-seg.active-ai {
+  background: #fbbf24;
+  animation: covPulse 1.1s ease-in-out infinite;
+}
+.seek-cov-seg.gap {
+  background: rgba(239, 68, 68, 0.72);
+}
+.seek-cov-seg.gap:hover {
+  background: #f87171;
+  box-shadow: 0 0 6px rgba(248, 113, 113, 0.9);
+}
+@keyframes covPulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+
+.hud-quick-sync-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 4px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+.hud-sync-step {
+  background: transparent;
+  border: none;
+  color: #d1fae5;
+  font-size: 10.5px;
+  font-weight: 800;
+  padding: 3px 6px;
+  border-radius: 99px;
+  cursor: pointer;
+  line-height: 1;
+}
+.hud-sync-step:hover {
+  background: rgba(16, 185, 129, 0.28);
+  color: #ffffff;
+}
+.hud-sync-val {
+  font-size: 10.5px;
+  font-weight: 800;
+  color: #34d399;
+  min-width: 28px;
+  text-align: center;
+}
+.hud-instant-sub-btn {
+  border-color: rgba(251, 191, 36, 0.45) !important;
+  color: #fde68a !important;
+  background: rgba(251, 191, 36, 0.14) !important;
+}
+.hud-instant-sub-btn:hover {
+  background: rgba(251, 191, 36, 0.28) !important;
+}
+.hud-instant-sub-btn.busy {
+  opacity: 0.75;
+  animation: covPulse 1s ease-in-out infinite;
+}
+
+.sub-pill.editable-ready {
+  pointer-events: auto;
+  cursor: pointer;
+}
+.sub-pill.editable-ready:hover {
+  outline: 1.5px dashed rgba(52, 211, 153, 0.65);
+  outline-offset: 2px;
+}
+
+.inline-sub-editor {
+  pointer-events: auto;
+  width: min(560px, 92vw);
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(12, 16, 20, 0.94);
+  border: 1px solid rgba(52, 211, 153, 0.48);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.78);
+  backdrop-filter: blur(12px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 40;
+}
+.inline-sub-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11.5px;
+  font-weight: 800;
+  color: #86efac;
+}
+.inline-sub-close {
+  background: transparent;
+  border: none;
+  color: #9ca3af;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+.inline-sub-close:hover {
+  color: #ffffff;
+}
+.inline-sub-input {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: #ffffff;
+  font-size: 13.5px;
+  font-weight: 600;
+  outline: none;
+}
+.inline-sub-input:focus {
+  border-color: #34d399;
+}
+.inline-sub-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}

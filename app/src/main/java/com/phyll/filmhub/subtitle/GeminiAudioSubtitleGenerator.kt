@@ -428,18 +428,23 @@ class GeminiAudioSubtitleGenerator(
         apiKey: String,
         modelId: String,
         preferTurboFlash: Boolean = false,
-        targetLangCode: String = "th"
+        targetLangCode: String = "th",
+        previousLines: List<String> = emptyList(),
+        retrySensitive: Boolean = false,
+        bypassDiskCache: Boolean = false
     ): Result<ChunkSubtitleResult> = withContext(Dispatchers.IO) {
         runCatching {
             val cleanKey = apiKey.trim()
-            require(cleanKey.isNotEmpty()) { "Chưa có Gemini API Key" }
+            require(cleanKey.isNotEmpty() || CloudSyncClient.canUseServerAi()) { "Chưa có Gemini API Key hoặc NKI Cloud" }
             val cleanModel = modelId.trim().removePrefix("models/").ifBlank { "gemini-3-flash-preview" }
             val langNorm = SubtitleLanguageCatalog.normalizeCode(targetLangCode)
                 .replace(Regex("[^A-Za-z0-9_-]"), "_")
 
             // Check subtitle cue cache on disk (contains ONLY subtitle cues, NEVER any API key!)
             val bucketKey = "${cacheNamespace}_${langNorm}_${cleanModel}_${windowStartMs / 1000L}_${windowDurationMs / 1000L}"
-            readCachedChunk(bucketKey)?.let { return@runCatching it }
+            if (!bypassDiskCache) {
+                readCachedChunk(bucketKey)?.let { return@runCatching it }
+            }
 
             val audioChunk = extractAudioChunk(timeline, windowStartMs, windowDurationMs)
                 ?: error("Không trích xuất được âm thanh từ luồng phim ở mốc ${windowStartMs / 1000}s")
@@ -452,7 +457,7 @@ class GeminiAudioSubtitleGenerator(
                 )
             }
 
-            val cues = callGeminiMultimodalForThaiSubtitles(
+            val rawCues = callGeminiMultimodalForThaiSubtitles(
                 audioBytes = audioChunk.audioBytes,
                 mimeType = audioChunk.mimeType,
                 chunkStartOffsetMs = audioChunk.actualStartMs,
@@ -460,8 +465,11 @@ class GeminiAudioSubtitleGenerator(
                 apiKey = cleanKey,
                 modelId = cleanModel,
                 preferTurboFlash = preferTurboFlash,
-                targetLangCode = targetLangCode
+                targetLangCode = targetLangCode,
+                previousLines = previousLines,
+                retrySensitive = retrySensitive
             )
+            val cues = SubtitleParser.sanitizeAndPolishAudioCues(rawCues)
 
             val result = ChunkSubtitleResult(
                 actualStartMs = audioChunk.actualStartMs,
@@ -634,7 +642,9 @@ class GeminiAudioSubtitleGenerator(
         apiKey: String,
         modelId: String,
         preferTurboFlash: Boolean = false,
-        targetLangCode: String = "th"
+        targetLangCode: String = "th",
+        previousLines: List<String> = emptyList(),
+        retrySensitive: Boolean = false
     ): List<SubtitleCue> {
         val base64Audio = encodeBase64(audioBytes)
         // Route via centralized NKI Cloud AI Proxy when signed in (ZERO Gemini API Key needed on phone/TV!)
@@ -646,7 +656,9 @@ class GeminiAudioSubtitleGenerator(
                 chunkDurationMs = chunkDurationMs,
                 targetLang = targetLangCode,
                 modelId = modelId,
-                preferTurboFlash = preferTurboFlash
+                preferTurboFlash = preferTurboFlash,
+                previousLines = previousLines,
+                retrySensitive = retrySensitive
             )
             if (cloudCues != null) {
                 return cloudCues
@@ -658,12 +670,20 @@ class GeminiAudioSubtitleGenerator(
 
         val durationSec = "%.1f".format(chunkDurationMs / 1000.0)
         val langSpec = SubtitleLanguageCatalog.resolve(targetLangCode)
+        val continuityBlock = if (previousLines.isNotEmpty()) {
+            val linesStr = previousLines.takeLast(5).mapIndexed { i, t -> "  - ${i + 1}: \"${t.take(120)}\"" }.joinToString("\n")
+            "\nPreceding dialogue right before 0.0s (CONTEXT ONLY for consistent pronouns/names — DO NOT repeat):\n$linesStr"
+        } else ""
+        val sensitivityLine = if (retrySensitive) {
+            "\nIMPORTANT RECOVERY: Capture EVERY audible spoken sentence across 0.0s..${durationSec}s even if soft or over music."
+        } else ""
         val prompt = """
             Universal cinema subtitle creator: listen to this $durationSec-second movie audio clip (starts at 0.0s).
-            Transcribe ALL spoken dialogue (from ANY spoken language) directly into ${langSpec.geminiInstructionName}.
+            Transcribe ALL spoken dialogue (from ANY spoken language) directly into ${langSpec.geminiInstructionName}.$sensitivityLine$continuityBlock
             Rules:
-            - "s" and "e" = float seconds relative to 0.0 of this clip (0.0 <= s < e <= $durationSec), 1.2s-4.8s per cue.
-            - Skip music/silence; if no speech, return [].
+            - "s" and "e" = float seconds relative to 0.0 of this clip (0.0 <= s < e <= $durationSec), 1.1s-4.6s per cue, max ~76 chars.
+            - Keep pronouns, honorifics & names consistent with preceding dialogue.
+            - Skip music/silence; if no speech, return []. NEVER output "Thanks for watching" / "Subscribe".
             Return ONLY JSON array: [{"s":1.2,"e":3.6,"t":"translated subtitle text in ${langSpec.nativeLabel}"}]
         """.trimIndent()
 

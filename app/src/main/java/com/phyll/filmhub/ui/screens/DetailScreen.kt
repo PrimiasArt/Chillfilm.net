@@ -95,6 +95,7 @@ fun DetailScreen(
     isEpisodeWatched: (Episode) -> Boolean = { false },
     onPreTranslateEpisode: (Episode) -> Unit = {},
     onRepairSubGaps: (Episode) -> Unit = {},
+    onPolishSubtitles: (Episode) -> Unit = {},
     onDownloadEpisode: (Episode) -> Unit = {},
     onPauseDownload: (String) -> Unit = {},
     onResumeDownload: (String) -> Unit = {},
@@ -753,6 +754,25 @@ fun DetailScreen(
                                 Text(
                                     text = "🔧 Dịch bù đoạn thiếu",
                                     color = Color(0xFFFDE68A),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
+
+                            Box(
+                                modifier = Modifier
+                                    .tvFocusableClickable(
+                                        shape = RoundedCornerShape(8.dp),
+                                        focusedBorderColor = Color(0xFFE9D5FF),
+                                        unfocusedBorderColor = Color(0x88C084FC),
+                                        onClick = { onPolishSubtitles(firstEp) }
+                                    )
+                                    .background(Color(0x26A855F7))
+                                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                            ) {
+                                Text(
+                                    text = "✨ Chuốt lời AI",
+                                    color = Color(0xFFE9D5FF),
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.ExtraBold
                                 )

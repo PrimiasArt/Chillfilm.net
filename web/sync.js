@@ -341,6 +341,26 @@ export async function cloudTranslateCueBatch({ cues, targetLang, model, movieCon
   return cues.map((c, idx) => ({ ...c, text: (data.translated[idx] || c.text).trim() }));
 }
 
+export async function cloudPolishSubtitleBatch({ cues, targetLang, model, movieContext = null }) {
+  const session = getCloudSession();
+  if (!session?.token || !cues?.length) return null;
+  const data = await apiFetch('/api/ai/translate', {
+    method: 'POST',
+    auth: true,
+    body: {
+      mode: 'polish',
+      texts: cues.map((c) => c.text),
+      targetLang,
+      model: model || session.defaultModel || 'gemini-2.5-flash',
+      movieContext: movieContext || undefined,
+    },
+  });
+  if (!Array.isArray(data?.translated) || data.translated.length !== cues.length) {
+    return null;
+  }
+  return cues.map((c, idx) => ({ ...c, text: (data.translated[idx] || c.text).trim() }));
+}
+
 export async function cloudTranscribeAudioChunk({
   audioBase64,
   mimeType = 'audio/webm',
@@ -349,6 +369,7 @@ export async function cloudTranscribeAudioChunk({
   targetLang = 'vi',
   model = '',
   movieContext = null,
+  previousLines = [],
   retrySensitive = false,
 }) {
   const session = getCloudSession();
@@ -366,6 +387,7 @@ export async function cloudTranscribeAudioChunk({
       preferTurboFlash: true,
       retrySensitive: Boolean(retrySensitive),
       movieContext: movieContext || undefined,
+      previousLines: Array.isArray(previousLines) && previousLines.length ? previousLines.slice(-5) : undefined,
     },
   });
 }

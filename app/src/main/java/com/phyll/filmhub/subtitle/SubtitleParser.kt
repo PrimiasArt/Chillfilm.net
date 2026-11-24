@@ -489,4 +489,155 @@ object SubtitleParser {
         val overlapCoeff = if (minSize >= 3) inter.toDouble() / minSize.toDouble() else 0.0
         return maxOf(jaccard, overlapCoeff * 0.92)
     }
+
+    private val AUDIO_HALLUCINATION_REGEX = Regex(
+        """(?:cảm ơn (?:các )?bạn đã (?:xem|theo dõi|lắng nghe)|hãy (?:like|đăng ký|subscribe) kênh|đăng ký kênh để không bỏ lỡ|nhấn chuông thông báo|subtitles?\s+by|translated\s+by|amara\.org|thank(?:s| you)\s+for\s+watching|please\s+subscribe|subscribe\s+to\s+(?:our|my|the)\s+channel|mbc\s*뉴스|ご視聴ありがとう|チャンネル登録|请不吝点赞|请订阅|字幕由|感謝觀看|谢谢观看|감사합니다\s*구독)""",
+        RegexOption.IGNORE_CASE
+    )
+    private val ONLY_BRACKET_NOISE_REGEX = Regex(
+        """^[\s♪♫♬♩🎵🎶*~_\-=.,?!:;()\[\]{}<>]+$|^(?:\[|\()(?:music|nhạc|âm nhạc|nhạc nền|tiếng nhạc|silence|im lặng|applause|vỗ tay|laughter|tiếng cười|sfx|sound|inaudible|không nghe rõ)(?:\]|\))$""",
+        RegexOption.IGNORE_CASE
+    )
+
+    fun isAudioHallucinationLine(text: String): Boolean {
+        val s = text.trim()
+        if (s.isEmpty()) return true
+        if (ONLY_BRACKET_NOISE_REGEX.matches(s)) return true
+        if (AUDIO_HALLUCINATION_REGEX.containsMatchIn(s)) return true
+        val words = s.lowercase()
+            .replace(Regex("[^\\p{L}\\p{N}\\s]+"), " ")
+            .trim()
+            .split(Regex("\\s+"))
+            .filter { it.isNotEmpty() }
+        if (words.size >= 6) {
+            var run = 1
+            for (i in 1 until words.size) {
+                if (words[i] == words[i - 1]) {
+                    run++
+                    if (run >= 5) return true
+                } else {
+                    run = 1
+                }
+            }
+        }
+        return false
+    }
+
+    private fun splitLongCueText(text: String): List<String> {
+        val s = text.trim()
+        if (s.length <= 80) return listOf(s)
+        val minPos = (s.length * 0.34).toInt()
+        val maxPos = (s.length * 0.68).toInt().coerceAtMost(s.lastIndex)
+        val mid = s.length / 2
+        var best = -1
+        var bestDist = Int.MAX_VALUE
+        for (i in minPos..maxPos) {
+            val ch = s[i]
+            if ((ch == '.' || ch == '?' || ch == '!' || ch == '…' || ch == ';' || ch == ',') &&
+                i + 1 < s.length && s[i + 1] == ' '
+            ) {
+                val dist = kotlin.math.abs(i - mid) + if (ch == ',' || ch == ';') 6 else 0
+                if (dist < bestDist) {
+                    bestDist = dist
+                    best = i + 1
+                }
+            }
+        }
+        if (best < 0) {
+            for (i in minPos..maxPos) {
+                if (s[i] == ' ') {
+                    val dist = kotlin.math.abs(i - mid)
+                    if (dist < bestDist) {
+                        bestDist = dist
+                        best = i
+                    }
+                }
+            }
+        }
+        if (best < 0) return listOf(s)
+        val left = s.substring(0, best).trim()
+        val right = s.substring(best).trim()
+        return if (left.length < 10 || right.length < 10) listOf(s) else listOf(left, right)
+    }
+
+    /**
+     * #2 Hallucination Filter + #3 Cinema Reading-Speed & Timing Polisher:
+     * - Strips Whisper/Gemini audio hallucinations and runaway chunk repetition loops (>= 3 identical lines).
+     * - Auto-splits overly long single cues (> 80 chars, >= 2.6s) at natural punctuation.
+     * - Enforces >= 1.1s readable duration & clean 40ms breathing gap before the next cue.
+     */
+    fun sanitizeAndPolishAudioCues(rawCues: List<SubtitleCue>): List<SubtitleCue> {
+        if (rawCues.isEmpty()) return emptyList()
+        val normCounts = HashMap<String, Int>(rawCues.size)
+        val filtered = ArrayList<Pair<SubtitleCue, String>>(rawCues.size)
+        for (c in rawCues) {
+            val cleanText = c.text.replace(Regex("\\s+"), " ").trim()
+            if (isAudioHallucinationLine(cleanText)) continue
+            val key = cleanText.lowercase()
+            normCounts[key] = (normCounts[key] ?: 0) + 1
+            filtered.add(c.copy(text = cleanText) to key)
+        }
+        val keptLoop = HashSet<String>()
+        val noLoops = ArrayList<SubtitleCue>(filtered.size)
+        for ((cue, key) in filtered) {
+            if ((normCounts[key] ?: 0) >= 3) {
+                if (!keptLoop.add(key)) continue
+            }
+            val safeStart = cue.startMs.coerceAtLeast(0L)
+            val safeEnd = cue.endMs.coerceAtLeast(safeStart + 500L)
+            noLoops.add(cue.copy(startMs = safeStart, endMs = safeEnd))
+        }
+        noLoops.sortBy { it.startMs }
+
+        val splitOut = ArrayList<SubtitleCue>(noLoops.size + 4)
+        for (c in noLoops) {
+            val dur = (c.endMs - c.startMs).coerceAtLeast(500L)
+            if (c.text.length > 80 && dur >= 2_600L) {
+                val parts = splitLongCueText(c.text)
+                if (parts.size == 2) {
+                    val ratio = parts[0].length.toDouble() / (parts[0].length + parts[1].length).coerceAtLeast(1)
+                    val splitOffset = (dur * ratio).toLong().coerceIn(1_100L, (dur - 1_100L).coerceAtLeast(1_100L))
+                    val splitMs = c.startMs + splitOffset
+                    splitOut.add(
+                        SubtitleCue(
+                            id = 0,
+                            startMs = c.startMs,
+                            endMs = (splitMs - 40L).coerceAtLeast(c.startMs + 950L),
+                            text = parts[0]
+                        )
+                    )
+                    splitOut.add(
+                        SubtitleCue(
+                            id = 0,
+                            startMs = splitMs,
+                            endMs = c.endMs.coerceAtLeast(splitMs + 1_000L),
+                            text = parts[1]
+                        )
+                    )
+                    continue
+                }
+            }
+            splitOut.add(c)
+        }
+
+        val out = ArrayList<SubtitleCue>(splitOut.size)
+        for (i in splitOut.indices) {
+            val cur = splitOut[i]
+            val next = splitOut.getOrNull(i + 1)
+            var endMs = cur.endMs
+            val minEnd = cur.startMs + 1_100L
+            if (endMs < minEnd) {
+                endMs = if (next != null) {
+                    minOf(minEnd, (next.startMs - 40L).coerceAtLeast(cur.startMs + 550L))
+                } else {
+                    minEnd
+                }
+            }
+            if (next != null && next.startMs > cur.startMs + 650L && endMs > next.startMs - 40L) {
+                endMs = (next.startMs - 40L).coerceAtLeast(cur.startMs + 550L)
+            }
+            out.add(cur.copy(id = i + 1, endMs = endMs))
+        }
+        return out
+    }
 }

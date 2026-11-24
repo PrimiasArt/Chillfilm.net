@@ -802,9 +802,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val start = bIdx * batchSize
                     val end = (start + batchSize).coerceAtMost(cues.size)
                     val pct = 35 + ((bIdx * 58) / totalBatches)
+                    val progMsg = "✨ AI đang dịch sang ${targetLang.uppercase()} ($end/${cues.size} câu)..."
                     _detailSubState.value = _detailSubState.value.copy(
                         percent = pct.coerceIn(35, 95),
-                        statusText = "✨ AI đang dịch sang ${targetLang.uppercase()} ($end/${cues.size} câu)..."
+                        statusText = progMsg
+                    )
+                    com.phyll.filmhub.subtitle.SubtitleTranslationService.updateProgress(
+                        context = getApplication<Application>(),
+                        title = "ChillFilm • ${movie.title}",
+                        message = progMsg,
+                        percent = pct.coerceIn(35, 95),
+                        isActive = true
                     )
                     val translated = detailSubTranslator.translateCueBatch(
                         cues = cues.subList(start, end),
@@ -816,6 +824,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     finalCues.addAll(translated)
                 }
             }
+            com.phyll.filmhub.subtitle.SubtitleTranslationService.updateProgress(
+                context = getApplication<Application>(),
+                title = "",
+                message = "",
+                percent = 100,
+                isActive = false
+            )
 
             if (CloudSyncClient.isSignedIn()) {
                 _detailSubState.value = _detailSubState.value.copy(
@@ -879,12 +894,70 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             statusText = msg,
                             isReady = pct >= 100
                         )
+                        com.phyll.filmhub.subtitle.SubtitleTranslationService.updateProgress(
+                            context = ctx,
+                            title = "Dịch bù Sub • ${movie.title}",
+                            message = msg,
+                            percent = pct,
+                            isActive = pct in 1..99
+                        )
                     }
                 )
                 if (netAdded > 0) {
                     showBanner("🔧 Đã dịch bù thêm +$netAdded câu Sub (Tổng $totalCues câu)!")
                 }
             } finally {
+                com.phyll.filmhub.subtitle.SubtitleTranslationService.updateProgress(ctx, "", "", 100, false)
+                subMgr.release()
+            }
+        }
+    }
+
+    /**
+     * #4 Cinema AI Subtitle Polisher from Detail Screen (with #8 Foreground Service protection).
+     */
+    fun polishDetailEpisodeSubtitles(movie: MovieItem, episode: Episode) {
+        val ctx = getApplication<Application>()
+        detailSubJob?.cancel()
+        detailSubJob = viewModelScope.launch {
+            _detailSubState.value = DetailSubPreTranslateState(
+                movieId = movie.id,
+                episodeId = episode.id,
+                isRunning = true,
+                percent = 5,
+                statusText = "✨ Đang chuốt lời điện ảnh & đồng nhất xưng hô toàn phim...",
+                isReady = false
+            )
+            CloudSyncClient.activeMovieSlug = CloudSyncClient.normalizeMovieSlug(movie.detailLookupId ?: movie.id)
+            val subMgr = ThaiSubtitleManager(ctx.cacheDir, File(ctx.filesDir, "chillfilm_saved_subs_v1"))
+            try {
+                val count = subMgr.polishSubtitlesWithAi(
+                    movie = movie,
+                    episode = episode,
+                    config = prefs.subtitleConfig.value,
+                    onProgress = { pct, msg ->
+                        _detailSubState.value = DetailSubPreTranslateState(
+                            movieId = movie.id,
+                            episodeId = episode.id,
+                            isRunning = pct in 1..99,
+                            percent = pct,
+                            statusText = msg,
+                            isReady = pct >= 100
+                        )
+                        com.phyll.filmhub.subtitle.SubtitleTranslationService.updateProgress(
+                            context = ctx,
+                            title = "Chuốt lời AI • ${movie.title}",
+                            message = msg,
+                            percent = pct,
+                            isActive = pct in 1..99
+                        )
+                    }
+                )
+                if (count > 0) {
+                    showBanner("✨ Đã chuốt xong $count câu Sub điện ảnh & đồng bộ Cloud!")
+                }
+            } finally {
+                com.phyll.filmhub.subtitle.SubtitleTranslationService.updateProgress(ctx, "", "", 100, false)
                 subMgr.release()
             }
         }

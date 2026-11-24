@@ -450,6 +450,130 @@ function extractCueObjectsRobust(cleaned) {
   return arr;
 }
 
+const RE_AUDIO_HALLUCINATION = /(?:cảm ơn (?:các )?bạn đã (?:xem|theo dõi|lắng nghe)|hãy (?:like|đăng ký|subscribe) kênh|đăng ký kênh để không bỏ lỡ|nhấn chuông thông báo|subtitles?\s+by|translated\s+by|amara\.org|thank(?:s| you)\s+for\s+watching|please\s+subscribe|subscribe\s+to\s+(?:our|my|the)\s+channel|mbc\s*뉴스|ご視聴ありがとう|チャンネル登録|请不吝点赞|请订阅|字幕由|感謝觀看|谢谢观看|감사합니다\s*구독)/i;
+const RE_ONLY_BRACKET_NOISE = /^[\s♪♫♬♩🎵🎶*~_\-=.,?!:;()[\]{}<>]+$|^(?:\[|\()(?:music|nhạc|âm nhạc|nhạc nền|tiếng nhạc|silence|im lặng|applause|vỗ tay|laughter|tiếng cười|sfx|sound|inaudible|không nghe rõ)(?:\]|\))$/i;
+
+export function isAudioHallucinationLine(text) {
+  const s = String(text || '').trim();
+  if (!s) return true;
+  if (RE_ONLY_BRACKET_NOISE.test(s)) return true;
+  if (RE_AUDIO_HALLUCINATION.test(s)) return true;
+  // Detect runaway stutter loops like "ha ha ha ha ha ha" or "ờ ờ ờ ờ ờ"
+  const words = s.toLowerCase().replace(/[^\p{L}\p{N}\s]+/gu, ' ').trim().split(/\s+/).filter(Boolean);
+  if (words.length >= 6) {
+    let run = 1;
+    for (let i = 1; i < words.length; i++) {
+      if (words[i] === words[i - 1]) {
+        run += 1;
+        if (run >= 5) return true;
+      } else {
+        run = 1;
+      }
+    }
+  }
+  return false;
+}
+
+function splitLongCueText(text) {
+  const s = String(text || '').trim();
+  if (s.length <= 80) return [s];
+  const minPos = Math.floor(s.length * 0.34);
+  const maxPos = Math.floor(s.length * 0.68);
+  const mid = Math.floor(s.length / 2);
+
+  // Prefer splitting after sentence/clause punctuation near the midpoint
+  let best = -1;
+  let bestDist = Infinity;
+  for (let i = minPos; i <= maxPos; i++) {
+    const ch = s[i];
+    if (ch === '.' || ch === '?' || ch === '!' || ch === '…' || ch === ';' || ch === ',') {
+      if (i + 1 < s.length && s[i + 1] === ' ') {
+        const weight = (ch === ',' || ch === ';') ? 6 : 0;
+        const dist = Math.abs(i - mid) + weight;
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = i + 1;
+        }
+      }
+    }
+  }
+  if (best < 0) {
+    for (let i = minPos; i <= maxPos; i++) {
+      if (s[i] === ' ') {
+        const dist = Math.abs(i - mid);
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = i;
+        }
+      }
+    }
+  }
+  if (best < 0) return [s];
+  const left = s.slice(0, best).trim();
+  const right = s.slice(best).trim();
+  if (left.length < 10 || right.length < 10) return [s];
+  return [left, right];
+}
+
+export function sanitizeAndPolishAudioCues(rawCues) {
+  if (!Array.isArray(rawCues) || !rawCues.length) return [];
+  // 1. Filter hallucinations & runaway chunk-level repetition loops (>= 3 identical lines in one chunk)
+  const normCounts = new Map();
+  const filtered = [];
+  for (const c of rawCues) {
+    if (!c || !c.text) continue;
+    const text = String(c.text).replace(/\s+/g, ' ').trim();
+    if (isAudioHallucinationLine(text)) continue;
+    const key = text.toLowerCase();
+    const count = (normCounts.get(key) || 0) + 1;
+    normCounts.set(key, count);
+    filtered.push({ ...c, text, _normKey: key });
+  }
+  const noLoops = [];
+  const keptLoopKey = new Set();
+  for (const c of filtered) {
+    const freq = normCounts.get(c._normKey) || 0;
+    if (freq >= 3) {
+      if (keptLoopKey.has(c._normKey)) continue;
+      keptLoopKey.add(c._normKey);
+    }
+    noLoops.push({ id: c.id, startMs: c.startMs, endMs: c.endMs, text: c.text });
+  }
+  noLoops.sort((a, b) => a.startMs - b.startMs);
+
+  // 2. Auto-split overly long single cues (> 80 chars, >= 2.6s) into 2 natural reading beats
+  const splitOut = [];
+  for (const c of noLoops) {
+    const dur = Math.max(500, c.endMs - c.startMs);
+    if (c.text.length > 80 && dur >= 2600) {
+      const parts = splitLongCueText(c.text);
+      if (parts.length === 2) {
+        const ratio = parts[0].length / Math.max(1, parts[0].length + parts[1].length);
+        const splitMs = c.startMs + Math.max(1100, Math.min(dur - 1100, Math.round(dur * ratio)));
+        splitOut.push({ id: 0, startMs: c.startMs, endMs: Math.max(c.startMs + 950, splitMs - 40), text: parts[0] });
+        splitOut.push({ id: 0, startMs: splitMs, endMs: Math.max(splitMs + 1000, c.endMs), text: parts[1] });
+        continue;
+      }
+    }
+    splitOut.push({ ...c });
+  }
+
+  // 3. Enforce minimum readable duration (1.1s) & clean 40ms gap before next sequential cue
+  for (let i = 0; i < splitOut.length; i++) {
+    const cur = splitOut[i];
+    const next = splitOut[i + 1];
+    const minEnd = cur.startMs + 1100;
+    if (cur.endMs < minEnd) {
+      cur.endMs = next ? Math.min(minEnd, Math.max(cur.startMs + 550, next.startMs - 40)) : minEnd;
+    }
+    if (next && next.startMs > cur.startMs + 650 && cur.endMs > next.startMs - 40) {
+      cur.endMs = Math.max(cur.startMs + 550, next.startMs - 40);
+    }
+    cur.id = i + 1;
+  }
+  return splitOut;
+}
+
 /**
  * Transcribes + translates a base64 audio chunk into time-aligned subtitles via server-side Gemini.
  */
@@ -464,6 +588,7 @@ export async function transcribeAudioChunkServerSide({
   preferTurboFlash = false,
   retrySensitive = false,
   movieContext = null,
+  previousLines = [],
   _isEmptyRetry = false,
 }) {
   const durMs = Math.max(4000, Number(chunkDurationMs || 30000));
@@ -472,7 +597,13 @@ export async function transcribeAudioChunkServerSide({
   const langInstruction = resolveLangInstruction(targetLang);
   const langName = resolveLangDisplayName(targetLang);
   const ctxLine = buildMovieContextLine(movieContext);
-  const systemInstruction = `You are a professional movie subtitle translator. Listen carefully to the ENTIRE audio clip from start to end and output complete time-aligned subtitles WRITTEN STRICTLY IN ${langName}. NEVER transcribe in the original spoken language. NEVER skip the second half of the clip or quiet dialogue. NEVER output Chinese characters (汉字/中文) unless translating into Chinese.`;
+  const cleanPrev = Array.isArray(previousLines)
+    ? previousLines.map((l) => String(l || '').trim().slice(0, 120)).filter(Boolean).slice(-5)
+    : [];
+  const continuityLine = cleanPrev.length
+    ? `Preceding dialogue right before 0.0s (CONTEXT ONLY for consistent pronouns, honorifics & character names — DO NOT repeat or re-output these lines):\n${cleanPrev.map((l, idx) => `  - ${idx + 1}: "${l}"`).join('\n')}`
+    : '';
+  const systemInstruction = `You are a professional movie subtitle translator. Listen carefully to the ENTIRE audio clip from start to end and output complete time-aligned subtitles WRITTEN STRICTLY IN ${langName}. NEVER transcribe in the original spoken language. NEVER skip the second half of the clip or quiet dialogue. NEVER invent YouTube/outro phrases or hallucinate lines during silence/music. NEVER output Chinese characters (汉字/中文) unless translating into Chinese.`;
   const sensitivityLine = retrySensitive
     ? `IMPORTANT SECOND-PASS RECOVERY: There IS spoken dialogue in this ${durationSec}s clip (possibly soft, fast, or over background music). Listen closely to EVERY second from 0.0s to ${durationSec}s and capture ALL audible speech.`
     : `COVERAGE RULE: Translate EVERY spoken sentence across the ENTIRE clip from 0.0s all the way to ${durationSec}s — do NOT stop early or skip quiet/fast lines over music.`;
@@ -482,9 +613,11 @@ export async function transcribeAudioChunkServerSide({
     `CRITICAL LANGUAGE RULE: Every "t" field MUST be written 100% in ${langName}. Even if characters speak Chinese/Korean/Japanese/English, NEVER output their original script — ALWAYS translate into ${langName}.`,
     sensitivityLine,
     ...(ctxLine ? [ctxLine] : []),
+    ...(continuityLine ? [continuityLine] : []),
     'Rules:',
-    `- "s" and "e" = float seconds relative to 0.0 of this clip (0.0 <= s < e <= ${durationSec}), 1.0s-4.8s per cue.`,
-    '- Only return [] if the entire clip is truly 100% silence or instrumental music with zero spoken words.',
+    `- "s" and "e" = float seconds relative to 0.0 of this clip (0.0 <= s < e <= ${durationSec}), 1.1s-4.6s per cue, max ~76 characters per cue.`,
+    '- Keep pronouns, honorifics, and character names 100% consistent with the glossary and preceding dialogue.',
+    '- Only return [] if the entire clip is truly 100% silence or instrumental music with zero spoken words. NEVER output "Thanks for watching" / "Subscribe" / credits.',
     `Return ONLY valid JSON array: [{"s":1.2,"e":3.6,"t":"subtitle in ${langName}"}]`,
   ].join('\n');
 
@@ -569,6 +702,7 @@ export async function transcribeAudioChunkServerSide({
         preferTurboFlash: true,
         retrySensitive: true,
         movieContext,
+        previousLines: cleanPrev,
         _isEmptyRetry: true,
       });
       if (retryRes?.cues?.length) return retryRes;
@@ -609,7 +743,79 @@ export async function transcribeAudioChunkServerSide({
     }
   }
 
-  return { cues, modelUsed };
+  // Strip audio hallucinations/repetition loops & normalize cinema reading-speed / timing gaps!
+  const polishedCues = sanitizeAndPolishAudioCues(cues);
+  return { cues: polishedCues, modelUsed };
+}
+
+/**
+ * Cinema AI Subtitle Polisher (text-only batch): unifies character names/glossary,
+ * pronouns & honorifics across a full batch, fixes misheard ASR nouns, and refines phrasing
+ * into crisp, natural movie subtitles while preserving exact 1-to-1 line count & indices.
+ */
+export async function polishSubtitleTextsServerSide({
+  texts,
+  targetLang,
+  apiKey,
+  preferredModel,
+  movieContext = null,
+}) {
+  const langInstruction = resolveLangInstruction(targetLang);
+  const langName = resolveLangDisplayName(targetLang);
+  const ctxLine = buildMovieContextLine(movieContext);
+  const inputPayload = texts.map((t, idx) => ({
+    i: idx,
+    t: String(t || '').replace(/\r?\n/g, ' ').trim(),
+  }));
+
+  const systemInstruction = `You are a senior cinema subtitle editor (fansub QC lead). Polish the already-translated ${langName} subtitles so they read like an official theatrical release while keeping the EXACT same meaning and 1-to-1 cue indices.`;
+
+  const prompt = [
+    `Review and polish these ${inputPayload.length} movie subtitle lines into ${langInstruction}.`,
+    ...(ctxLine ? [ctxLine] : []),
+    'Editorial goals:',
+    '1. Fix any misheard character names, sect names, martial arts terms, or places using the movie title & glossary.',
+    '2. Enforce 100% consistent pronouns & honorifics across all lines matching the genre (e.g. cổ trang/tiên hiệp: huynh/muội/ta/ngươi/tiền bối; hiện đại: anh/em/tôi/cậu).',
+    '3. Smooth stiff literal phrasing into natural, concise, emotionally resonant cinema dialogue (max ~78 chars/line when possible).',
+    '4. NEVER change the meaning, NEVER drop/merge indices, and output 100% in ' + langName + '.',
+    'Return ONLY JSON array with exact matching indices: [{"i":0,"t":"..."}]',
+    'Input:',
+    JSON.stringify(inputPayload),
+  ].join('\n');
+
+  const { rawText, modelUsed } = await callGeminiWithFallback({
+    apiKey,
+    systemInstruction,
+    preferredModel,
+    preferTurboFlash: true,
+    perAttemptTimeoutMs: 22000,
+    maxOutputTokens: 4096,
+    contents: [{ parts: [{ text: prompt }] }],
+  });
+
+  const cleaned = rawText
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/```\s*$/, '')
+    .trim();
+  const s = cleaned.indexOf('[');
+  const e = cleaned.lastIndexOf(']');
+  if (s < 0 || e <= s) {
+    throw new Error('Gemini polish returned non-JSON output');
+  }
+  const arr = JSON.parse(cleaned.slice(s, e + 1));
+  const map = new Map();
+  arr.forEach((o, idx) => {
+    const key = typeof o?.i === 'number' ? o.i : idx;
+    if (typeof o?.t === 'string' && o.t.trim()) {
+      const val = o.t.trim();
+      if (!isSingleLineWrongScript(val, targetLang)) {
+        map.set(key, val);
+      }
+    }
+  });
+  const translated = texts.map((orig, idx) => map.get(idx) || String(orig || '').trim());
+  return { translated, modelUsed };
 }
 
 /**

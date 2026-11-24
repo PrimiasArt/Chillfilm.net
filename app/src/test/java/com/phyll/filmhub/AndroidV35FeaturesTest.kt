@@ -203,4 +203,47 @@ class AndroidV35FeaturesTest {
             mgr.release()
         }
     }
+
+    @Test
+    fun aiSubtitleProSuite_hallucinationFilterCpsPolisherAndRollingContextWorkCleanly() {
+        // #2 Hallucination filter
+        assertTrue(com.phyll.filmhub.subtitle.SubtitleParser.isAudioHallucinationLine("Cảm ơn các bạn đã xem video!"))
+        assertTrue(com.phyll.filmhub.subtitle.SubtitleParser.isAudioHallucinationLine("Hãy đăng ký kênh để không bỏ lỡ"))
+        assertTrue(com.phyll.filmhub.subtitle.SubtitleParser.isAudioHallucinationLine("[music]"))
+        assertTrue(com.phyll.filmhub.subtitle.SubtitleParser.isAudioHallucinationLine("à à à à à à"))
+        assertFalse(com.phyll.filmhub.subtitle.SubtitleParser.isAudioHallucinationLine("Tiêu Viêm sư huynh, cẩn thận!"))
+
+        // #2 Chunk repetition collapse + #3 Long cue auto-split + >=1.1s duration + 40ms breathing gap
+        val input = listOf(
+            SubtitleCue(1, 1_000L, 2_000L, "Cảm ơn các bạn đã theo dõi!"),
+            SubtitleCue(2, 3_000L, 4_000L, "Đi thôi!"),
+            SubtitleCue(3, 4_500L, 5_500L, "Đi thôi!"),
+            SubtitleCue(4, 6_000L, 7_000L, "Đi thôi!"),
+            SubtitleCue(
+                5,
+                10_000L,
+                15_200L,
+                "Tiêu Viêm sư huynh, lần này Hồn Điện kéo tới rất đông cao thủ, chúng ta tuyệt đối không thể khinh địch được!"
+            ),
+            SubtitleCue(6, 16_000L, 16_300L, "Cẩn thận!"),
+            SubtitleCue(7, 17_000L, 19_000L, "Đánh tới rồi!")
+        )
+        val polished = com.phyll.filmhub.subtitle.SubtitleParser.sanitizeAndPolishAudioCues(input)
+        // 1 hallucination stripped, 3x "Đi thôi!" collapsed to 1, long line split into 2, plus 2 remaining = 5 cues
+        assertEquals(5, polished.size)
+        assertTrue(polished[1].text.length <= 80 && polished[2].text.length <= 80)
+        assertTrue(polished[2].startMs - polished[1].endMs >= 40L)
+        assertTrue(polished[3].endMs - polished[3].startMs >= 950L)
+        assertTrue(polished[4].startMs - polished[3].endMs >= 40L)
+
+        // #1 Rolling context picks preceding cues strictly within 45s before window start
+        val mgr = ThaiSubtitleManager(cacheDir = null)
+        try {
+            val prev = mgr.collectPreviousContextLines(polished, beforeMs = 17_500L, count = 3)
+            assertEquals(3, prev.size)
+            assertEquals("Đánh tới rồi!", prev.last())
+        } finally {
+            mgr.release()
+        }
+    }
 }

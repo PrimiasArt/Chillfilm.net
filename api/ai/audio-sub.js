@@ -58,6 +58,9 @@ export async function POST(request) {
     }
 
     const preferredModel = String(body.model || aiCfg.defaultModel || 'gemini-2.5-flash').trim();
+    const previousLines = Array.isArray(body.previousLines)
+      ? body.previousLines.map((l) => String(l || '').trim().slice(0, 120)).filter(Boolean).slice(-5)
+      : [];
     const { cues, modelUsed } = await transcribeAudioChunkServerSide({
       audioBase64,
       mimeType: String(body.mimeType || 'audio/aac'),
@@ -69,6 +72,7 @@ export async function POST(request) {
       preferTurboFlash: Boolean(body.preferTurboFlash),
       retrySensitive: Boolean(body.retrySensitive),
       movieContext,
+      previousLines,
     });
 
     metric('ai.audio_sub', 1, { outcome: 'success', model: modelUsed });

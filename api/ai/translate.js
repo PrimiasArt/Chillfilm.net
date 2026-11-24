@@ -7,7 +7,7 @@ import {
   readJsonBody,
   requireAuth,
 } from '../_lib/auth.js';
-import { translateTextsServerSide } from '../_lib/gemini.js';
+import { polishSubtitleTextsServerSide, translateTextsServerSide } from '../_lib/gemini.js';
 
 export async function OPTIONS() {
   return optionsResponse();
@@ -62,19 +62,30 @@ export async function POST(request) {
       movieContext = { ...movieContext, glossary: glossaryRows[0].glossary_json };
     }
 
+    const mode = String(body.mode || 'translate').trim().toLowerCase();
+    const isPolish = mode === 'polish';
     const preferredModel = String(body.model || aiCfg.defaultModel || 'gemini-2.5-flash').trim();
-    const { translated, modelUsed } = await translateTextsServerSide({
-      texts: rawTexts,
-      targetLang,
-      apiKey: aiCfg.apiKey,
-      preferredModel,
-      movieContext,
-    });
+    const { translated, modelUsed } = isPolish
+      ? await polishSubtitleTextsServerSide({
+          texts: rawTexts,
+          targetLang,
+          apiKey: aiCfg.apiKey,
+          preferredModel,
+          movieContext,
+        })
+      : await translateTextsServerSide({
+          texts: rawTexts,
+          targetLang,
+          apiKey: aiCfg.apiKey,
+          preferredModel,
+          movieContext,
+        });
 
-    metric('ai.translate', 1, { outcome: 'success', model: modelUsed });
+    metric('ai.translate', 1, { outcome: 'success', mode: isPolish ? 'polish' : 'translate', model: modelUsed });
     return jsonResponse({
       ok: true,
       translated,
+      polished: isPolish,
       modelUsed,
       quota,
     });

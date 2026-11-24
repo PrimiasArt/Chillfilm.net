@@ -1629,6 +1629,43 @@ object CloudSyncClient {
     }
 
     /**
+     * #4 Cinema AI Subtitle Polisher (text-only batch via /api/ai/translate mode="polish"):
+     * Unifies character names/glossary, pronouns & honorifics across up to 80 lines per call.
+     */
+    fun polishSubtitleTextsViaCloudSync(
+        texts: List<String>,
+        targetLang: String,
+        modelId: String,
+        movieTitle: String = "",
+        movieGenres: List<String> = emptyList()
+    ): List<String>? {
+        if (!canUseServerAi() || texts.isEmpty()) return null
+        return runCatching {
+            val arr = JSONArray()
+            texts.forEach { arr.put(it) }
+            val payload = JSONObject()
+                .put("mode", "polish")
+                .put("texts", arr)
+                .put("targetLang", targetLang)
+                .put("model", modelId.ifBlank { defaultModel })
+            val ctx = JSONObject()
+            val slugCtx = activeMovieSlug.trim()
+            if (slugCtx.isNotEmpty()) ctx.put("slug", slugCtx)
+            if (movieTitle.isNotBlank()) ctx.put("title", movieTitle.take(100))
+            if (movieGenres.isNotEmpty()) {
+                val gArr = JSONArray()
+                movieGenres.take(4).forEach { gArr.put(it) }
+                ctx.put("genres", gArr)
+            }
+            if (ctx.length() > 0) payload.put("movieContext", ctx)
+            val res = postJson("/api/ai/translate", payload, requireAuth = true)
+            val outArr = res.optJSONArray("translated") ?: return@runCatching null
+            if (outArr.length() != texts.size) return@runCatching null
+            List(texts.size) { idx -> outArr.optString(idx, texts[idx]).ifBlank { texts[idx] } }
+        }.getOrNull()
+    }
+
+    /**
      * Blocking IO call (used inside GeminiAudioSubtitleGenerator's IO coroutine) to transcribe
      * and translate a movie audio chunk via server-side Gemini Multimodal on Vercel!
      */
@@ -1639,7 +1676,9 @@ object CloudSyncClient {
         chunkDurationMs: Long,
         targetLang: String,
         modelId: String,
-        preferTurboFlash: Boolean
+        preferTurboFlash: Boolean,
+        previousLines: List<String> = emptyList(),
+        retrySensitive: Boolean = false
     ): List<SubtitleCue>? {
         if (!canUseServerAi() || audioBase64.isBlank()) return null
         return runCatching {
@@ -1651,6 +1690,12 @@ object CloudSyncClient {
                 .put("targetLang", targetLang)
                 .put("model", modelId.ifBlank { defaultModel })
                 .put("preferTurboFlash", preferTurboFlash)
+                .put("retrySensitive", retrySensitive)
+            if (previousLines.isNotEmpty()) {
+                val prevArr = JSONArray()
+                previousLines.takeLast(5).forEach { prevArr.put(it.take(120)) }
+                payload.put("previousLines", prevArr)
+            }
             val slugCtx = activeMovieSlug.trim()
             if (slugCtx.isNotEmpty()) {
                 payload.put("movieContext", JSONObject().put("slug", slugCtx))

@@ -100,6 +100,50 @@ class ThaiSubtitleManager(
     private val _autoSyncFeedback = MutableStateFlow<String?>(null)
     val autoSyncFeedback: StateFlow<String?> = _autoSyncFeedback.asStateFlow()
 
+    // #5 Live Subtitle Coverage Heatmap ranges (green covered + pulsing gold actively translating!)
+    private val _coverageRanges = MutableStateFlow<List<Pair<Long, Long>>>(emptyList())
+    val coverageRanges: StateFlow<List<Pair<Long, Long>>> = _coverageRanges.asStateFlow()
+
+    private val _activeTranslatingRange = MutableStateFlow<Pair<Long, Long>?>(null)
+    val activeTranslatingRange: StateFlow<Pair<Long, Long>?> = _activeTranslatingRange.asStateFlow()
+
+    @Volatile
+    private var lastHeatmapCueCount: Int = -1
+
+    private fun refreshCoverageHeatmapFlow() {
+        val cues = primaryThaiCues
+        lastHeatmapCueCount = cues.size
+        if (cues.isEmpty()) {
+            if (_coverageRanges.value.isNotEmpty()) _coverageRanges.value = emptyList()
+            return
+        }
+        val raw = ArrayList<Pair<Long, Long>>(cues.size)
+        for (c in cues) {
+            val s = (c.startMs - 1_500L).coerceAtLeast(0L)
+            val e = c.endMs.coerceAtLeast(c.startMs + 800L) + 4_500L
+            raw.add(s to e)
+        }
+        _coverageRanges.value = CloudSyncClient.mergeTimeRanges(raw)
+    }
+
+    internal fun collectPreviousContextLines(
+        cues: List<SubtitleCue>,
+        beforeMs: Long,
+        count: Int = 4
+    ): List<String> {
+        if (cues.isEmpty()) return emptyList()
+        val limit = beforeMs.coerceAtLeast(0L) + 800L
+        val picked = ArrayList<String>(count)
+        for (i in cues.lastIndex downTo 0) {
+            val c = cues[i]
+            if (c.startMs <= limit && (limit - c.startMs) <= 45_000L && c.text.isNotBlank()) {
+                picked.add(c.text.trim().take(120))
+                if (picked.size >= count) break
+            }
+        }
+        return picked.reversed()
+    }
+
     private var externalRefs: MutableList<ExternalSubtitleRef> = mutableListOf()
     private var embeddedTracks: List<SubtitleTrackOption> = emptyList()
 
@@ -723,6 +767,7 @@ class ThaiSubtitleManager(
                 )
                 activeIsFullyTranslated = completedSlots.size >= totalSlots
                 activeTranslatedCueIds = merged.mapTo(HashSet()) { it.id }
+                refreshCoverageHeatmapFlow()
                 refreshOverlayAt(currentPositionMs, config)
                 if (persistToDisk && merged.size >= 3) {
                     persistActiveEpisodeSubtitleCacheAsync(config)
@@ -924,8 +969,10 @@ class ThaiSubtitleManager(
                     val slotRange = formatSlotRange(candidateSlot, slotSizeMs)
 
                     isTranslatingFlag = true
+                    _activeTranslatingRange.value = slotStartMs to (slotStartMs + slotDurMs)
                     currentBadge = "Sub ${targetLang.shortBadge} • Gemini $slotRange"
                     refreshOverlayAt(currentPositionMs, config)
+                    val prevContextLines = collectPreviousContextLines(primaryThaiCues, slotStartMs, 4)
 
                     val workerJob = launch {
                         if (isUrgentSeekSlot && slotDurMs > 36_000L) {
@@ -939,7 +986,8 @@ class ThaiSubtitleManager(
                                     apiKey = cleanKey,
                                     modelId = cleanModel,
                                     preferTurboFlash = true,
-                                    targetLangCode = targetLang.code
+                                    targetLangCode = targetLang.code,
+                                    previousLines = prevContextLines
                                 )
                             }
                             val pBDef = async(Dispatchers.IO) {
@@ -951,7 +999,8 @@ class ThaiSubtitleManager(
                                     apiKey = cleanKey,
                                     modelId = cleanModel,
                                     preferTurboFlash = true,
-                                    targetLangCode = targetLang.code
+                                    targetLangCode = targetLang.code,
+                                    previousLines = prevContextLines
                                 )
                             }
                             val seekSecondHalf = (currentPositionMs - slotStartMs) >= 26_000L
@@ -965,7 +1014,7 @@ class ThaiSubtitleManager(
                             val c2 = secondRes.getOrNull()?.cues
                             if (c1 != null || c2 != null) {
                                 accumulatedCuesBySlot[candidateSlot] =
-                                    (c1.orEmpty() + c2.orEmpty()).sortedBy { it.startMs }
+                                    mergeCuesChronological(c1.orEmpty(), c2.orEmpty(), isAudioMode = true)
                                 completedSlots.add(candidateSlot)
                                 rebuildMergedAiCues()
                             } else {
@@ -980,7 +1029,8 @@ class ThaiSubtitleManager(
                                 apiKey = cleanKey,
                                 modelId = cleanModel,
                                 preferTurboFlash = (candidateSlot <= viewerSlot + 1),
-                                targetLangCode = targetLang.code
+                                targetLangCode = targetLang.code,
+                                previousLines = prevContextLines
                             )
                             var slotCues = slotRes.getOrNull()?.cues
                             // Auto-recover empty or early-truncated 60s slots by splitting into two 30s halves!
@@ -997,7 +1047,9 @@ class ThaiSubtitleManager(
                                     apiKey = cleanKey,
                                     modelId = cleanModel,
                                     preferTurboFlash = true,
-                                    targetLangCode = targetLang.code
+                                    targetLangCode = targetLang.code,
+                                    previousLines = prevContextLines,
+                                    retrySensitive = true
                                 ).getOrNull()?.cues.orEmpty()
                                 val hB = audioSubGenerator.generateThaiCuesForWindow(
                                     cacheNamespace = cacheNamespace,
@@ -1007,9 +1059,11 @@ class ThaiSubtitleManager(
                                     apiKey = cleanKey,
                                     modelId = cleanModel,
                                     preferTurboFlash = true,
-                                    targetLangCode = targetLang.code
+                                    targetLangCode = targetLang.code,
+                                    previousLines = collectPreviousContextLines(hA.ifEmpty { primaryThaiCues }, slotStartMs + halfSprintMs, 4),
+                                    retrySensitive = true
                                 ).getOrNull()?.cues.orEmpty()
-                                val combined = mergeCuesChronological(slotCues.orEmpty(), hA + hB)
+                                val combined = mergeCuesChronological(slotCues.orEmpty(), hA + hB, isAudioMode = true)
                                 if (combined.isNotEmpty()) slotCues = combined
                             }
                             if (slotCues != null) {
@@ -1043,6 +1097,7 @@ class ThaiSubtitleManager(
 
                 if (inFlightJobs.isEmpty()) {
                     isTranslatingFlag = false
+                    _activeTranslatingRange.value = null
                     val bufferedUntilMin = ((maxAheadSlot + 1) * slotSizeMs) / 60_000L
                     currentBadge = "Sub ${targetLang.shortBadge} • Gemini (${primaryThaiCues.size} câu • +${bufferedUntilMin}p)"
                     refreshOverlayAt(currentPositionMs, config)
@@ -1053,6 +1108,7 @@ class ThaiSubtitleManager(
 
             inFlightJobs.values.forEach { it.join() }
             isTranslatingFlag = false
+            _activeTranslatingRange.value = null
             currentBadge = "Sub ${targetLang.shortBadge} • Gemini (${primaryThaiCues.size} câu)"
             refreshOverlayAt(currentPositionMs, config)
         }
@@ -1145,11 +1201,14 @@ class ThaiSubtitleManager(
                 apiKey = cleanKey,
                 modelId = cleanModel,
                 preferTurboFlash = true,
-                targetLangCode = targetLang.code
+                targetLangCode = targetLang.code,
+                previousLines = collectPreviousContextLines(mergedCues, sStart, 4),
+                retrySensitive = true,
+                bypassDiskCache = true
             ).getOrNull()
             processed++
             if (res != null && res.cues.isNotEmpty() && !CloudSyncClient.hasWrongScriptForLang(res.cues, targetLang.code)) {
-                mergedCues = mergeCuesChronological(mergedCues, res.cues)
+                mergedCues = mergeCuesChronological(mergedCues, res.cues, isAudioMode = true)
             }
             doneRanges.add(sStart to (sStart + sDur))
             val pct = (12 + (processed * 85) / missingSlices.size).coerceIn(12, 97)
@@ -1188,6 +1247,237 @@ class ThaiSubtitleManager(
         }
         onProgress(100, msg)
         mergedCues.size to netAdded
+    }
+
+    /**
+     * #4 Cinema AI Subtitle Polisher (Android & Smart TV):
+     * Runs text-only batches of 60 lines via NKI Cloud `/api/ai/translate` (`mode="polish"`) to fix
+     * misheard proper nouns, unify genre pronouns/honorifics, and polish stiff audio lines into cinema quality,
+     * saving locally + syncing (`forceOverwrite = true`) to NKI Cloud!
+     */
+    suspend fun polishSubtitlesWithAi(
+        movie: MovieItem,
+        episode: Episode,
+        config: SubtitleStyleConfig,
+        onProgress: (percent: Int, message: String) -> Unit
+    ): Int = withContext(Dispatchers.IO) {
+        val targetLang = config.resolvedPrimaryLanguage()
+        if (!CloudSyncClient.canUseServerAi()) {
+            onProgress(0, "⚠️ Đăng nhập NKI Cloud để dùng tính năng Chuốt lời điện ảnh AI!")
+            return@withContext 0
+        }
+        val localBundle = loadEpisodeSubCache(movie, episode, targetLang.code)
+        val baseCues = SubtitleParser.sanitizeAndPolishAudioCues(
+            mergeCuesChronological(
+                primaryThaiCues,
+                localBundle?.primaryCues.orEmpty(),
+                isAudioMode = localBundle?.isAiAudio ?: true
+            )
+        )
+        if (baseCues.size < 3) {
+            onProgress(0, "⚠️ Chưa có đủ phụ đề để chuốt lời — hãy dịch sub trước!")
+            return@withContext 0
+        }
+
+        val cleanModel = config.geminiModelId.trim().ifBlank { "gemini-2.5-flash" }
+        val batchSize = 60
+        val working = baseCues.toMutableList()
+        val totalBatches = ((working.size + batchSize - 1) / batchSize).coerceAtLeast(1)
+        onProgress(5, "✨ Đang chuốt lời điện ảnh (${working.size} câu • $totalBatches lô)...")
+
+        var done = 0
+        for (start in working.indices step batchSize) {
+            val end = minOf(working.size, start + batchSize)
+            val sliceTexts = working.subList(start, end).map { it.text }
+            val polishedTexts = CloudSyncClient.polishSubtitleTextsViaCloudSync(
+                texts = sliceTexts,
+                targetLang = targetLang.code,
+                modelId = cleanModel,
+                movieTitle = movie.title,
+                movieGenres = movie.genre.split(',', '/', '|').map { it.trim() }.filter { it.isNotEmpty() }
+            )
+            if (polishedTexts != null && polishedTexts.size == sliceTexts.size) {
+                for (k in polishedTexts.indices) {
+                    working[start + k] = working[start + k].copy(text = polishedTexts[k])
+                }
+            }
+            done++
+            val pct = (5 + (done * 90) / totalBatches).coerceIn(5, 96)
+            onProgress(pct, "✨ Đang chuốt lời điện ảnh $done/$totalBatches lô ($pct%)...")
+        }
+
+        val finalCues = SubtitleParser.sanitizeAndPolishAudioCues(working)
+        withContext(Dispatchers.Main.immediate) {
+            primaryThaiCues = finalCues
+            sourceCues = finalCues
+            currentBadge = "✨ Sub ${targetLang.shortBadge} • Điện Ảnh (${finalCues.size} câu)"
+            refreshCoverageHeatmapFlow()
+            refreshOverlayAt(currentPositionMs, config)
+        }
+
+        val polishedBundle = SavedEpisodeSubtitleBundle(
+            movieId = movie.id,
+            episodeId = episode.id,
+            primaryLangCode = targetLang.code,
+            secondaryLangCode = config.resolvedSecondaryLangCode(),
+            sourceLangCode = localBundle?.sourceLangCode ?: "auto",
+            sourcePlatform = "✨ AI Điện Ảnh (${targetLang.shortBadge})",
+            isAiAudio = localBundle?.isAiAudio ?: true,
+            completedAudioSlots = localBundle?.completedAudioSlots ?: activeCompletedAudioSlots,
+            translatedCueIds = finalCues.mapTo(HashSet()) { it.id },
+            sourceCues = finalCues,
+            primaryCues = finalCues,
+            secondaryCues = localBundle?.secondaryCues.orEmpty(),
+            isFullyTranslated = localBundle?.isFullyTranslated ?: true,
+            savedAtMs = System.currentTimeMillis(),
+            translatedRanges = localBundle?.translatedRanges ?: activeTranslatedRanges,
+            audioTranslatedUntilMs = localBundle?.audioTranslatedUntilMs ?: activeTotalDurationMs,
+            totalDurationMs = localBundle?.totalDurationMs ?: activeTotalDurationMs
+        )
+        saveEpisodeSubCache(movie, episode, polishedBundle, uploadToCloud = true, forceOverwrite = true)
+        onProgress(100, "✅ Đã chuốt xong ${finalCues.size} câu Sub điện ảnh & đồng bộ Cloud!")
+        finalCues.size
+    }
+
+    /**
+     * #5 & #7 Instant 30s Surgical Translate Around Current Position (or 15s Re-translate):
+     * Immediately transcribes ONLY [centerMs - beforeMs, centerMs + afterMs] with high sensitivity & Rolling Context!
+     */
+    suspend fun translateInstant30sAround(
+        movie: MovieItem,
+        episode: Episode,
+        centerMs: Long,
+        config: SubtitleStyleConfig,
+        geminiApiKey: String,
+        beforeMs: Long = 4_000L,
+        afterMs: Long = 28_000L,
+        replaceExisting: Boolean = false
+    ): Int = withContext(Dispatchers.IO) {
+        val targetLang = config.resolvedPrimaryLanguage()
+        val cleanKey = geminiApiKey.trim()
+        if (!hasAiAccess(cleanKey)) return@withContext -1
+        val timeline = audioSubGenerator.inspectStreamTimeline(episode) ?: return@withContext -1
+        val totalMs = timeline.totalDurationMs.coerceAtLeast(10_000L)
+        val winStart = (centerMs - beforeMs).coerceIn(0L, (totalMs - 6_000L).coerceAtLeast(0L))
+        val winDur = (beforeMs + afterMs).coerceAtMost((totalMs - winStart).coerceAtLeast(6_000L))
+        val cleanModel = config.geminiModelId.trim().ifBlank { "gemini-2.5-flash" }
+        val cacheNs = "${episode.streamUrl.hashCode().toUInt().toString(16)}_${targetLang.code}_inst"
+
+        _activeTranslatingRange.value = winStart to (winStart + winDur)
+        val res = try {
+            audioSubGenerator.generateThaiCuesForWindow(
+                cacheNamespace = cacheNs,
+                timeline = timeline,
+                windowStartMs = winStart,
+                windowDurationMs = winDur,
+                apiKey = cleanKey,
+                modelId = cleanModel,
+                preferTurboFlash = true,
+                targetLangCode = targetLang.code,
+                previousLines = collectPreviousContextLines(primaryThaiCues, winStart, 4),
+                retrySensitive = true,
+                bypassDiskCache = true
+            ).getOrNull()
+        } finally {
+            _activeTranslatingRange.value = null
+        }
+        val fresh = res?.cues.orEmpty()
+        if (fresh.isEmpty() || CloudSyncClient.hasWrongScriptForLang(fresh, targetLang.code)) {
+            return@withContext 0
+        }
+        val base = if (replaceExisting) {
+            primaryThaiCues.filter { it.endMs < winStart - 300L || it.startMs > winStart + winDur + 300L }
+        } else {
+            primaryThaiCues
+        }
+        val merged = mergeCuesChronological(base, fresh, isAudioMode = true)
+        withContext(Dispatchers.Main.immediate) {
+            primaryThaiCues = merged
+            sourceCues = merged
+            refreshCoverageHeatmapFlow()
+            refreshOverlayAt(currentPositionMs, config)
+        }
+        val bundle = SavedEpisodeSubtitleBundle(
+            movieId = movie.id,
+            episodeId = episode.id,
+            primaryLangCode = targetLang.code,
+            secondaryLangCode = config.resolvedSecondaryLangCode(),
+            sourceLangCode = "auto",
+            sourcePlatform = "🎙 AI Audio (${targetLang.shortBadge})",
+            isAiAudio = true,
+            completedAudioSlots = activeCompletedAudioSlots,
+            translatedCueIds = merged.mapTo(HashSet()) { it.id },
+            sourceCues = merged,
+            primaryCues = merged,
+            secondaryCues = secondaryCues,
+            isFullyTranslated = activeIsFullyTranslated,
+            savedAtMs = System.currentTimeMillis(),
+            translatedRanges = CloudSyncClient.mergeTimeRanges(activeTranslatedRanges + listOf(winStart to (winStart + winDur))),
+            audioTranslatedUntilMs = maxOf(activeTotalDurationMs, winStart + winDur),
+            totalDurationMs = totalMs
+        )
+        saveEpisodeSubCache(movie, episode, bundle, uploadToCloud = true, forceOverwrite = replaceExisting)
+        fresh.size
+    }
+
+    /**
+     * #7 Find active primary cue for Tap-to-Edit when paused & persist edited text locally + NKI Cloud!
+     */
+    fun findActivePrimaryCueAt(positionMs: Long, config: SubtitleStyleConfig): SubtitleCue? {
+        val cues = primaryThaiCues
+        if (cues.isEmpty()) return null
+        val effMs = ((positionMs - config.syncOffsetMs) * config.subSpeedScale.toDouble()).toLong().coerceAtLeast(0L)
+        for (i in cues.lastIndex downTo 0) {
+            val c = cues[i]
+            if (effMs in (c.startMs - 150L)..(c.endMs + 250L)) return c
+        }
+        return null
+    }
+
+    fun editSingleCueAndSync(
+        movie: MovieItem,
+        episode: Episode,
+        config: SubtitleStyleConfig,
+        targetCue: SubtitleCue,
+        newText: String
+    ): Boolean {
+        val clean = newText.trim()
+        if (clean.isEmpty()) return false
+        val current = primaryThaiCues
+        val idx = current.indexOfFirst { it.id == targetCue.id && it.startMs == targetCue.startMs }
+            .takeIf { it >= 0 }
+            ?: current.indexOfFirst { kotlin.math.abs(it.startMs - targetCue.startMs) <= 250L }
+        if (idx < 0) return false
+        val updated = current.toMutableList()
+        updated[idx] = updated[idx].copy(text = clean)
+        primaryThaiCues = updated
+        if (sourceCues.size == updated.size) sourceCues = updated
+        refreshOverlayAt(currentPositionMs, config)
+
+        val targetLang = config.resolvedPrimaryLanguage()
+        val bundle = SavedEpisodeSubtitleBundle(
+            movieId = movie.id,
+            episodeId = episode.id,
+            primaryLangCode = targetLang.code,
+            secondaryLangCode = config.resolvedSecondaryLangCode(),
+            sourceLangCode = "auto",
+            sourcePlatform = currentBadge.ifBlank { "Sub ${targetLang.shortBadge}" },
+            isAiAudio = aiAudioSyntheticTrack != null,
+            completedAudioSlots = activeCompletedAudioSlots,
+            translatedCueIds = updated.mapTo(HashSet()) { it.id },
+            sourceCues = sourceCues.ifEmpty { updated },
+            primaryCues = updated,
+            secondaryCues = secondaryCues,
+            isFullyTranslated = true,
+            savedAtMs = System.currentTimeMillis(),
+            translatedRanges = activeTranslatedRanges,
+            audioTranslatedUntilMs = activeTotalDurationMs,
+            totalDurationMs = activeTotalDurationMs
+        )
+        scope.launch(Dispatchers.IO) {
+            saveEpisodeSubCache(movie, episode, bundle, uploadToCloud = true, forceOverwrite = true)
+        }
+        return true
     }
 
     private fun formatSlotRange(slotIndex: Int, slotSizeMs: Long): String {
@@ -2011,6 +2301,9 @@ class ThaiSubtitleManager(
     }
 
     private fun refreshOverlayAt(positionMs: Long, config: SubtitleStyleConfig) {
+        if (primaryThaiCues.size != lastHeatmapCueCount) {
+            refreshCoverageHeatmapFlow()
+        }
         if (!config.subtitlesEnabled) {
             _renderState.value = ActiveSubtitleRenderState(
                 primaryThaiText = null,
@@ -2602,6 +2895,7 @@ class ThaiSubtitleManager(
             for (c in list) {
                 val txt = c.text.trim()
                 if (txt.isEmpty()) continue
+                if (isAudioMode && SubtitleParser.isAudioHallucinationLine(txt)) continue
                 val start = c.startMs.coerceAtLeast(0L)
                 val end = c.endMs.coerceAtLeast(start + 450L)
                 val norm = txt.replace(Regex("\\s+"), " ").lowercase()
@@ -2720,7 +3014,8 @@ class ThaiSubtitleManager(
         movie: MovieItem,
         episode: Episode,
         bundle: SavedEpisodeSubtitleBundle,
-        uploadToCloud: Boolean = false
+        uploadToCloud: Boolean = false,
+        forceOverwrite: Boolean = false
     ): Boolean {
         if (CloudSyncClient.hasWrongScriptForLang(bundle.primaryCues, bundle.primaryLangCode)) return false
         val targetFile = episodeSubCacheFile(movie, episode, bundle.primaryLangCode) ?: return false
@@ -2728,8 +3023,8 @@ class ThaiSubtitleManager(
         val savedLocal = runCatching {
             synchronized(episodeCacheLock) {
                 targetFile.parentFile?.mkdirs()
-                // Monotonic merge with existing valid local file so progress NEVER shrinks!
-                val existing = readBundleFromFile(targetFile, movie, episode, bundle.primaryLangCode)
+                // Monotonic merge with existing valid local file so progress NEVER shrinks (unless forceOverwrite for Polish/Edit)!
+                val existing = if (!forceOverwrite) readBundleFromFile(targetFile, movie, episode, bundle.primaryLangCode) else null
                 if (existing != null) {
                     finalBundle = mergeSubtitleBundlesMonotonic(existing, bundle)
                 }
@@ -2774,7 +3069,7 @@ class ThaiSubtitleManager(
 
         if (uploadToCloud && CloudSyncClient.isSignedIn() && finalBundle.primaryCues.size >= 3) {
             val now = System.currentTimeMillis()
-            if (finalBundle.isFullyTranslated || now - lastCloudSubtitleUploadMs >= 22_000L) {
+            if (forceOverwrite || finalBundle.isFullyTranslated || now - lastCloudSubtitleUploadMs >= 22_000L) {
                 lastCloudSubtitleUploadMs = now
                 scope.launch(Dispatchers.IO) {
                     CloudSyncClient.uploadCloudSubtitle(
@@ -2792,7 +3087,8 @@ class ThaiSubtitleManager(
                         secondaryCues = finalBundle.secondaryCues,
                         translatedRanges = finalBundle.translatedRanges,
                         audioTranslatedUntilMs = finalBundle.audioTranslatedUntilMs,
-                        totalDurationMs = finalBundle.totalDurationMs
+                        totalDurationMs = finalBundle.totalDurationMs,
+                        forceOverwrite = forceOverwrite
                     )
                 }
             }

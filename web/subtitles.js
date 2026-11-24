@@ -283,6 +283,231 @@ export async function translateCueBatch({
   return translateWithGoogleFree(cues, langSpec.code);
 }
 
+const RE_AUDIO_HALLUCINATION = /(?:cảm ơn (?:các )?bạn đã (?:xem|theo dõi|lắng nghe)|hãy (?:like|đăng ký|subscribe) kênh|đăng ký kênh để không bỏ lỡ|nhấn chuông thông báo|subtitles?\s+by|translated\s+by|amara\.org|thank(?:s| you)\s+for\s+watching|please\s+subscribe|subscribe\s+to\s+(?:our|my|the)\s+channel|mbc\s*뉴스|ご視聴ありがとう|チャンネル登録|请不吝点赞|请订阅|字幕由|感謝觀看|谢谢观看|감사합니다\s*구독)/i;
+const RE_ONLY_BRACKET_NOISE = /^[\s♪♫♬♩🎵🎶*~_\-=.,?!:;()[\]{}<>]+$|^(?:\[|\()(?:music|nhạc|âm nhạc|nhạc nền|tiếng nhạc|silence|im lặng|applause|vỗ tay|laughter|tiếng cười|sfx|sound|inaudible|không nghe rõ)(?:\]|\))$/i;
+
+export function isAudioHallucinationLine(text) {
+  const s = String(text || '').trim();
+  if (!s) return true;
+  if (RE_ONLY_BRACKET_NOISE.test(s)) return true;
+  if (RE_AUDIO_HALLUCINATION.test(s)) return true;
+  const words = s.toLowerCase().replace(/[^\p{L}\p{N}\s]+/gu, ' ').trim().split(/\s+/).filter(Boolean);
+  if (words.length >= 6) {
+    let run = 1;
+    for (let i = 1; i < words.length; i++) {
+      if (words[i] === words[i - 1]) {
+        run += 1;
+        if (run >= 5) return true;
+      } else {
+        run = 1;
+      }
+    }
+  }
+  return false;
+}
+
+function splitLongCueTextLocal(text) {
+  const s = String(text || '').trim();
+  if (s.length <= 80) return [s];
+  const minPos = Math.floor(s.length * 0.34);
+  const maxPos = Math.floor(s.length * 0.68);
+  const mid = Math.floor(s.length / 2);
+  let best = -1;
+  let bestDist = Infinity;
+  for (let i = minPos; i <= maxPos; i++) {
+    const ch = s[i];
+    if (ch === '.' || ch === '?' || ch === '!' || ch === '…' || ch === ';' || ch === ',') {
+      if (i + 1 < s.length && s[i + 1] === ' ') {
+        const dist = Math.abs(i - mid) + ((ch === ',' || ch === ';') ? 6 : 0);
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = i + 1;
+        }
+      }
+    }
+  }
+  if (best < 0) {
+    for (let i = minPos; i <= maxPos; i++) {
+      if (s[i] === ' ') {
+        const dist = Math.abs(i - mid);
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = i;
+        }
+      }
+    }
+  }
+  if (best < 0) return [s];
+  const left = s.slice(0, best).trim();
+  const right = s.slice(best).trim();
+  if (left.length < 10 || right.length < 10) return [s];
+  return [left, right];
+}
+
+export function sanitizeAndPolishAudioCues(rawCues) {
+  if (!Array.isArray(rawCues) || !rawCues.length) return [];
+  const normCounts = new Map();
+  const filtered = [];
+  for (const c of rawCues) {
+    if (!c || !c.text) continue;
+    const text = String(c.text).replace(/\s+/g, ' ').trim();
+    if (isAudioHallucinationLine(text)) continue;
+    const key = text.toLowerCase();
+    normCounts.set(key, (normCounts.get(key) || 0) + 1);
+    filtered.push({ ...c, text, _normKey: key });
+  }
+  const noLoops = [];
+  const keptLoop = new Set();
+  for (const c of filtered) {
+    if ((normCounts.get(c._normKey) || 0) >= 3) {
+      if (keptLoop.has(c._normKey)) continue;
+      keptLoop.add(c._normKey);
+    }
+    noLoops.push({ id: c.id || 0, startMs: c.startMs || 0, endMs: Math.max((c.endMs || 0), (c.startMs || 0) + 500), text: c.text });
+  }
+  noLoops.sort((a, b) => a.startMs - b.startMs);
+
+  const splitOut = [];
+  for (const c of noLoops) {
+    const dur = Math.max(500, c.endMs - c.startMs);
+    if (c.text.length > 80 && dur >= 2600) {
+      const parts = splitLongCueTextLocal(c.text);
+      if (parts.length === 2) {
+        const ratio = parts[0].length / Math.max(1, parts[0].length + parts[1].length);
+        const splitMs = c.startMs + Math.max(1100, Math.min(dur - 1100, Math.round(dur * ratio)));
+        splitOut.push({ id: 0, startMs: c.startMs, endMs: Math.max(c.startMs + 950, splitMs - 40), text: parts[0] });
+        splitOut.push({ id: 0, startMs: splitMs, endMs: Math.max(splitMs + 1000, c.endMs), text: parts[1] });
+        continue;
+      }
+    }
+    splitOut.push({ ...c });
+  }
+
+  for (let i = 0; i < splitOut.length; i++) {
+    const cur = splitOut[i];
+    const next = splitOut[i + 1];
+    const minEnd = cur.startMs + 1100;
+    if (cur.endMs < minEnd) {
+      cur.endMs = next ? Math.min(minEnd, Math.max(cur.startMs + 550, next.startMs - 40)) : minEnd;
+    }
+    if (next && next.startMs > cur.startMs + 650 && cur.endMs > next.startMs - 40) {
+      cur.endMs = Math.max(cur.startMs + 550, next.startMs - 40);
+    }
+    cur.id = i + 1;
+  }
+  return splitOut;
+}
+
+let _sharedVadCtx = null;
+/**
+ * Conservative client-side VAD / Digital Silence detector for ADTS AAC audio buffers.
+ * Returns `false` ONLY when the decoded waveform is truly silent (peak < 0.0025 & RMS < 0.0006),
+ * saving Gemini Audio quota on blank intros/outros while NEVER dropping quiet dialogue.
+ */
+export async function estimateAdtsAudioHasSpeech(adtsUint8) {
+  try {
+    if (!adtsUint8 || adtsUint8.byteLength < 2048) return false;
+    if (typeof window === 'undefined') return true;
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return true;
+    if (!_sharedVadCtx || _sharedVadCtx.state === 'closed') {
+      _sharedVadCtx = new AudioCtx();
+    }
+    const copy = adtsUint8.slice().buffer;
+    const audioBuf = await _sharedVadCtx.decodeAudioData(copy);
+    if (!audioBuf || !audioBuf.length) return true;
+    const data = audioBuf.getChannelData(0);
+    const step = Math.max(1, Math.floor(data.length / 12000));
+    let sumSq = 0;
+    let peak = 0;
+    let count = 0;
+    for (let i = 0; i < data.length; i += step) {
+      const v = Math.abs(data[i]);
+      if (v > peak) peak = v;
+      sumSq += v * v;
+      count += 1;
+    }
+    const rms = count > 0 ? Math.sqrt(sumSq / count) : 1;
+    // True near-digital silence only (never skip soft dialogue!)
+    return !(peak < 0.0025 && rms < 0.0006);
+  } catch {
+    return true;
+  }
+}
+
+export async function polishCueBatch({
+  cues,
+  targetLang,
+  geminiApiKey,
+  geminiModel,
+  cloudPolisher = null,
+  movieContext = null,
+}) {
+  if (!cues?.length) return cues || [];
+  const langSpec = resolveLanguage(targetLang);
+
+  if (typeof cloudPolisher === 'function') {
+    try {
+      const polished = await cloudPolisher({
+        cues,
+        targetLang: langSpec.code,
+        model: geminiModel || 'gemini-2.5-flash',
+        movieContext,
+      });
+      if (polished && polished.length === cues.length && !hasWrongScriptForLang(polished, langSpec.code)) {
+        return polished;
+      }
+    } catch (e) {
+      console.warn('Cloud AI polish fallback:', e);
+    }
+  }
+
+  if (geminiApiKey && geminiApiKey.trim().length > 10) {
+    const cleanModel = (geminiModel || 'gemini-2.5-flash').replace(/^models\//, '');
+    const payload = cues.map((c, idx) => ({ i: idx, t: c.text }));
+    const ctxLine = movieContext?.title
+      ? `Movie: "${movieContext.title}"${movieContext.genres?.length ? ` [${movieContext.genres.join(', ')}]` : ''}.`
+      : '';
+    const glTerms = Array.isArray(movieContext?.glossary?.terms)
+      ? movieContext.glossary.terms.filter((t) => t?.src && t?.dst).slice(0, 20).map((t) => `${t.src}=${t.dst}`).join('; ')
+      : '';
+    const prompt = [
+      `Polish these ${payload.length} movie subtitle lines into natural cinema ${langSpec.prompt}.`,
+      ctxLine,
+      glTerms ? `Glossary (strict): ${glTerms}` : '',
+      'Fix misheard names, unify pronouns & honorifics, keep meaning exact, output JSON array [{"i":0,"t":"..."}].',
+      JSON.stringify(payload),
+    ].filter(Boolean).join('\n');
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(cleanModel)}:generateContent?key=${encodeURIComponent(geminiApiKey.trim())}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.15, responseMimeType: 'application/json', maxOutputTokens: 4096 },
+      }),
+    });
+    if (res.ok) {
+      const json = await res.json();
+      const raw = (json?.candidates?.[0]?.content?.parts || []).filter((p) => !p.thought && p.text).map((p) => p.text).join('').trim();
+      const s = raw.indexOf('[');
+      const e = raw.lastIndexOf(']');
+      if (s >= 0 && e > s) {
+        const arr = JSON.parse(raw.slice(s, e + 1));
+        const map = new Map();
+        arr.forEach((o, idx) => {
+          const k = typeof o?.i === 'number' ? o.i : idx;
+          if (typeof o?.t === 'string' && o.t.trim() && !isSingleLineWrongScript(o.t.trim(), langSpec.code)) {
+            map.set(k, o.t.trim());
+          }
+        });
+        return cues.map((c, idx) => ({ ...c, text: map.get(idx) || c.text }));
+      }
+    }
+  }
+  return cues;
+}
+
 export async function transcribeAudioChunkDirect({
   audioBase64,
   mimeType = 'audio/webm',
@@ -292,6 +517,7 @@ export async function transcribeAudioChunkDirect({
   apiKey = '',
   modelId = 'gemini-3-flash-preview',
   movieContext = null,
+  previousLines = [],
   retrySensitive = false,
 }) {
   if (!apiKey || apiKey.trim().length < 15 || !audioBase64) return [];
@@ -303,11 +529,17 @@ export async function transcribeAudioChunkDirect({
   const ctxHint = movieContext?.title
     ? `Movie context: "${movieContext.title}"${movieContext.genres?.length ? ` [${movieContext.genres.join(', ')}]` : ''} — adapt tone and pronouns naturally.\n`
     : '';
-  const systemText = `You are a professional movie subtitle translator. Listen carefully to the ENTIRE audio clip from start to end and output complete time-aligned subtitles WRITTEN STRICTLY IN ${langSpec.name} (${langSpec.native}). NEVER transcribe in the original spoken language. NEVER skip the second half of the clip or quiet dialogue.`;
+  const cleanPrev = Array.isArray(previousLines)
+    ? previousLines.map((l) => String(l || '').trim().slice(0, 120)).filter(Boolean).slice(-5)
+    : [];
+  const prevHint = cleanPrev.length
+    ? `Preceding lines before 0.0s (CONTEXT ONLY for consistent pronouns/names — DO NOT repeat):\n${cleanPrev.map((l, i) => `- ${i + 1}: "${l}"`).join('\n')}\n`
+    : '';
+  const systemText = `You are a professional movie subtitle translator. Listen carefully to the ENTIRE audio clip from start to end and output complete time-aligned subtitles WRITTEN STRICTLY IN ${langSpec.name} (${langSpec.native}). NEVER transcribe in the original spoken language. NEVER skip the second half of the clip or quiet dialogue. NEVER invent YouTube/outro phrases during silence.`;
   const sensitivityLine = retrySensitive
     ? `IMPORTANT RECOVERY: There IS spoken dialogue in this ${durationSec}s clip (possibly quiet or over music). Capture EVERY audible spoken sentence from 0.0s to ${durationSec}s.\n`
     : `COVERAGE RULE: Translate EVERY spoken sentence from 0.0s all the way to ${durationSec}s without stopping early.\n`;
-  const prompt = `Listen to this ${durationSec}-second movie audio clip (starts at 0.0s, ends at ${durationSec}s).\nTRANSLATE ALL spoken dialogue directly into ${langSpec.prompt}.\nCRITICAL RULE: Every "t" MUST be 100% in ${langSpec.name} (${langSpec.native}). NEVER output the original spoken language (e.g. NEVER output Chinese characters when translating into Vietnamese).\n${sensitivityLine}${ctxHint}Rules:\n- "s" and "e" = float seconds relative to 0.0 (0.0 <= s < e <= ${durationSec}), 1.0s-4.8s per cue.\n- Only return [] if 100% silence/instrumental music with zero speech.\nReturn ONLY JSON array: [{"s":1.2,"e":3.6,"t":"subtitle in ${langSpec.name}"}]`;
+  const prompt = `Listen to this ${durationSec}-second movie audio clip (starts at 0.0s, ends at ${durationSec}s).\nTRANSLATE ALL spoken dialogue directly into ${langSpec.prompt}.\nCRITICAL RULE: Every "t" MUST be 100% in ${langSpec.name} (${langSpec.native}). NEVER output the original spoken language (e.g. NEVER output Chinese characters when translating into Vietnamese).\n${sensitivityLine}${ctxHint}${prevHint}Rules:\n- "s" and "e" = float seconds relative to 0.0 (0.0 <= s < e <= ${durationSec}), 1.1s-4.6s per cue, max ~76 chars.\n- Only return [] if 100% silence/instrumental music with zero speech.\nReturn ONLY JSON array: [{"s":1.2,"e":3.6,"t":"subtitle in ${langSpec.name}"}]`;
 
   const genConfig = { temperature: 0.15, responseMimeType: 'application/json', maxOutputTokens: 4096 };
   const lower = cleanModel.toLowerCase();
@@ -376,14 +608,14 @@ export async function transcribeAudioChunkDirect({
     try {
       const repaired = await translateWithGemini(out, langSpec, apiKey.trim(), cleanModel, movieContext);
       if (repaired.length === out.length && !hasWrongScriptForLang(repaired, langSpec.code)) {
-        return repaired;
+        return sanitizeAndPolishAudioCues(repaired);
       }
-      return await translateWithGoogleFree(out, langSpec.code);
+      return sanitizeAndPolishAudioCues(await translateWithGoogleFree(out, langSpec.code));
     } catch {
-      return await translateWithGoogleFree(out, langSpec.code);
+      return sanitizeAndPolishAudioCues(await translateWithGoogleFree(out, langSpec.code));
     }
   }
-  return out;
+  return sanitizeAndPolishAudioCues(out);
 }
 
 /* ==================== PERSISTENT TRANSLATED SUBTITLE CACHE (INDEXEDDB — ATOMIC MONOTONIC MERGE) ==================== */
@@ -534,6 +766,7 @@ export function dedupeAndMergeCues(a, b = [], { isAudioMode = false } = {}) {
       if (!c || !c.text || !Number.isFinite(c.startMs)) continue;
       const text = String(c.text).trim();
       if (!text) continue;
+      if (isAudioMode && isAudioHallucinationLine(text)) continue;
       const startMs = Math.max(0, Math.round(c.startMs));
       const endMs = Math.max(Math.round(c.endMs || startMs + 2500), startMs + 450);
       const normKey = normalizeCueDedupKey(text);
@@ -1368,6 +1601,7 @@ export async function extractHlsWindowAdtsBase64(win, keyCache = new Map(), sign
     audioBase64: uint8ToBase64(merged),
     mimeType: 'audio/aac',
     byteLength: totalBytes,
+    adtsBytes: merged,
   };
 }
 

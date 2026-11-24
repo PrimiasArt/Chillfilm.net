@@ -108,6 +108,9 @@ fun SubtitleSettingsSheet(
     onTogglePreferGeminiAudioForSeries: () -> Unit = {},
     onAutoSyncNow: () -> Unit = {},
     onOpenFastSnapModal: () -> Unit = {},
+    onTranslateInstant30s: () -> Unit = {},
+    onPolishSubtitlesWithAi: () -> Unit = {},
+    onEditCurrentCue: () -> Unit = {},
     onCycleNextSubRelease: () -> Unit = {},
     onSnapCueToCurrentTime: (SnapCueCandidate) -> Unit = {},
     onAdjustSyncManual: (Long, Float?) -> Unit = { _, _ -> },
@@ -559,6 +562,88 @@ fun SubtitleSettingsSheet(
                                 onUpdateConfig { it.copy(geminiModelId = nextModel, translationEngine = TranslationEngineMode.GEMINI_AI) }
                             }
                         )
+
+                        // #5 Instant 30s + #4 Cinema AI Polish + #7 Inline Cue Fix (TV Remote & Mobile friendly!)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .tvFocusableClickable(
+                                        shape = RoundedCornerShape(10.dp),
+                                        focusedBorderColor = Color(0xFFFDE68A),
+                                        unfocusedBorderColor = Color(0x66FBBF24),
+                                        onClick = {
+                                            onClose()
+                                            onTranslateInstant30s()
+                                        }
+                                    )
+                                    .background(Color(0x22F59E0B))
+                                    .padding(horizontal = 8.dp, vertical = 9.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "🎙 Dịch nhanh 30s",
+                                    color = Color(0xFFFDE68A),
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .tvFocusableClickable(
+                                        shape = RoundedCornerShape(10.dp),
+                                        focusedBorderColor = Color(0xFFE9D5FF),
+                                        unfocusedBorderColor = Color(0x66C084FC),
+                                        onClick = {
+                                            onClose()
+                                            onPolishSubtitlesWithAi()
+                                        }
+                                    )
+                                    .background(Color(0x22A855F7))
+                                    .padding(horizontal = 8.dp, vertical = 9.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "✨ Chuốt lời AI",
+                                    color = Color(0xFFE9D5FF),
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .weight(0.85f)
+                                    .tvFocusableClickable(
+                                        shape = RoundedCornerShape(10.dp),
+                                        focusedBorderColor = EmeraldNeon,
+                                        unfocusedBorderColor = Color(0x5534D399),
+                                        onClick = {
+                                            onClose()
+                                            onEditCurrentCue()
+                                        }
+                                    )
+                                    .background(Color(0x1F10B981))
+                                    .padding(horizontal = 8.dp, vertical = 9.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "✏️ Sửa câu",
+                                    color = EmeraldNeon,
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
 
                         FullWidthActionRow(
                             icon = Icons.Default.Search,

@@ -295,6 +295,29 @@ class PreferencesManager(context: Context) {
         }
     }
 
+    /**
+     * #7 Per-Server Subtitle Offset: stores independent sync offset per streaming server
+     * (e.g. `bfzy` vs `ffm3u8` with different intro ads), falling back gracefully to movie-wide offset!
+     */
+    fun getServerSubtitleOffsetMs(movieId: String, serverKey: String): Long? {
+        if (movieId.isBlank()) return null
+        val cleanSrv = serverKey.trim().lowercase().replace(Regex("[^a-z0-9]+"), "_").take(32)
+        if (cleanSrv.isNotEmpty()) {
+            _seriesProfiles.value["$movieId|srv:$cleanSrv"]?.let { return it.syncOffsetMs }
+        }
+        return _seriesProfiles.value[movieId]?.syncOffsetMs
+    }
+
+    fun saveServerSubtitleOffsetMs(movieId: String, serverKey: String, offsetMs: Long, speedScale: Float = 1.0f) {
+        if (movieId.isBlank()) return
+        val cleanSrv = serverKey.trim().lowercase().replace(Regex("[^a-z0-9]+"), "_").take(32)
+        if (cleanSrv.isNotEmpty()) {
+            saveSeriesSubtitleProfile("$movieId|srv:$cleanSrv") {
+                it.copy(syncOffsetMs = offsetMs, subSpeedScale = speedScale)
+            }
+        }
+    }
+
     fun updateSubtitleConfig(transform: (SubtitleStyleConfig) -> SubtitleStyleConfig) {
         val updated = transform(_subtitleConfig.value)
         _subtitleConfig.value = updated

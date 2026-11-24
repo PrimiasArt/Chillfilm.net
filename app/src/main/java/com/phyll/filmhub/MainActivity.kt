@@ -213,6 +213,7 @@ class MainActivity : ComponentActivity() {
                                 isEpisodeWatched = { ep -> viewModel.prefs.isEpisodeWatched(screen.movie.id, ep.id) },
                                 onPreTranslateEpisode = { ep -> viewModel.preTranslateDetailEpisode(screen.movie, ep) },
                                 onRepairSubGaps = { ep -> viewModel.repairDetailEpisodeSubGaps(screen.movie, ep) },
+                                onPolishSubtitles = { ep -> viewModel.polishDetailEpisodeSubtitles(screen.movie, ep) },
                                 onDownloadEpisode = { ep -> viewModel.downloadEpisodeOffline(screen.movie, ep) },
                                 onPauseDownload = viewModel::pauseOfflineDownload,
                                 onResumeDownload = viewModel::resumeOfflineDownload,
@@ -374,6 +375,18 @@ class MainActivity : ComponentActivity() {
                             discoveredGeminiModels = discoveredGeminiModels,
                             incomingCompanionSub = incomingCompanionSub,
                             seriesProfile = seriesProfiles[session.movie.id],
+                            serverSyncOffsetMs = run {
+                                val srvName = session.movie.servers.firstOrNull { srv ->
+                                    srv.episodes.any { it.id == session.episode.id || it.streamUrl == session.episode.streamUrl }
+                                }?.serverName.orEmpty().ifBlank { session.movie.providerName }
+                                viewModel.prefs.getServerSubtitleOffsetMs(session.movie.id, srvName)
+                            },
+                            onSaveServerSyncOffset = { offMs, scale ->
+                                val srvName = session.movie.servers.firstOrNull { srv ->
+                                    srv.episodes.any { it.id == session.episode.id || it.streamUrl == session.episode.streamUrl }
+                                }?.serverName.orEmpty().ifBlank { session.movie.providerName }
+                                viewModel.prefs.saveServerSubtitleOffsetMs(session.movie.id, srvName, offMs, scale)
+                            },
                             remoteCommand = remotePlayerCommand,
                             isTvHardware = isTvHardware,
                             isMinimized = isPlayerMinimized,

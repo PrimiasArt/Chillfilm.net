@@ -2,6 +2,7 @@ package com.phyll.filmhub.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,6 +47,8 @@ fun ThaiCinemaSubtitleOverlay(
     renderState: ActiveSubtitleRenderState,
     config: SubtitleStyleConfig,
     previewSampleWhenEmpty: Boolean = false,
+    isPausedEditable: Boolean = false,
+    onTapSubtitleToEdit: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     if (!config.subtitlesEnabled && !previewSampleWhenEmpty) return
@@ -97,7 +100,7 @@ fun ThaiCinemaSubtitleOverlay(
                 verticalArrangement = Arrangement.Bottom
             ) {
                 Column(
-                    modifier = if (useUnifiedFrame) {
+                    modifier = (if (useUnifiedFrame) {
                         Modifier
                             .widthIn(max = 820.dp)
                             .clip(containerShape)
@@ -105,8 +108,8 @@ fun ThaiCinemaSubtitleOverlay(
                                 Color(0xFF080B11).copy(alpha = config.boxOpacity.coerceIn(0.25f, 0.96f))
                             )
                             .border(
-                                width = 0.5.dp,
-                                color = Color.White.copy(alpha = 0.12f),
+                                width = if (isPausedEditable) 1.dp else 0.5.dp,
+                                color = if (isPausedEditable) Color(0x9934D399) else Color.White.copy(alpha = 0.12f),
                                 shape = containerShape
                             )
                             .padding(horizontal = 14.dp, vertical = 5.dp)
@@ -114,7 +117,13 @@ fun ThaiCinemaSubtitleOverlay(
                         Modifier
                             .widthIn(max = 820.dp)
                             .padding(horizontal = 6.dp, vertical = 2.dp)
-                    },
+                    }).then(
+                        if (isPausedEditable && onTapSubtitleToEdit != null) {
+                            Modifier.clickable { onTapSubtitleToEdit() }
+                        } else {
+                            Modifier
+                        }
+                    ),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     if (!primaryText.isNullOrBlank()) {

@@ -20,6 +20,7 @@ import androidx.annotation.OptIn
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
@@ -197,6 +198,8 @@ fun PlayerScreen(
     discoveredGeminiModels: List<String>,
     incomingCompanionSub: ExternalSubtitleRef?,
     seriesProfile: SeriesSubtitleProfile? = null,
+    serverSyncOffsetMs: Long? = null,
+    onSaveServerSyncOffset: (Long, Float) -> Unit = { _, _ -> },
     remoteCommand: PlayerRemoteCommand? = null,
     isTvHardware: Boolean = false,
     isMinimized: Boolean = false,
@@ -322,6 +325,36 @@ fun PlayerScreen(
     val selectedTrackId by subtitleManager.selectedTrackId.collectAsState()
     val isAutoSyncing by subtitleManager.isAutoSyncing.collectAsState()
     val autoSyncFeedback by subtitleManager.autoSyncFeedback.collectAsState()
+    val subCoverageRanges by subtitleManager.coverageRanges.collectAsState()
+    val activeTranslatingRange by subtitleManager.activeTranslatingRange.collectAsState()
+
+    var inlineEditCue by remember { mutableStateOf<com.phyll.filmhub.model.SubtitleCue?>(null) }
+    var inlineEditText by remember { mutableStateOf("") }
+    var aiSubToastMsg by remember { mutableStateOf<String?>(null) }
+    var instant30sBusy by remember { mutableStateOf(false) }
+
+    LaunchedEffect(aiSubToastMsg) {
+        if (aiSubToastMsg != null) {
+            delay(4_500L)
+            aiSubToastMsg = null
+        }
+    }
+
+    // #8 Resilient Foreground Service: keep active rolling AI translation alive when phone locks or backgrounds!
+    LaunchedEffect(renderState.isTranslating, renderState.statusBadge, movie.title) {
+        com.phyll.filmhub.subtitle.SubtitleTranslationService.updateProgress(
+            context = context,
+            title = "ChillFilm AI Sub • ${movie.title}",
+            message = renderState.statusBadge.ifBlank { "Đang dịch phụ đề AI..." },
+            percent = 0,
+            isActive = renderState.isTranslating
+        )
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            com.phyll.filmhub.subtitle.SubtitleTranslationService.updateProgress(context, "", "", 100, false)
+        }
+    }
 
     val isPreFlightBlocking = preFlightState.isPreparing || preFlightState.noSubtitleFound
 
@@ -333,6 +366,7 @@ fun PlayerScreen(
         onUpdateSubtitleConfig {
             it.copy(syncOffsetMs = newOffsetMs, subSpeedScale = newSpeedScale)
         }
+        onSaveServerSyncOffset(newOffsetMs, newSpeedScale)
         val activePlat = subtitleManager.getActiveExternalPlatformName()
         onSaveSeriesProfile { existing ->
             existing.copy(
@@ -344,10 +378,9 @@ fun PlayerScreen(
         }
     }
 
-    // Restore this series/movie's learned (syncOffsetMs, subSpeedScale) across ALL 100 episodes of the same series,
-    // while preventing a completely different movie from inheriting an unrelated offset!
-    LaunchedEffect(movie.id) {
-        val savedOffset = seriesProfile?.syncOffsetMs ?: 0L
+    // Restore per-server / series learned (syncOffsetMs, subSpeedScale) cleanly when switching movie or server!
+    LaunchedEffect(movie.id, episode.id, serverSyncOffsetMs) {
+        val savedOffset = serverSyncOffsetMs ?: seriesProfile?.syncOffsetMs ?: 0L
         val savedScale = seriesProfile?.subSpeedScale ?: 1.0f
         if (subtitleConfig.syncOffsetMs != savedOffset || subtitleConfig.subSpeedScale != savedScale) {
             onUpdateSubtitleConfig {
@@ -1419,7 +1452,15 @@ fun PlayerScreen(
             ThaiCinemaSubtitleOverlay(
                 renderState = renderState,
                 config = subtitleConfig,
-                previewSampleWhenEmpty = showSubtitleDrawer
+                previewSampleWhenEmpty = showSubtitleDrawer,
+                isPausedEditable = !isPlaying && !renderState.primaryThaiText.isNullOrBlank(),
+                onTapSubtitleToEdit = {
+                    val cue = subtitleManager.findActivePrimaryCueAt(positionMs, subtitleConfig)
+                    if (cue != null) {
+                        inlineEditCue = cue
+                        inlineEditText = cue.text
+                    }
+                }
             )
         }
 
@@ -2080,6 +2121,60 @@ fun PlayerScreen(
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     if (movie.contentType != ContentType.LIVE_CHANNEL && durationMs > 0L) {
+                        // #5 Subtitle Coverage Heatmap Bar (Green = translated, Gold = translating now, Red = missing gaps > 22s)
+                        if (subCoverageRanges.isNotEmpty() || activeTranslatingRange != null) {
+                            Canvas(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 42.dp)
+                                    .height(4.dp)
+                                    .clip(RoundedCornerShape(99.dp))
+                                    .background(Color.White.copy(alpha = 0.12f))
+                            ) {
+                                val totalF = durationMs.toFloat().coerceAtLeast(1f)
+                                val w = size.width
+                                val h = size.height
+                                for ((s, e) in subCoverageRanges) {
+                                    val x1 = ((s / totalF).coerceIn(0f, 1f)) * w
+                                    val x2 = ((e / totalF).coerceIn(0f, 1f)) * w
+                                    if (x2 > x1) {
+                                        drawRect(
+                                            color = Color(0xD934D399),
+                                            topLeft = androidx.compose.ui.geometry.Offset(x1, 0f),
+                                            size = androidx.compose.ui.geometry.Size((x2 - x1).coerceAtLeast(2f), h)
+                                        )
+                                    }
+                                }
+                                if (subCoverageRanges.size >= 2) {
+                                    for (i in 0 until subCoverageRanges.lastIndex) {
+                                        val gapS = subCoverageRanges[i].second
+                                        val gapE = subCoverageRanges[i + 1].first
+                                        if (gapE - gapS >= 22_000L) {
+                                            val x1 = ((gapS / totalF).coerceIn(0f, 1f)) * w
+                                            val x2 = ((gapE / totalF).coerceIn(0f, 1f)) * w
+                                            if (x2 > x1) {
+                                                drawRect(
+                                                    color = Color(0xB8EF4444),
+                                                    topLeft = androidx.compose.ui.geometry.Offset(x1, 0f),
+                                                    size = androidx.compose.ui.geometry.Size((x2 - x1).coerceAtLeast(3f), h)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                                activeTranslatingRange?.let { (aS, aE) ->
+                                    val x1 = ((aS / totalF).coerceIn(0f, 1f)) * w
+                                    val x2 = ((aE / totalF).coerceIn(0f, 1f)) * w
+                                    if (x2 > x1) {
+                                        drawRect(
+                                            color = Color(0xFFFBBF24),
+                                            topLeft = androidx.compose.ui.geometry.Offset(x1, 0f),
+                                            size = androidx.compose.ui.geometry.Size((x2 - x1).coerceAtLeast(4f), h)
+                                        )
+                                    }
+                                }
+                            }
+                        }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
@@ -2551,6 +2646,60 @@ fun PlayerScreen(
                 onOpenFastSnapModal = {
                     openFastSnapModal()
                 },
+                onTranslateInstant30s = {
+                    if (!instant30sBusy) {
+                        instant30sBusy = true
+                        aiSubToastMsg = "🎙 Đang ưu tiên dịch nhanh 30s tại ${formatDurationMs(positionMs)}..."
+                        playerScope.launch {
+                            try {
+                                val added = subtitleManager.translateInstant30sAround(
+                                    movie = movie,
+                                    episode = episode,
+                                    centerMs = positionMs,
+                                    config = subtitleConfig,
+                                    geminiApiKey = geminiApiKey
+                                )
+                                aiSubToastMsg = when {
+                                    added > 0 -> "✅ Đã dịch nhanh +$added câu quanh ${formatDurationMs(positionMs)}!"
+                                    added == 0 -> "🔇 Đoạn này không có lời thoại / chỉ có nhạc nền"
+                                    else -> "⚠️ Đăng nhập NKI Cloud hoặc nạp Gemini Key để dịch 30s"
+                                }
+                            } finally {
+                                instant30sBusy = false
+                            }
+                        }
+                    }
+                },
+                onPolishSubtitlesWithAi = {
+                    aiSubToastMsg = "✨ Đang chuốt lời điện ảnh & đồng nhất xưng hô..."
+                    playerScope.launch {
+                        subtitleManager.polishSubtitlesWithAi(
+                            movie = movie,
+                            episode = episode,
+                            config = subtitleConfig,
+                            onProgress = { pct, msg ->
+                                aiSubToastMsg = msg
+                                com.phyll.filmhub.subtitle.SubtitleTranslationService.updateProgress(
+                                    context = context,
+                                    title = "Chuốt lời AI • ${movie.title}",
+                                    message = msg,
+                                    percent = pct,
+                                    isActive = pct in 1..99
+                                )
+                            }
+                        )
+                    }
+                },
+                onEditCurrentCue = {
+                    val cue = subtitleManager.findActivePrimaryCueAt(positionMs, subtitleConfig)
+                    if (cue != null) {
+                        exoPlayer.pause()
+                        inlineEditCue = cue
+                        inlineEditText = cue.text
+                    } else {
+                        aiSubToastMsg = "⚠️ Không có câu phụ đề nào đang hiển thị tại giây này"
+                    }
+                },
                 onCycleNextSubRelease = {
                     applyAndSaveSeriesSync(0L, 1.0f, lockGeminiAudio = false)
                     subtitleManager.cycleToNextExternalTrack(
@@ -2598,6 +2747,175 @@ fun PlayerScreen(
                 onOpenQrUpload = onOpenQrCompanion,
                 onClose = { showSubtitleDrawer = false }
             )
+        }
+
+        // #4/#5/#7 Floating AI Sub feedback pill (Instant 30s / Cinema Polish / Inline Edit)
+        aiSubToastMsg?.let { msg ->
+            if (!isMinimized) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .statusBarsPadding()
+                        .padding(top = 52.dp, start = 16.dp, end = 16.dp)
+                        .clip(RoundedCornerShape(99.dp))
+                        .background(Color(0xE60B1016))
+                        .border(1.dp, EmeraldNeon.copy(alpha = 0.55f), RoundedCornerShape(99.dp))
+                        .padding(horizontal = 14.dp, vertical = 7.dp)
+                ) {
+                    Text(
+                        text = msg,
+                        color = Color(0xFFD1FAE5),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+
+        // #7 Inline Subtitle Editor Modal (tap active subtitle while paused OR pick "✏️ Sửa câu" in Sub Sheet)
+        inlineEditCue?.let { cue ->
+            if (!isMinimized) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.56f))
+                        .pointerInput(Unit) { detectTapGestures { inlineEditCue = null } },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth(if (isTv) 0.56f else 0.90f)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(Color(0xF50D1218))
+                            .border(1.dp, EmeraldNeon.copy(alpha = 0.55f), RoundedCornerShape(16.dp))
+                            .pointerInput(Unit) { detectTapGestures { } }
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "✏️ Sửa câu phụ đề tại ${formatDurationMs(cue.startMs)}",
+                                color = EmeraldNeon,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(30.dp)
+                                    .tvFocusableClickable(
+                                        shape = CircleShape,
+                                        onClick = { inlineEditCue = null }
+                                    )
+                                    .background(Color.White.copy(alpha = 0.1f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Default.Close, contentDescription = "Đóng", tint = TextPrimary, modifier = Modifier.size(16.dp))
+                            }
+                        }
+
+                        OutlinedTextField(
+                            value = inlineEditText,
+                            onValueChange = { inlineEditText = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            maxLines = 3,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = EmeraldNeon,
+                                unfocusedBorderColor = Color.White.copy(alpha = 0.22f),
+                                focusedTextColor = TextPrimary,
+                                unfocusedTextColor = TextPrimary
+                            )
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .tvFocusableClickable(
+                                        shape = RoundedCornerShape(10.dp),
+                                        focusedBorderColor = Color(0xFFFDE68A),
+                                        unfocusedBorderColor = Color(0x66FBBF24),
+                                        onClick = {
+                                            val anchor = cue.startMs
+                                            inlineEditCue = null
+                                            aiSubToastMsg = "🎙 Đang dịch lại 15s quanh ${formatDurationMs(anchor)}..."
+                                            playerScope.launch {
+                                                val added = subtitleManager.translateInstant30sAround(
+                                                    movie = movie,
+                                                    episode = episode,
+                                                    centerMs = anchor,
+                                                    config = subtitleConfig,
+                                                    geminiApiKey = geminiApiKey,
+                                                    beforeMs = 7_500L,
+                                                    afterMs = 8_500L,
+                                                    replaceExisting = true
+                                                )
+                                                aiSubToastMsg = if (added > 0) {
+                                                    "✅ Đã dịch lại +$added câu & lưu Cloud!"
+                                                } else {
+                                                    "⚠️ Không thể dịch lại đoạn này"
+                                                }
+                                            }
+                                        }
+                                    )
+                                    .background(Color(0x26F59E0B))
+                                    .padding(vertical = 10.dp, horizontal = 8.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "🎙 Dịch lại 15s",
+                                    color = Color(0xFFFDE68A),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
+
+                            Box(
+                                modifier = Modifier
+                                    .weight(1.2f)
+                                    .tvFocusableClickable(
+                                        shape = RoundedCornerShape(10.dp),
+                                        focusedBorderColor = Color.White,
+                                        unfocusedBorderColor = EmeraldNeon,
+                                        onClick = {
+                                            val ok = subtitleManager.editSingleCueAndSync(
+                                                movie = movie,
+                                                episode = episode,
+                                                config = subtitleConfig,
+                                                targetCue = cue,
+                                                newText = inlineEditText
+                                            )
+                                            inlineEditCue = null
+                                            aiSubToastMsg = if (ok) {
+                                                "💾 Đã lưu câu phụ đề & đồng bộ NKI Cloud!"
+                                            } else {
+                                                "⚠️ Câu phụ đề không hợp lệ"
+                                            }
+                                        }
+                                    )
+                                    .background(EmeraldPrimary)
+                                    .padding(vertical = 10.dp, horizontal = 8.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "💾 Lưu & Đồng bộ Cloud",
+                                    color = CinemaObsidian,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
